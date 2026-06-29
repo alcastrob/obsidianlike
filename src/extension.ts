@@ -125,8 +125,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     const getFontSize = (): number =>
       vscode.workspace.getConfiguration('editor').get<number>('fontSize', 14);
 
-    const render = (text: string): string => renderMarkdown(text, body =>
-      body.replace(/!\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_m, rawName: string, extra?: string) => {
+    const render = (text: string): string => renderMarkdown(text, body => {
+      // 1. Imágenes embebidas
+      let result = body.replace(/!\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_m, rawName: string, extra?: string) => {
         const fileName = rawName.trim();
         const resolved = resolveAttachmentPath(fileName, document.uri.fsPath);
         if (!resolved) {
@@ -139,15 +140,26 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         if (extra !== undefined && extra.trim() !== '') {
           const trimmed = extra.trim();
           const wm = trimmed.match(/^(\d+)\s*(?:px)?$/i);
-          if (wm) {
-            widthAttr = ` width="${parseInt(wm[1], 10)}"`;
-          } else {
-            captionHtml = `<figcaption>${escapeHtml(trimmed)}</figcaption>`;
-          }
+          if (wm) { widthAttr = ` width="${parseInt(wm[1], 10)}"`; }
+          else { captionHtml = `<figcaption>${escapeHtml(trimmed)}</figcaption>`; }
         }
         return `\n\n<div class="obsidian-embed" data-obsidian="${escapeHtml(orig)}"><img src="${uri}" alt="${escapeHtml(fileName)}"${widthAttr}>${captionHtml}</div>\n\n`;
-      })
-    );
+      });
+      // 2. Wiki links [[Nota]] o [[Nota|Alias]]
+      result = result.replace(/\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_m, name: string, alias?: string) => {
+        const target = name.trim();
+        const display = alias ? alias.trim() : target;
+        return `<span class="wiki-link" data-target="${escapeHtml(target)}">${escapeHtml(display)}</span>`;
+      });
+      return result;
+    });
+
+    // Registrar panel para recibir actualizaciones del índice de notas
+    activePanels.push(webviewPanel);
+    webviewPanel.onDidDispose(() => {
+      const i = activePanels.indexOf(webviewPanel);
+      if (i !== -1) { activePanels.splice(i, 1); }
+    });
 
     webviewPanel.webview.html = this.buildHtml(
       render(document.getText()),
@@ -155,6 +167,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       getFontSize(),
       webviewPanel.webview.cspSource
     );
+
+    // Enviar índice de notas al webview (con pequeño delay para que el HTML cargue)
+    setTimeout(() => {
+      webviewPanel.webview.postMessage({ type: 'note-index', notes: noteIndex });
+    }, 300);
 
     // Resolver pendiente para onWillSaveTextDocument
     let pendingSaveResolve: ((content: string) => void) | undefined;
@@ -375,6 +392,27 @@ body {
   color: var(--vscode-descriptionForeground); font-style: italic;
 }
 .obsidian-embed.raw-mode-img { opacity: 0.75; }
+.wiki-link {
+  color: var(--vscode-textLink-foreground);
+  text-decoration: underline;
+  text-decoration-color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+}
+#note-picker {
+  display: none; position: fixed; z-index: 999;
+  background: var(--vscode-dropdown-background);
+  border: 1px solid var(--vscode-dropdown-border);
+  border-radius: 4px; min-width: 220px; max-width: 440px;
+  max-height: 280px; overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+.np-item {
+  padding: 5px 12px; cursor: pointer; font-size: 0.875em;
+  color: var(--vscode-dropdown-foreground);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.np-item.np-active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.np-item:hover { background: var(--vscode-list-hoverBackground); }
 .attachment-missing {
   color: var(--vscode-errorForeground);
   font-style: italic;
@@ -398,6 +436,8 @@ body {
   transition: transform 0.15s ease, opacity 0.15s;
   line-height: 1;
 }
+strong.raw-mode, b.raw-mode { font-weight: normal; font-style: normal; opacity: 0.75; }
+em.raw-mode, i.raw-mode { font-style: normal; font-weight: normal; opacity: 0.75; }
 .fold-btn:hover { opacity: 0.75; }
 .fold-btn::before { content: '▶'; }
 h1.collapsed > .fold-btn, h2.collapsed > .fold-btn,
@@ -423,6 +463,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
 <body>
 
 
+<div id="note-picker"></div>
 <div id="doc">
   <div id="editor" contenteditable="true" spellcheck="true"></div>
 </div>
@@ -435,8 +476,79 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
   let renderVersion = 0;
   let renderTimer   = null;
   let syncTimer     = null;
-  var currentRawBlock = null;
-  var rawModeChanging = false;
+  var currentRawBlock  = null;
+  var currentRawInline = null;
+  var rawModeChanging  = false;
+
+  /* ── Note picker ── */
+  var noteIndex        = [];
+  var notePickerRange  = null;
+  var npActiveIdx      = 0;
+  var picker = document.getElementById('note-picker');
+
+  function searchNotes(q) {
+    var lq = q.toLowerCase();
+    return noteIndex.filter(function(n) { return n.toLowerCase().includes(lq); }).slice(0, 15);
+  }
+  function getTextBeforeCursor() {
+    var sel = window.getSelection();
+    if (!sel || !sel.rangeCount) { return null; }
+    var rng = sel.getRangeAt(0);
+    if (!rng.collapsed || !editor.contains(rng.startContainer)) { return null; }
+    if (rng.startContainer.nodeType !== 3) { return null; }
+    return { text: rng.startContainer.textContent.slice(0, rng.startOffset),
+             node: rng.startContainer, offset: rng.startOffset };
+  }
+  function closeNotePicker() {
+    picker.style.display = 'none';
+    notePickerRange = null;
+  }
+  function setNpActive(idx) {
+    var items = picker.querySelectorAll('.np-item');
+    npActiveIdx = Math.max(0, Math.min(idx, items.length - 1));
+    items.forEach(function(item, i) {
+      item.classList.toggle('np-active', i === npActiveIdx);
+      if (i === npActiveIdx) { item.scrollIntoView({ block: 'nearest' }); }
+    });
+  }
+  function selectNote(name) {
+    if (!notePickerRange) { return; }
+    notePickerRange.deleteContents();
+    var inserted = document.createTextNode('[[' + name + ']]');
+    notePickerRange.insertNode(inserted);
+    var sel2 = window.getSelection();
+    if (sel2) {
+      var r2 = document.createRange();
+      r2.setStartAfter(inserted); r2.collapse(true);
+      sel2.removeAllRanges(); sel2.addRange(r2);
+    }
+    closeNotePicker();
+    dirty = true;
+    clearTimeout(syncTimer); clearTimeout(renderTimer);
+    var mdSel = domToMarkdown(editor);
+    vscode.postMessage({ type: 'sync', content: mdSel });
+    var rvSel = ++renderVersion;
+    vscode.postMessage({ type: 'render-request', version: rvSel, markdown: mdSel });
+  }
+  function openNotePicker(results, rect) {
+    picker.innerHTML = '';
+    npActiveIdx = 0;
+    results.forEach(function(name, i) {
+      var item = document.createElement('div');
+      item.className = 'np-item' + (i === 0 ? ' np-active' : '');
+      item.textContent = name;
+      item.addEventListener('mousedown', function(e) { e.preventDefault(); selectNote(name); });
+      picker.appendChild(item);
+    });
+    if (results.length === 0) { picker.style.display = 'none'; return; }
+    picker.style.display = 'block';
+    var top = rect.bottom + 4;
+    var left = rect.left;
+    if (top + 280 > window.innerHeight) { top = Math.max(0, rect.top - 4 - picker.offsetHeight); }
+    if (left + 440 > window.innerWidth) { left = Math.max(0, window.innerWidth - 444); }
+    picker.style.top = top + 'px';
+    picker.style.left = left + 'px';
+  }
 
   function getTopLevelBlock(node) {
     if (!node) { return null; }
@@ -505,6 +617,76 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     editor.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(function(h) {
       if (!h.classList.contains('raw-mode')) { addFoldBtn(h); }
     });
+  }
+
+  /* ── Inline live-preview: negrita / cursiva ── */
+  function findInlineEl(node) {
+    var el = (node && node.nodeType === 3) ? node.parentElement : node;
+    while (el && el !== editor) {
+      var t = el.tagName;
+      if (t === 'STRONG' || t === 'B' || t === 'EM' || t === 'I') { return el; }
+      el = el.parentElement;
+    }
+    return null;
+  }
+  function enterInlineRaw(el) {
+    if (!el || el.classList.contains('raw-mode')) { return; }
+    var isB = (el.tagName === 'STRONG' || el.tagName === 'B');
+    var d = isB ? '**' : '*';
+    var inner = el.textContent || '';
+    var sel = window.getSelection();
+    var off = d.length;
+    if (sel && sel.rangeCount) {
+      try {
+        var pr = document.createRange();
+        pr.selectNodeContents(el);
+        pr.setEnd(sel.getRangeAt(0).startContainer, sel.getRangeAt(0).startOffset);
+        off = d.length + pr.toString().length;
+      } catch (_) {}
+    }
+    rawModeChanging = true;
+    el.classList.add('raw-mode');
+    el.textContent = d + inner + d;
+    var tn = el.firstChild;
+    if (tn && sel) {
+      try {
+        var ir = document.createRange();
+        ir.setStart(tn, Math.min(off, tn.textContent.length));
+        ir.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(ir);
+      } catch (_) {}
+    }
+    rawModeChanging = false;
+  }
+  function exitInlineRaw(el) {
+    if (!el || !el.classList.contains('raw-mode')) { return; }
+    rawModeChanging = true;
+    var raw = el.textContent || '';
+    el.classList.remove('raw-mode');
+    var boldM = raw.match(/^\\*\\*([\s\S]*)\\*\\*$/);
+    var emM   = !boldM && raw.match(/^\\*([\s\S]*)\\*$/);
+    if (boldM) {
+      if (el.tagName === 'STRONG' || el.tagName === 'B') {
+        el.textContent = boldM[1];
+      } else {
+        var nb = document.createElement('strong'); nb.textContent = boldM[1];
+        if (el.parentNode) { el.parentNode.replaceChild(nb, el); }
+      }
+    } else if (emM) {
+      if (el.tagName === 'EM' || el.tagName === 'I') {
+        el.textContent = emM[1];
+      } else {
+        var ne = document.createElement('em'); ne.textContent = emM[1];
+        if (el.parentNode) { el.parentNode.replaceChild(ne, el); }
+      }
+    } else if (raw.trim()) {
+      var nt = document.createTextNode(raw);
+      if (el.parentNode) { el.parentNode.replaceChild(nt, el); }
+    } else {
+      if (el.parentNode) { el.parentNode.removeChild(el); }
+    }
+    rawModeChanging = false;
   }
 
   function enterRawMode(el) {
@@ -622,7 +804,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     if (data.type === 'render-response') {
       if (data.version !== renderVersion) { return; }
       var pos = saveCursor(editor);
-      currentRawBlock = null;
+      currentRawBlock = null; currentRawInline = null;
       rawModeChanging = true;
       editor.innerHTML = data.html;
       rawModeChanging = false;
@@ -631,7 +813,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
       restoreCursor(editor, pos);
     } else if (data.type === 'render-after-save') {
       var pos2 = saveCursor(editor);
-      currentRawBlock = null;
+      currentRawBlock = null; currentRawInline = null;
       rawModeChanging = true;
       editor.innerHTML = data.html;
       rawModeChanging = false;
@@ -641,7 +823,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
       dirty = false;
     } else if (data.type === 'reload') {
       var pos3 = saveCursor(editor);
-      currentRawBlock = null;
+      currentRawBlock = null; currentRawInline = null;
       rawModeChanging = true;
       editor.innerHTML = data.html;
       rawModeChanging = false;
@@ -669,6 +851,8 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
       vscode.postMessage({ type: 'sync', content: mdForImg });
       var imgVersion = ++renderVersion;
       vscode.postMessage({ type: 'render-request', version: imgVersion, markdown: mdForImg });
+    } else if (data.type === 'note-index') {
+      noteIndex = data.notes || [];
     }
   });
 
@@ -703,7 +887,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     }, 400);
 
     // 2. Re-render visual (solo para sintaxis de bloque markdown; no en raw mode).
-    if (currentRawBlock) { return; }
+    if (currentRawBlock || currentRawInline) { return; }
     clearTimeout(renderTimer);
     var sel = window.getSelection();
     if (!sel || !sel.rangeCount) { return; }
@@ -714,6 +898,25 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     var offset = range.startOffset;
     var lineStart = txt.lastIndexOf('\\n', offset - 1) + 1;
     var lineText = txt.slice(lineStart, offset);
+
+    // Note picker: comprueba [[ ANTES que los blockTriggers
+    if (!currentRawBlock) {
+      var nb = getTextBeforeCursor();
+      if (nb) {
+        var db = nb.text.lastIndexOf('[[');
+        if (db !== -1 && (db === 0 || nb.text[db - 1] !== '!') && nb.text.indexOf(']]', db) === -1) {
+          notePickerRange = document.createRange();
+          notePickerRange.setStart(nb.node, db);
+          notePickerRange.setEnd(nb.node, nb.offset);
+          var nresults = searchNotes(nb.text.slice(db + 2));
+          var nsel2 = window.getSelection();
+          if (nsel2 && nsel2.rangeCount) {
+            openNotePicker(nresults, nsel2.getRangeAt(0).getBoundingClientRect());
+          }
+          return; // suprimir re-render mientras el picker está abierto
+        } else { closeNotePicker(); }
+      } else { closeNotePicker(); }
+    }
 
     var blockTriggers = [
       /^#{1,6} /,
@@ -735,6 +938,16 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
 
   /* ── Atajos de teclado ── */
   document.addEventListener('keydown', function (e) {
+    // Note picker: navegar / seleccionar / cerrar
+    if (picker.style.display !== 'none') {
+      if (e.key === 'Escape')    { e.preventDefault(); closeNotePicker(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); setNpActive(npActiveIdx + 1); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setNpActive(npActiveIdx - 1); return; }
+      if (e.key === 'Enter') {
+        var items = picker.querySelectorAll('.np-item');
+        if (items[npActiveIdx]) { e.preventDefault(); selectNote(items[npActiveIdx].textContent); return; }
+      }
+    }
     var mod = e.ctrlKey || e.metaKey;
     // Ctrl+S: e.preventDefault() evita el diálogo de guardado del navegador.
     // El guardado real lo gestiona VS Code vía onWillSaveTextDocument.
@@ -802,15 +1015,27 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     if (rawModeChanging) { return; }
     var sel = window.getSelection();
     if (!sel || !editor.contains(sel.anchorNode)) {
-      if (currentRawBlock) { exitRawMode(currentRawBlock); currentRawBlock = null; }
+      if (picker.style.display !== 'none') { closeNotePicker(); }
+      if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
+      if (currentRawBlock)  { exitRawMode(currentRawBlock);    currentRawBlock  = null; }
       return;
     }
-    // ── Live-preview raw mode switching ──
+    // ── Block-level live-preview ──
     var block = getTopLevelBlock(sel.anchorNode);
     if (block !== currentRawBlock) {
-      if (currentRawBlock) { exitRawMode(currentRawBlock); }
+      if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
+      if (currentRawBlock)  { exitRawMode(currentRawBlock); }
       currentRawBlock = (isHeading(block) || hasObsidianImage(block)) ? block : null;
       if (currentRawBlock) { enterRawMode(currentRawBlock); }
+    }
+    // ── Inline live-preview (negrita / cursiva) ──
+    if (!currentRawBlock) {
+      var inlineEl = findInlineEl(sel.anchorNode);
+      if (inlineEl !== currentRawInline) {
+        if (currentRawInline) { exitInlineRaw(currentRawInline); }
+        currentRawInline = inlineEl;
+        if (currentRawInline) { enterInlineRaw(currentRawInline); }
+      }
     }
   });
 
@@ -855,10 +1080,20 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
             return (node.getAttribute('data-obsidian') || '') + '\\n\\n';
           }
           var c2 = kids().trim(); return c2 ? c2 + '\\n\\n' : '\\n';
-        case 'SPAN': return kids();
+        case 'SPAN':
+          if (node.classList && node.classList.contains('wiki-link')) {
+            var wt = node.getAttribute('data-target') || '';
+            var wd = node.textContent || '';
+            return wd === wt ? '[[' + wt + ']]' : '[[' + wt + '|' + wd + ']]';
+          }
+          return kids();
         case 'BR':   return '\\n';
-        case 'STRONG': case 'B': return '**' + kids() + '**';
-        case 'EM':   case 'I':   return '*'  + kids() + '*';
+        case 'STRONG': case 'B':
+          if (node.classList && node.classList.contains('raw-mode')) { return node.textContent || ''; }
+          return '**' + kids() + '**';
+        case 'EM': case 'I':
+          if (node.classList && node.classList.contains('raw-mode')) { return node.textContent || ''; }
+          return '*' + kids() + '*';
         case 'DEL':  case 'S':   return '~~' + kids() + '~~';
         case 'CODE': return '\`' + (node.textContent || '') + '\`';
         case 'A':    return '[' + kids() + '](' + (node.getAttribute('href') || '') + ')';
@@ -922,8 +1157,29 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
   }
 }
 
+/* ── Índice de notas (compartido entre todos los paneles) ── */
+let noteIndex: string[] = [];
+const activePanels: vscode.WebviewPanel[] = [];
+
+async function buildNoteIndex(): Promise<void> {
+  try {
+    const files = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
+    noteIndex = files.map(f => path.basename(f.fsPath, '.md'));
+  } catch { noteIndex = []; }
+  activePanels.forEach(p => {
+    try { p.webview.postMessage({ type: 'note-index', notes: noteIndex }); } catch {}
+  });
+}
+
 export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel('Vault Tool');
+
+  // Construir índice de notas y mantenerlo actualizado
+  buildNoteIndex();
+  const mdWatcher = vscode.workspace.createFileSystemWatcher('**/*.md');
+  mdWatcher.onDidCreate(() => buildNoteIndex());
+  mdWatcher.onDidDelete(() => buildNoteIndex());
+  context.subscriptions.push(mdWatcher);
 
   context.subscriptions.push(
     vscode.window.registerCustomEditorProvider(
