@@ -25,20 +25,84 @@ function stripFrontmatter(text: string): { frontmatter: string; body: string } {
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function renderMarkdown(text: string): string {
+function addHeadingDataMd(markdownBody: string, html: string): string {
+  const headings: string[] = [];
+  markdownBody.replace(/^(#{1,6} .+)$/gm, (line) => { headings.push(line.trim()); return line; });
+  if (headings.length === 0) { return html; }
+  let i = 0;
+  return html.replace(/<h([1-6])>/gi, (_, d) => {
+    const md = i < headings.length ? escapeHtml(headings[i++]) : '';
+    return `<h${d} data-md="${md}">`;
+  });
+}
+
+function renderMarkdown(text: string, preprocessBody?: (body: string) => string): string {
   try {
     const { frontmatter, body } = stripFrontmatter(text);
-    const html = marked.parse(body) as string;
+    const processedBody = preprocessBody ? preprocessBody(body) : body;
+    const html = marked.parse(processedBody) as string;
     const fmHtml = frontmatter
       ? `<div class="frontmatter"><pre>${escapeHtml(frontmatter)}</pre></div>`
       : '';
-    return fmHtml + html;
+    return fmHtml + addHeadingDataMd(body, html);
   } catch {
     return `<pre>${escapeHtml(text)}</pre>`;
   }
+}
+
+function getSaveDir(docFsPath: string): string {
+  const cfg = vscode.workspace.getConfiguration('vaultTool');
+  const location = cfg.get<string>('attachmentsLocation', 'vault');
+  const folder = cfg.get<string>('attachmentsFolder', 'attachments');
+  const docDir = path.dirname(docFsPath);
+  const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? docDir;
+  switch (location) {
+    case 'samefolder':     return docDir;
+    case 'subfolder':      return path.join(docDir, folder);
+    case 'specificfolder':
+      return path.isAbsolute(folder) ? folder : path.join(vaultRoot, folder);
+    default:               return vaultRoot;
+  }
+}
+
+function resolveAttachmentPath(fileName: string, docFsPath: string): string | undefined {
+  const cfg = vscode.workspace.getConfiguration('vaultTool');
+  const location = cfg.get<string>('attachmentsLocation', 'vault');
+  const folder = cfg.get<string>('attachmentsFolder', 'attachments');
+  const docDir = path.dirname(docFsPath);
+  const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? docDir;
+
+  let candidate: string;
+  switch (location) {
+    case 'samefolder':     candidate = path.join(docDir, fileName); break;
+    case 'subfolder':      candidate = path.join(docDir, folder, fileName); break;
+    case 'specificfolder':
+      candidate = path.isAbsolute(folder)
+        ? path.join(folder, fileName)
+        : path.join(vaultRoot, folder, fileName);
+      break;
+    default:               candidate = path.join(vaultRoot, fileName); break;
+  }
+  return fs.existsSync(candidate) ? candidate : undefined;
+}
+
+function getAttachmentRoots(docUri: vscode.Uri): vscode.Uri[] {
+  const cfg = vscode.workspace.getConfiguration('vaultTool');
+  const location = cfg.get<string>('attachmentsLocation', 'vault');
+  const folder = cfg.get<string>('attachmentsFolder', 'attachments');
+  const docDir = path.dirname(docUri.fsPath);
+  const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? docDir;
+
+  const roots: string[] = [vaultRoot, docDir];
+  if (location === 'subfolder') {
+    roots.push(path.join(docDir, folder));
+  } else if (location === 'specificfolder') {
+    roots.push(path.isAbsolute(folder) ? folder : path.join(vaultRoot, folder));
+  }
+  return [...new Set(roots)].map(r => vscode.Uri.file(r));
 }
 
 class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
@@ -49,17 +113,47 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken
   ): void {
-    webviewPanel.webview.options = { enableScripts: true };
+    webviewPanel.webview.options = {
+      enableScripts: true,
+      localResourceRoots: getAttachmentRoots(document.uri)
+    };
 
     const getFont = (): string =>
       vscode.workspace.getConfiguration('vaultTool').get<string>('markdownFont', '').trim() ||
       'var(--vscode-editor-font-family)';
 
-    // Incrustar el contenido inicial directamente en el HTML.
-    // Así no depende de postMessage ni de timing del webview.
+    const getFontSize = (): number =>
+      vscode.workspace.getConfiguration('editor').get<number>('fontSize', 14);
+
+    const render = (text: string): string => renderMarkdown(text, body =>
+      body.replace(/!\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_m, rawName: string, extra?: string) => {
+        const fileName = rawName.trim();
+        const resolved = resolveAttachmentPath(fileName, document.uri.fsPath);
+        if (!resolved) {
+          return `<span class="attachment-missing">[${escapeHtml(fileName)}]</span>`;
+        }
+        const uri = webviewPanel.webview.asWebviewUri(vscode.Uri.file(resolved));
+        const orig = `![[${fileName}${extra !== undefined ? '|' + extra : ''}]]`;
+        let widthAttr = '';
+        let captionHtml = '';
+        if (extra !== undefined && extra.trim() !== '') {
+          const trimmed = extra.trim();
+          const wm = trimmed.match(/^(\d+)\s*(?:px)?$/i);
+          if (wm) {
+            widthAttr = ` width="${parseInt(wm[1], 10)}"`;
+          } else {
+            captionHtml = `<figcaption>${escapeHtml(trimmed)}</figcaption>`;
+          }
+        }
+        return `\n\n<div class="obsidian-embed" data-obsidian="${escapeHtml(orig)}"><img src="${uri}" alt="${escapeHtml(fileName)}"${widthAttr}>${captionHtml}</div>\n\n`;
+      })
+    );
+
     webviewPanel.webview.html = this.buildHtml(
-      renderMarkdown(document.getText()),
-      getFont()
+      render(document.getText()),
+      getFont(),
+      getFontSize(),
+      webviewPanel.webview.cspSource
     );
 
     // Resolver pendiente para onWillSaveTextDocument
@@ -82,8 +176,25 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
     const subs: vscode.Disposable[] = [
       vscode.workspace.onDidChangeConfiguration(e => {
-        if (e.affectsConfiguration('vaultTool.markdownFont')) {
-          webviewPanel.webview.postMessage({ type: 'font-update', font: getFont() });
+        if (e.affectsConfiguration('vaultTool.markdownFont') ||
+            e.affectsConfiguration('editor.fontSize')) {
+          webviewPanel.webview.postMessage({
+            type: 'font-update',
+            font: getFont(),
+            fontSize: getFontSize() + 'px'
+          });
+        }
+        if (e.affectsConfiguration('vaultTool.attachmentsLocation') ||
+            e.affectsConfiguration('vaultTool.attachmentsFolder')) {
+          webviewPanel.webview.options = {
+            enableScripts: true,
+            localResourceRoots: getAttachmentRoots(document.uri)
+          };
+          webviewPanel.webview.postMessage({
+            type: 'render-after-save',
+            html: render(document.getText()),
+            font: getFont()
+          });
         }
       }),
 
@@ -91,14 +202,12 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       vscode.workspace.onDidChangeTextDocument(e => {
         if (e.document.uri.toString() !== document.uri.toString()) { return; }
         const newText = e.document.getText();
-        // Normalizar CRLF: VS Code en Windows puede convertir \n→\r\n en el modelo.
         const normalize = (s: string) => s.replace(/\r\n/g, '\n');
         if (normalize(newText) === normalize(lastOwnContent)) { return; }
-        // Cambio externo: recargar el webview
         lastOwnContent = newText;
         webviewPanel.webview.postMessage({
           type: 'reload',
-          html: renderMarkdown(newText),
+          html: render(newText),
           font: getFont()
         });
       }),
@@ -134,12 +243,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         e.waitUntil(contentPromise);
       }),
 
-      // Después de guardar: re-renderizar el webview con el contenido en disco
       vscode.workspace.onDidSaveTextDocument(doc => {
         if (doc.uri.toString() !== document.uri.toString()) { return; }
         webviewPanel.webview.postMessage({
           type: 'render-after-save',
-          html: renderMarkdown(doc.getText()),
+          html: render(doc.getText()),
           font: getFont()
         });
       }),
@@ -166,9 +274,24 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           webviewPanel.webview.postMessage({
             type: 'render-response',
             version: msg.version,
-            html: renderMarkdown(msg.markdown),
+            html: render(msg.markdown),
             font: getFont()
           });
+
+        } else if (msg.type === 'paste-image') {
+          try {
+            const base64 = (msg.data as string).replace(/^data:image\/[a-z]+;base64,/, '');
+            const buffer = Buffer.from(base64, 'base64');
+            const now = new Date();
+            const p2 = (n: number) => String(n).padStart(2, '0');
+            const filename = `Pasted image ${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}.png`;
+            const saveDir = getSaveDir(document.uri.fsPath);
+            if (!fs.existsSync(saveDir)) { fs.mkdirSync(saveDir, { recursive: true }); }
+            fs.writeFileSync(path.join(saveDir, filename), buffer);
+            webviewPanel.webview.postMessage({ type: 'image-pasted', filename });
+          } catch (err) {
+            vscode.window.showErrorMessage(`Error al guardar imagen pegada: ${err}`);
+          }
         }
       })
     ];
@@ -176,18 +299,17 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     webviewPanel.onDidDispose(() => subs.forEach(s => s.dispose()));
   }
 
-  private buildHtml(initialHtml: string, font: string): string {
-    // JSON.stringify escapa comillas, barras y caracteres de control.
-    // Adicionalmente escapa </script> para que no rompa el bloque <script>.
-    const H = JSON.stringify(initialHtml).replace(/<\/script>/gi, '<\\/script>');
-    const F = JSON.stringify(font);
+  private buildHtml(initialHtml: string, font: string, fontSize: number, cspSource: string): string {
+    const H  = JSON.stringify(initialHtml).replace(/<\/script>/gi, '<\\/script>');
+    const F  = JSON.stringify(font);
+    const FS = JSON.stringify(fontSize + 'px');
 
     return /* html */`<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-  content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src ${cspSource} data: blob:;">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -195,27 +317,10 @@ body {
   background: var(--vscode-editor-background);
   color: var(--vscode-editor-foreground);
   font-family: var(--md-font, var(--vscode-editor-font-family));
-  font-size: 15px;
+  font-size: var(--md-font-size, 15px);
   line-height: 1.7;
 }
 
-/* ── Toolbar ── */
-#toolbar {
-  position: sticky; top: 0; z-index: 10;
-  display: flex; flex-wrap: wrap; gap: 2px; padding: 4px 8px;
-  background: var(--vscode-editorGroupHeader-tabsBackground);
-  border-bottom: 1px solid var(--vscode-panel-border);
-  user-select: none;
-}
-.tb-btn {
-  background: transparent;
-  color: var(--vscode-tab-inactiveForeground);
-  border: 1px solid transparent;
-  padding: 2px 8px; border-radius: 3px; cursor: pointer;
-  font-size: 12px; font-family: var(--vscode-font-family); line-height: 1.6;
-}
-.tb-btn:hover { background: var(--vscode-toolbar-hoverBackground); }
-.tb-sep { width: 1px; background: var(--vscode-panel-border); margin: 3px 4px; align-self: stretch; }
 
 /* ── Área de documento ── */
 #doc { max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem 6rem; }
@@ -226,8 +331,8 @@ body {
 /* ── Estilos markdown ── */
 #editor h1,#editor h2,#editor h3,#editor h4,#editor h5,#editor h6
   { line-height:1.3; margin:1.5em 0 0.5em; font-family:var(--md-font,var(--vscode-editor-font-family)); }
-#editor h1 { font-size:2em;   border-bottom:1px solid var(--vscode-panel-border); padding-bottom:.3em; }
-#editor h2 { font-size:1.5em; border-bottom:1px solid var(--vscode-panel-border); padding-bottom:.2em; }
+#editor h1 { font-size:2em; }
+#editor h2 { font-size:1.5em; }
 #editor h3 { font-size:1.25em; }
 #editor h4 { font-size:1em; font-weight:600; }
 #editor p  { margin-bottom:1em; }
@@ -263,32 +368,60 @@ body {
   font-family:var(--vscode-editor-font-family); font-size:.8em; opacity:.75;
 }
 .frontmatter pre { white-space:pre-wrap; }
+.obsidian-embed { display: block; margin: 0.5em 0; }
+.obsidian-embed img { max-width: 100%; display: block; }
+.obsidian-embed figcaption {
+  text-align: center; font-size: 0.85em; margin-top: 0.3em;
+  color: var(--vscode-descriptionForeground); font-style: italic;
+}
+.obsidian-embed.raw-mode-img { opacity: 0.75; }
+.attachment-missing {
+  color: var(--vscode-errorForeground);
+  font-style: italic;
+  font-size: .9em;
+}
+/* ── Colapso de secciones ── */
+.fold-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1em;
+  margin-right: 0.2em;
+  cursor: pointer;
+  user-select: none;
+  font-style: normal;
+  font-weight: 400;
+  font-size: 0.55em;
+  vertical-align: middle;
+  opacity: 0.3;
+  transform: rotate(90deg);
+  transition: transform 0.15s ease, opacity 0.15s;
+  line-height: 1;
+}
+.fold-btn:hover { opacity: 0.75; }
+.fold-btn::before { content: '▶'; }
+h1.collapsed > .fold-btn, h2.collapsed > .fold-btn,
+h3.collapsed > .fold-btn, h4.collapsed > .fold-btn,
+h5.collapsed > .fold-btn, h6.collapsed > .fold-btn {
+  transform: rotate(0deg);
+}
+
+/* ── Live preview: heading en modo edición ── */
+h1.raw-mode, h2.raw-mode, h3.raw-mode,
+h4.raw-mode, h5.raw-mode, h6.raw-mode {
+  font-size: var(--md-font-size, 15px);
+  font-weight: 400;
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 0.2em;
+  line-height: inherit;
+  color: var(--vscode-editor-foreground);
+  opacity: 0.75;
+}
 </style>
 </head>
 <body>
 
-<div id="toolbar">
-  <select id="blockType" class="tb-btn" title="Tipo de bloque" onchange="applyBlockType(this.value)">
-    <option value="p">Párrafo</option>
-    <option value="h1">Título 1</option>
-    <option value="h2">Título 2</option>
-    <option value="h3">Título 3</option>
-    <option value="h4">Título 4</option>
-    <option value="pre">Código</option>
-  </select>
-  <div class="tb-sep"></div>
-  <button class="tb-btn" title="Negrita (Ctrl+B)"    onclick="fmt('bold')"><b>N</b></button>
-  <button class="tb-btn" title="Cursiva (Ctrl+I)"    onclick="fmt('italic')"><i>C</i></button>
-  <button class="tb-btn" title="Tachado"              onclick="fmt('strikeThrough')"><s>T</s></button>
-  <button class="tb-btn" title="Código en línea"      onclick="fmtCode()"><code style="font-size:11px">&lt;/&gt;</code></button>
-  <div class="tb-sep"></div>
-  <button class="tb-btn" title="Lista"                onclick="fmt('insertUnorderedList')">• Lista</button>
-  <button class="tb-btn" title="Lista numerada"       onclick="fmt('insertOrderedList')">1. Lista</button>
-  <button class="tb-btn" title="Cita"                 onclick="fmt('formatBlock','blockquote')">❝</button>
-  <div class="tb-sep"></div>
-  <button class="tb-btn" title="Enlace (Ctrl+K)"      onclick="fmtLink()">🔗</button>
-  <button class="tb-btn" title="Línea horizontal"     onclick="insertHr()">—</button>
-</div>
 
 <div id="doc">
   <div id="editor" contenteditable="true" spellcheck="true"></div>
@@ -302,10 +435,186 @@ body {
   let renderVersion = 0;
   let renderTimer   = null;
   let syncTimer     = null;
+  var currentRawBlock = null;
+  var rawModeChanging = false;
+
+  function getTopLevelBlock(node) {
+    if (!node) { return null; }
+    var el = (node.nodeType === 3) ? node.parentElement : node;
+    while (el && el.parentElement !== editor) { el = el.parentElement; }
+    return (el && el !== editor) ? el : null;
+  }
+  function isHeading(el) {
+    return el && /^H[1-6]$/.test(el.tagName);
+  }
+  function hasObsidianImage(el) {
+    if (!el) { return false; }
+    if (el.classList && el.classList.contains('obsidian-embed')) { return true; }
+    return !!(el.querySelector && el.querySelector('img[data-obsidian]'));
+  }
+  function collectParagraphMd(el) {
+    var parts = [];
+    el.childNodes.forEach(function(child) {
+      if (child.nodeType === 3) {
+        parts.push(child.textContent || '');
+      } else if (child.nodeType === 1) {
+        var t2 = child.tagName ? child.tagName.toUpperCase() : '';
+        if (t2 === 'IMG') {
+          parts.push(child.getAttribute('data-obsidian') ||
+            ('![' + (child.getAttribute('alt') || '') + '](' + (child.getAttribute('src') || '') + ')'));
+        } else if (t2 === 'BR') {
+          parts.push('\\n');
+        } else if (t2 === 'STRONG' || t2 === 'B') {
+          parts.push('**' + (child.textContent || '') + '**');
+        } else if (t2 === 'EM' || t2 === 'I') {
+          parts.push('*' + (child.textContent || '') + '*');
+        } else if (t2 === 'CODE') {
+          parts.push('\`' + (child.textContent || '') + '\`');
+        } else if (t2 === 'A') {
+          parts.push('[' + (child.textContent || '') + '](' + (child.getAttribute('href') || '') + ')');
+        } else {
+          parts.push(child.textContent || '');
+        }
+      }
+    });
+    return parts.join('').trim();
+  }
+
+  /* ── Colapso de secciones ── */
+  function toggleCollapse(headingEl) {
+    var depth = parseInt(headingEl.tagName[1]);
+    var toCollapse = !headingEl.classList.contains('collapsed');
+    headingEl.classList.toggle('collapsed', toCollapse);
+    var sib = headingEl.nextElementSibling;
+    while (sib) {
+      if (/^H[1-6]$/.test(sib.tagName) && parseInt(sib.tagName[1]) <= depth) { break; }
+      sib.style.display = toCollapse ? 'none' : '';
+      sib = sib.nextElementSibling;
+    }
+  }
+  function addFoldBtn(headingEl) {
+    if (headingEl.querySelector('.fold-btn')) { return; }
+    var btn = document.createElement('span');
+    btn.className = 'fold-btn';
+    btn.setAttribute('contenteditable', 'false');
+    btn.addEventListener('mousedown', function(e) { e.preventDefault(); e.stopPropagation(); });
+    btn.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); toggleCollapse(headingEl); });
+    headingEl.insertBefore(btn, headingEl.firstChild);
+  }
+  function initFoldBtns() {
+    editor.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(function(h) {
+      if (!h.classList.contains('raw-mode')) { addFoldBtn(h); }
+    });
+  }
+
+  function enterRawMode(el) {
+    if (!el || el.classList.contains('raw-mode')) { return; }
+    if (isHeading(el)) {
+      var depth = parseInt(el.tagName[1]);
+      var md = el.getAttribute('data-md') || ('#'.repeat(depth) + ' ' + (el.textContent || ''));
+      var sel = window.getSelection();
+      var cursorOff = depth + 1;
+      if (sel && sel.rangeCount) {
+        try {
+          var preR = document.createRange();
+          preR.selectNodeContents(el);
+          preR.setEnd(sel.getRangeAt(0).startContainer, sel.getRangeAt(0).startOffset);
+          cursorOff = (depth + 1) + preR.toString().length;
+        } catch (_) {}
+      }
+      rawModeChanging = true;
+      el.classList.add('raw-mode');
+      el.textContent = md;
+      var tn = el.firstChild;
+      if (tn && sel) {
+        try {
+          var rr = document.createRange();
+          rr.setStart(tn, Math.min(cursorOff, tn.textContent.length));
+          rr.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(rr);
+        } catch (_) {}
+      }
+      rawModeChanging = false;
+    } else if (hasObsidianImage(el)) {
+      var imd = el.getAttribute('data-obsidian') || collectParagraphMd(el);
+      el.setAttribute('data-cache-html', el.innerHTML);
+      el.setAttribute('data-cache-md', imd);
+      var isel = window.getSelection();
+      rawModeChanging = true;
+      el.classList.add('raw-mode');
+      el.classList.add('raw-mode-img');
+      el.textContent = imd;
+      var itn = el.firstChild;
+      if (itn && isel) {
+        try {
+          var irr = document.createRange();
+          irr.setStart(itn, itn.textContent.length);
+          irr.collapse(true);
+          isel.removeAllRanges();
+          isel.addRange(irr);
+        } catch (_) {}
+      }
+      rawModeChanging = false;
+    }
+  }
+  function exitRawMode(el) {
+    if (!el || !el.classList.contains('raw-mode')) { return; }
+    if (el.classList.contains('raw-mode-img')) {
+      rawModeChanging = true;
+      var currentMdImg = (el.textContent || '').trim();
+      var cachedHtml   = el.getAttribute('data-cache-html') || '';
+      var cachedMdImg  = el.getAttribute('data-cache-md')  || '';
+      el.removeAttribute('data-cache-html');
+      el.removeAttribute('data-cache-md');
+      el.classList.remove('raw-mode');
+      el.classList.remove('raw-mode-img');
+      el.innerHTML = cachedHtml;
+      rawModeChanging = false;
+      if (currentMdImg !== cachedMdImg) {
+        el.setAttribute('data-obsidian', currentMdImg);
+        var content = domToMarkdown(editor);
+        vscode.postMessage({ type: 'sync', content: content });
+        var rv = ++renderVersion;
+        vscode.postMessage({ type: 'render-request', version: rv, markdown: content });
+      }
+      return;
+    }
+    rawModeChanging = true;
+    var md = (el.textContent || '').trimEnd();
+    var match = md.match(/^(#{1,6})\\s+([\\s\\S]*)$/);
+    if (match) {
+      var newDepth = match[1].length;
+      var text = match[2].trimEnd();
+      var newMdStr = match[1] + ' ' + text;
+      if (parseInt(el.tagName[1]) !== newDepth) {
+        var newH = document.createElement('h' + newDepth);
+        newH.setAttribute('data-md', newMdStr);
+        newH.textContent = text;
+        el.parentNode.replaceChild(newH, el);
+        addFoldBtn(newH);
+      } else {
+        el.setAttribute('data-md', newMdStr);
+        el.classList.remove('raw-mode');
+        el.textContent = text;
+        addFoldBtn(el);
+      }
+    } else if (md.trim()) {
+      var newP = document.createElement('p');
+      newP.textContent = md;
+      el.parentNode.replaceChild(newP, el);
+    } else {
+      el.classList.remove('raw-mode');
+      addFoldBtn(el);
+    }
+    rawModeChanging = false;
+  }
 
   /* ── Contenido inicial incrustado directamente ── */
   editor.innerHTML = ${H};
   document.body.style.setProperty('--md-font', ${F});
+  document.body.style.setProperty('--md-font-size', ${FS});
+  initFoldBtns();
 
   /* ── Mensajes desde la extensión ── */
   window.addEventListener('message', function (ev) {
@@ -313,19 +622,30 @@ body {
     if (data.type === 'render-response') {
       if (data.version !== renderVersion) { return; }
       var pos = saveCursor(editor);
+      currentRawBlock = null;
+      rawModeChanging = true;
       editor.innerHTML = data.html;
+      rawModeChanging = false;
+      initFoldBtns();
       document.body.style.setProperty('--md-font', data.font);
       restoreCursor(editor, pos);
     } else if (data.type === 'render-after-save') {
       var pos2 = saveCursor(editor);
+      currentRawBlock = null;
+      rawModeChanging = true;
       editor.innerHTML = data.html;
+      rawModeChanging = false;
+      initFoldBtns();
       document.body.style.setProperty('--md-font', data.font);
       restoreCursor(editor, pos2);
       dirty = false;
     } else if (data.type === 'reload') {
-      // Cambio externo al archivo: recargar sin tocar el historial de edición
       var pos3 = saveCursor(editor);
+      currentRawBlock = null;
+      rawModeChanging = true;
       editor.innerHTML = data.html;
+      rawModeChanging = false;
+      initFoldBtns();
       document.body.style.setProperty('--md-font', data.font);
       restoreCursor(editor, pos3);
       dirty = false;
@@ -338,6 +658,36 @@ body {
       vscode.postMessage({ type: 'sync', content: domToMarkdown(editor) });
     } else if (data.type === 'font-update') {
       document.body.style.setProperty('--md-font', data.font);
+      if (data.fontSize) { document.body.style.setProperty('--md-font-size', data.fontSize); }
+    } else if (data.type === 'image-pasted') {
+      var embed = '![[' + data.filename + ']]';
+      document.execCommand('insertText', false, embed);
+      dirty = true;
+      clearTimeout(syncTimer);
+      clearTimeout(renderTimer);
+      var mdForImg = domToMarkdown(editor);
+      vscode.postMessage({ type: 'sync', content: mdForImg });
+      var imgVersion = ++renderVersion;
+      vscode.postMessage({ type: 'render-request', version: imgVersion, markdown: mdForImg });
+    }
+  });
+
+  /* ── Pegar imágenes desde el portapapeles ── */
+  editor.addEventListener('paste', function(e) {
+    var items = e.clipboardData && e.clipboardData.items;
+    if (!items) { return; }
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        e.preventDefault();
+        var file = items[i].getAsFile();
+        if (!file) { continue; }
+        var reader = new FileReader();
+        reader.onload = function(ev) {
+          vscode.postMessage({ type: 'paste-image', data: ev.target.result });
+        };
+        reader.readAsDataURL(file);
+        return;
+      }
     }
   });
 
@@ -352,7 +702,8 @@ body {
       vscode.postMessage({ type: 'sync', content: domToMarkdown(editor) });
     }, 400);
 
-    // 2. Re-render visual (solo para sintaxis de bloque markdown).
+    // 2. Re-render visual (solo para sintaxis de bloque markdown; no en raw mode).
+    if (currentRawBlock) { return; }
     clearTimeout(renderTimer);
     var sel = window.getSelection();
     if (!sel || !sel.rangeCount) { return; }
@@ -371,6 +722,7 @@ body {
       /^> /,
       /^---$/,
       /^\`\`\`/,
+      /^!\\[\\[/,
     ];
 
     if (!blockTriggers.some(function (r) { return r.test(lineText); })) { return; }
@@ -447,14 +799,18 @@ body {
   window.insertHr = function () { editor.focus(); document.execCommand('insertHorizontalRule'); };
 
   document.addEventListener('selectionchange', function () {
+    if (rawModeChanging) { return; }
     var sel = window.getSelection();
-    if (!sel || !editor.contains(sel.anchorNode)) { return; }
-    var node = sel.anchorNode;
-    var select = document.getElementById('blockType');
-    while (node && node !== editor) {
-      var tag = (node.nodeName || '').toLowerCase();
-      if (select && ['h1','h2','h3','h4','p','pre'].includes(tag)) { select.value = tag; break; }
-      node = node.parentNode;
+    if (!sel || !editor.contains(sel.anchorNode)) {
+      if (currentRawBlock) { exitRawMode(currentRawBlock); currentRawBlock = null; }
+      return;
+    }
+    // ── Live-preview raw mode switching ──
+    var block = getTopLevelBlock(sel.anchorNode);
+    if (block !== currentRawBlock) {
+      if (currentRawBlock) { exitRawMode(currentRawBlock); }
+      currentRawBlock = (isHeading(block) || hasObsidianImage(block)) ? block : null;
+      if (currentRawBlock) { enterRawMode(currentRawBlock); }
     }
   });
 
@@ -478,6 +834,10 @@ body {
         var text   = (codeEl ? codeEl.textContent : node.textContent) || '';
         return '\`\`\`' + lang + '\\n' + text.trim() + '\\n\`\`\`\\n\\n';
       }
+      // Headings en raw-mode: el textContent ya es el markdown fuente
+      if (/^H[1-6]$/.test(tag) && node.classList && node.classList.contains('raw-mode')) {
+        return (node.textContent || '').trimEnd() + '\\n\\n';
+      }
       switch (tag) {
         case 'H1': return '# '      + kids().trim() + '\\n\\n';
         case 'H2': return '## '     + kids().trim() + '\\n\\n';
@@ -488,6 +848,12 @@ body {
         case 'P':  { var c = kids().trim(); return c ? c + '\\n\\n' : ''; }
         case 'DIV':
           if (node === root) { return kids(); }
+          if (node.classList && node.classList.contains('obsidian-embed')) {
+            if (node.classList.contains('raw-mode-img')) {
+              return (node.textContent || '').trim() + '\\n\\n';
+            }
+            return (node.getAttribute('data-obsidian') || '') + '\\n\\n';
+          }
           var c2 = kids().trim(); return c2 ? c2 + '\\n\\n' : '\\n';
         case 'SPAN': return kids();
         case 'BR':   return '\\n';
@@ -496,7 +862,11 @@ body {
         case 'DEL':  case 'S':   return '~~' + kids() + '~~';
         case 'CODE': return '\`' + (node.textContent || '') + '\`';
         case 'A':    return '[' + kids() + '](' + (node.getAttribute('href') || '') + ')';
-        case 'IMG':  return '![' + (node.getAttribute('alt')||'') + '](' + (node.getAttribute('src')||'') + ')';
+        case 'IMG': {
+          var obsidian = node.getAttribute('data-obsidian');
+          if (obsidian) { return obsidian; }
+          return '![' + (node.getAttribute('alt')||'') + '](' + (node.getAttribute('src')||'') + ')';
+        }
         case 'UL': {
           var out = Array.from(node.children).map(function(li){ return serLi(li, ctx.depth||0, false, 0); }).join('');
           return out + (ctx.depth ? '' : '\\n');

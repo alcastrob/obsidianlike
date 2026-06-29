@@ -40,6 +40,23 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Fuente para archivos Markdown. Acepta el mismo formato que `editor.fontFamily` (ej: `'iA Writer Quattro S', Georgia, serif`). Vacío usa la fuente general del editor."
+        },
+        "vaultTool.attachmentsLocation": {
+          "type": "string",
+          "enum": ["vault", "samefolder", "subfolder", "specificfolder"],
+          "enumDescriptions": [
+            "Carpeta raíz de la bóveda (carpeta de workspace)",
+            "Misma carpeta que el archivo .md",
+            "Subcarpeta dentro de la carpeta del archivo (el nombre se configura en attachmentsFolder)",
+            "Carpeta específica (la ruta se configura en attachmentsFolder)"
+          ],
+          "default": "vault",
+          "description": "Dónde buscar los archivos adjuntos referenciados con ![[nombre]]"
+        },
+        "vaultTool.attachmentsFolder": {
+          "type": "string",
+          "default": "attachments",
+          "description": "Nombre de la subcarpeta (modo 'subfolder') o ruta completa/relativa a la bóveda (modo 'specificfolder')"
         }
       }
     },
