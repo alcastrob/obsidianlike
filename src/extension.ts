@@ -486,6 +486,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
   var notePickerRange  = null;
   var npActiveIdx      = 0;
   var picker = document.getElementById('note-picker');
+  picker.style.display = 'none'; // garantizar que el inline style esté establecido
 
   function searchNotes(q) {
     var lq = q.toLowerCase();
@@ -622,7 +623,12 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
 
   /* ── Inline live-preview: negrita / cursiva ── */
   function findInlineEl(node) {
-    var el = (node && node.nodeType === 3) ? node.parentElement : node;
+    // Solo activamos si el anchorNode ES un nodo de texto (nodeType 3).
+    // Si el navegador pone el cursor en el elemento mismo (p.ej. en la
+    // frontera entre <strong> y el texto siguiente), lo tratamos como
+    // "fuera" del elemento para que exitInlineRaw se dispare.
+    if (!node || node.nodeType !== 3) { return null; }
+    var el = node.parentElement;
     while (el && el !== editor) {
       var t = el.tagName;
       if (t === 'STRONG' || t === 'B' || t === 'EM' || t === 'I') { return el; }
@@ -940,7 +946,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
   /* ── Atajos de teclado ── */
   document.addEventListener('keydown', function (e) {
     // Note picker: navegar / seleccionar / cerrar
-    if (picker.style.display !== 'none') {
+    if (picker.style.display === 'block') {
       if (e.key === 'Escape')    { e.preventDefault(); closeNotePicker(); return; }
       if (e.key === 'ArrowDown') { e.preventDefault(); setNpActive(npActiveIdx + 1); return; }
       if (e.key === 'ArrowUp')   { e.preventDefault(); setNpActive(npActiveIdx - 1); return; }
@@ -1016,7 +1022,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     if (rawModeChanging) { return; }
     var sel = window.getSelection();
     if (!sel || !editor.contains(sel.anchorNode)) {
-      if (picker.style.display !== 'none') { closeNotePicker(); }
+      if (picker.style.display === 'block') { closeNotePicker(); }
       if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
       if (currentRawBlock)  { exitRawMode(currentRawBlock);    currentRawBlock  = null; }
       currentBlock = null;
