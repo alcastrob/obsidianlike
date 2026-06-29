@@ -476,7 +476,8 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
   let renderVersion = 0;
   let renderTimer   = null;
   let syncTimer     = null;
-  var currentRawBlock  = null;
+  var currentBlock     = null;  // bloque donde está el cursor ahora
+  var currentRawBlock  = null;  // bloque en modo raw (solo headings / imágenes)
   var currentRawInline = null;
   var rawModeChanging  = false;
 
@@ -804,7 +805,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     if (data.type === 'render-response') {
       if (data.version !== renderVersion) { return; }
       var pos = saveCursor(editor);
-      currentRawBlock = null; currentRawInline = null;
+      currentBlock = null; currentRawBlock = null; currentRawInline = null;
       rawModeChanging = true;
       editor.innerHTML = data.html;
       rawModeChanging = false;
@@ -813,7 +814,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
       restoreCursor(editor, pos);
     } else if (data.type === 'render-after-save') {
       var pos2 = saveCursor(editor);
-      currentRawBlock = null; currentRawInline = null;
+      currentBlock = null; currentRawBlock = null; currentRawInline = null;
       rawModeChanging = true;
       editor.innerHTML = data.html;
       rawModeChanging = false;
@@ -823,7 +824,7 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
       dirty = false;
     } else if (data.type === 'reload') {
       var pos3 = saveCursor(editor);
-      currentRawBlock = null; currentRawInline = null;
+      currentBlock = null; currentRawBlock = null; currentRawInline = null;
       rawModeChanging = true;
       editor.innerHTML = data.html;
       rawModeChanging = false;
@@ -1018,15 +1019,22 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
       if (picker.style.display !== 'none') { closeNotePicker(); }
       if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
       if (currentRawBlock)  { exitRawMode(currentRawBlock);    currentRawBlock  = null; }
+      currentBlock = null;
       return;
     }
     // ── Block-level live-preview ──
     var block = getTopLevelBlock(sel.anchorNode);
-    if (block !== currentRawBlock) {
+    if (block !== currentBlock) {
+      currentBlock = block;
+      // Salir del inline del bloque anterior
       if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
-      if (currentRawBlock)  { exitRawMode(currentRawBlock); }
-      currentRawBlock = (isHeading(block) || hasObsidianImage(block)) ? block : null;
-      if (currentRawBlock) { enterRawMode(currentRawBlock); }
+      // Salir del raw de bloque si el nuevo bloque es distinto
+      if (currentRawBlock && currentRawBlock !== block) { exitRawMode(currentRawBlock); currentRawBlock = null; }
+      // Entrar raw de bloque si el nuevo bloque lo requiere
+      if (!currentRawBlock && block && (isHeading(block) || hasObsidianImage(block))) {
+        currentRawBlock = block;
+        enterRawMode(block);
+      }
     }
     // ── Inline live-preview (negrita / cursiva) ──
     if (!currentRawBlock) {
