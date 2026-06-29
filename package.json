@@ -69,7 +69,10 @@
         "command": "vaultTool.openKanban",
         "title": "Vault Tool: Abrir Kanban del vault"
       }
-    ]
+    ],
+    "configurationDefaults": {
+      "breadcrumbs.enabled": false
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

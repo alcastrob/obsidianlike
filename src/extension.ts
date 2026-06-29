@@ -1018,84 +1018,60 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
   };
   window.insertHr = function () { editor.focus(); document.execCommand('insertHorizontalRule'); };
 
+  /* checkInlineMode: comprueba si el cursor entró o salió de un elemento
+     inline (negrita/cursiva). Se llama desde click y keyup, cuando el cursor
+     ya está en su posición FINAL y estable, evitando los problemas de
+     timing de selectionchange con mutaciones del DOM. */
+  function checkInlineMode() {
+    if (rawModeChanging || currentRawBlock) { return; }
+    var csel = window.getSelection();
+    if (!csel || !editor.contains(csel.anchorNode)) {
+      if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
+      return;
+    }
+    var inlineEl = findInlineEl(csel.anchorNode);
+    if (inlineEl === currentRawInline) { return; }
+    if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
+    currentRawInline = inlineEl;
+    if (currentRawInline) { enterInlineRaw(currentRawInline); }
+  }
+
+  /* click: el cursor ya está donde el usuario quiere (usar setTimeout para
+     que el DOM se estabilice antes de leer la posición) */
+  editor.addEventListener('click', function () { setTimeout(checkInlineMode, 0); });
+
+  /* keyup: el cursor ya se movió al soltar la tecla de navegación */
+  document.addEventListener('keyup', function (ekup) {
+    var nav = ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown'];
+    if (nav.indexOf(ekup.key) !== -1) { checkInlineMode(); }
+  });
+
   document.addEventListener('selectionchange', function () {
     if (rawModeChanging) { return; }
     var sel = window.getSelection();
     if (!sel || !editor.contains(sel.anchorNode)) {
       if (picker.style.display === 'block') { closeNotePicker(); }
+      // Cursor fuera del editor: salir de cualquier modo raw
       if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
       if (currentRawBlock)  { exitRawMode(currentRawBlock);    currentRawBlock  = null; }
       currentBlock = null;
       return;
     }
-    // ── Block-level live-preview ──
+    // ── Block-level live-preview (headings / imágenes) ──
     var block = getTopLevelBlock(sel.anchorNode);
     if (block !== currentBlock) {
       currentBlock = block;
-      // Salir del inline del bloque anterior (con restauración de cursor)
-      if (currentRawInline) {
-        var bSavedAnchor = sel.anchorNode;
-        var bSavedOffset = sel.anchorOffset;
-        exitInlineRaw(currentRawInline);
-        currentRawInline = null;
-        var bSelNow = window.getSelection();
-        if (bSelNow) {
-          rawModeChanging = true;
-          try {
-            var bFixRange = document.createRange();
-            var bMaxOff = bSavedAnchor.nodeType === 3
-              ? (bSavedAnchor.textContent || '').length
-              : (bSavedAnchor.childNodes ? bSavedAnchor.childNodes.length : 0);
-            bFixRange.setStart(bSavedAnchor, Math.min(bSavedOffset, bMaxOff));
-            bFixRange.collapse(true);
-            bSelNow.removeAllRanges();
-            bSelNow.addRange(bFixRange);
-          } catch (_) {}
-          rawModeChanging = false;
-        }
-      }
-      // Salir del raw de bloque si el nuevo bloque es distinto
+      // Salir del inline al cambiar de bloque
+      if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
+      // Salir del raw de bloque anterior
       if (currentRawBlock && currentRawBlock !== block) { exitRawMode(currentRawBlock); currentRawBlock = null; }
-      // Entrar raw de bloque si el nuevo bloque lo requiere
+      // Entrar raw de bloque si corresponde
       if (!currentRawBlock && block && (isHeading(block) || hasObsidianImage(block))) {
         currentRawBlock = block;
         enterRawMode(block);
       }
     }
-    // ── Inline live-preview (negrita / cursiva) ──
-    if (!currentRawBlock) {
-      var inlineEl = findInlineEl(sel.anchorNode);
-      if (inlineEl !== currentRawInline) {
-        if (currentRawInline) {
-          // Guardar posición del cursor ANTES de que el DOM cambie.
-          // exitInlineRaw hace el.textContent = 'texto', lo que destruye
-          // el nodo de texto antiguo; Chromium puede mover el cursor al
-          // nodo nuevo (dentro del <strong>), disparando otro selectionchange
-          // que llamaría a enterInlineRaw de nuevo. Evitamos el bucle
-          // restaurando explícitamente la posición con rawModeChanging=true.
-          var savedAnchor = sel.anchorNode;
-          var savedOffset = sel.anchorOffset;
-          exitInlineRaw(currentRawInline);
-          var selNow = window.getSelection();
-          if (selNow) {
-            rawModeChanging = true;
-            try {
-              var fixRange = document.createRange();
-              var maxOff = savedAnchor.nodeType === 3
-                ? (savedAnchor.textContent || '').length
-                : (savedAnchor.childNodes ? savedAnchor.childNodes.length : 0);
-              fixRange.setStart(savedAnchor, Math.min(savedOffset, maxOff));
-              fixRange.collapse(true);
-              selNow.removeAllRanges();
-              selNow.addRange(fixRange);
-            } catch (_) {}
-            rawModeChanging = false;
-          }
-        }
-        currentRawInline = inlineEl;
-        if (currentRawInline) { enterInlineRaw(currentRawInline); }
-      }
-    }
+    // Inline live-preview: gestionado exclusivamente por click y keyup
   });
 
   /* ── DOM → Markdown ── */
