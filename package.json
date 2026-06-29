@@ -13,6 +13,36 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "themes": [
+      {
+        "label": "Border Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/border-dark.json"
+      },
+      {
+        "label": "Border Light",
+        "uiTheme": "vs",
+        "path": "./themes/border-light.json"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "vaultTool.markdownEditor",
+        "displayName": "Vault: Vista de documento",
+        "selector": [{ "filenamePattern": "*.md" }],
+        "priority": "default"
+      }
+    ],
+    "configuration": {
+      "title": "Vault Tool",
+      "properties": {
+        "vaultTool.markdownFont": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Fuente para archivos Markdown. Acepta el mismo formato que `editor.fontFamily` (ej: `'iA Writer Quattro S', Georgia, serif`). Vacío usa la fuente general del editor."
+        }
+      }
+    },
     "commands": [
       {
         "command": "vaultTool.listNotes",
@@ -27,11 +57,16 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "package": "npm run compile && vsce package --allow-missing-repository"
+  },
+  "dependencies": {
+    "marked": "^9.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
     "typescript": "^5.4.0"
   }
 }
