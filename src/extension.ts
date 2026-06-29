@@ -1032,8 +1032,28 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     var block = getTopLevelBlock(sel.anchorNode);
     if (block !== currentBlock) {
       currentBlock = block;
-      // Salir del inline del bloque anterior
-      if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
+      // Salir del inline del bloque anterior (con restauración de cursor)
+      if (currentRawInline) {
+        var bSavedAnchor = sel.anchorNode;
+        var bSavedOffset = sel.anchorOffset;
+        exitInlineRaw(currentRawInline);
+        currentRawInline = null;
+        var bSelNow = window.getSelection();
+        if (bSelNow) {
+          rawModeChanging = true;
+          try {
+            var bFixRange = document.createRange();
+            var bMaxOff = bSavedAnchor.nodeType === 3
+              ? (bSavedAnchor.textContent || '').length
+              : (bSavedAnchor.childNodes ? bSavedAnchor.childNodes.length : 0);
+            bFixRange.setStart(bSavedAnchor, Math.min(bSavedOffset, bMaxOff));
+            bFixRange.collapse(true);
+            bSelNow.removeAllRanges();
+            bSelNow.addRange(bFixRange);
+          } catch (_) {}
+          rawModeChanging = false;
+        }
+      }
       // Salir del raw de bloque si el nuevo bloque es distinto
       if (currentRawBlock && currentRawBlock !== block) { exitRawMode(currentRawBlock); currentRawBlock = null; }
       // Entrar raw de bloque si el nuevo bloque lo requiere
@@ -1046,7 +1066,32 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     if (!currentRawBlock) {
       var inlineEl = findInlineEl(sel.anchorNode);
       if (inlineEl !== currentRawInline) {
-        if (currentRawInline) { exitInlineRaw(currentRawInline); }
+        if (currentRawInline) {
+          // Guardar posición del cursor ANTES de que el DOM cambie.
+          // exitInlineRaw hace el.textContent = 'texto', lo que destruye
+          // el nodo de texto antiguo; Chromium puede mover el cursor al
+          // nodo nuevo (dentro del <strong>), disparando otro selectionchange
+          // que llamaría a enterInlineRaw de nuevo. Evitamos el bucle
+          // restaurando explícitamente la posición con rawModeChanging=true.
+          var savedAnchor = sel.anchorNode;
+          var savedOffset = sel.anchorOffset;
+          exitInlineRaw(currentRawInline);
+          var selNow = window.getSelection();
+          if (selNow) {
+            rawModeChanging = true;
+            try {
+              var fixRange = document.createRange();
+              var maxOff = savedAnchor.nodeType === 3
+                ? (savedAnchor.textContent || '').length
+                : (savedAnchor.childNodes ? savedAnchor.childNodes.length : 0);
+              fixRange.setStart(savedAnchor, Math.min(savedOffset, maxOff));
+              fixRange.collapse(true);
+              selNow.removeAllRanges();
+              selNow.addRange(fixRange);
+            } catch (_) {}
+            rawModeChanging = false;
+          }
+        }
         currentRawInline = inlineEl;
         if (currentRawInline) { enterInlineRaw(currentRawInline); }
       }
