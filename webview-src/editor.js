@@ -432,10 +432,21 @@ function toggleWrap(view, marker) {
   return true;
 }
 
-// ── Click handler: open links ─────────────────────────────────────────────────
-// On non-active lines, clicking a URL or markdown link opens it in the browser.
+// ── Click handler: wiki links and URL links ───────────────────────────────────
 const linkClickHandler = EditorView.domEventHandlers({
   click(e, view) {
+    // Wiki-link: click on a .cm-wiki-link span → open/create note
+    let el = e.target;
+    while (el && el !== view.dom) {
+      if (el.classList && el.classList.contains('cm-wiki-link')) {
+        e.preventDefault();
+        vscode.postMessage({ type: 'open-note', name: el.textContent.trim() });
+        return true;
+      }
+      el = el.parentElement;
+    }
+
+    // URL link: on non-active lines, click opens in browser
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
     const line = view.state.doc.lineAt(pos);

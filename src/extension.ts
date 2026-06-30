@@ -246,6 +246,27 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             }
           );
 
+        } else if (msg.type === 'open-note') {
+          const noteName = (msg.name as string || '').trim();
+          if (!noteName) { return; }
+          // Find existing file anywhere in vault, or create blank in same folder
+          vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**', 1).then(found => {
+            const targetUri = found.length > 0
+              ? found[0]
+              : vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), noteName + '.md'));
+            if (found.length === 0) {
+              // Create blank file
+              fs.writeFileSync(targetUri.fsPath, '', 'utf-8');
+            }
+            const col = webviewPanel.viewColumn ?? vscode.ViewColumn.Active;
+            // Open in same column; dispose current panel after new one opens
+            vscode.commands.executeCommand(
+              'vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col
+            ).then(() => {
+              setTimeout(() => { try { webviewPanel.dispose(); } catch {} }, 150);
+            });
+          });
+
         } else if (msg.type === 'open-url') {
           const url = (msg.url as string || '').trim();
           if (url) { vscode.env.openExternal(vscode.Uri.parse(url)); }
