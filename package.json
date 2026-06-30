@@ -75,18 +75,27 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run build-webview",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "npm run compile && vsce package --allow-missing-repository"
+    "build-webview": "esbuild webview-src/editor.js --bundle --minify --outfile=out/editor.bundle.js --platform=browser --format=iife",
+    "package": "npm run compile && npm run build-webview && vsce package --allow-missing-repository"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.0.0",
+    "@codemirror/commands": "^6.0.0",
+    "@codemirror/lang-markdown": "^6.0.0",
+    "@codemirror/language": "^6.0.0",
+    "@codemirror/state": "^6.0.0",
+    "@codemirror/view": "^6.0.0",
+    "@lezer/highlight": "^1.0.0",
     "marked": "^9.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.20.0",
     "typescript": "^5.4.0"
   }
 }
