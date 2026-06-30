@@ -1018,10 +1018,11 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
   };
   window.insertHr = function () { editor.focus(); document.execCommand('insertHorizontalRule'); };
 
-  /* checkInlineMode: comprueba si el cursor entró o salió de un elemento
-     inline (negrita/cursiva). Se llama desde click y keyup, cuando el cursor
-     ya está en su posición FINAL y estable, evitando los problemas de
-     timing de selectionchange con mutaciones del DOM. */
+  var inlineCheckTimer = null;
+
+  /* checkInlineMode: lee la posición del cursor y entra/sale del modo raw
+     inline según corresponda. Se llama de forma diferida (setTimeout 0)
+     para que el DOM esté estable tras cualquier mutación. */
   function checkInlineMode() {
     if (rawModeChanging || currentRawBlock) { return; }
     var csel = window.getSelection();
@@ -1036,42 +1037,46 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     if (currentRawInline) { enterInlineRaw(currentRawInline); }
   }
 
-  /* click: el cursor ya está donde el usuario quiere (usar setTimeout para
-     que el DOM se estabilice antes de leer la posición) */
-  editor.addEventListener('click', function () { setTimeout(checkInlineMode, 0); });
+  function scheduleInlineCheck() {
+    clearTimeout(inlineCheckTimer);
+    inlineCheckTimer = setTimeout(checkInlineMode, 0);
+  }
 
-  /* keyup: el cursor ya se movió al soltar la tecla de navegación */
+  /* click y keyup: disparo inmediato (el cursor ya está en posición final) */
+  editor.addEventListener('click', function () { scheduleInlineCheck(); });
   document.addEventListener('keyup', function (ekup) {
     var nav = ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown'];
-    if (nav.indexOf(ekup.key) !== -1) { checkInlineMode(); }
+    if (nav.indexOf(ekup.key) !== -1) { scheduleInlineCheck(); }
   });
 
   document.addEventListener('selectionchange', function () {
     if (rawModeChanging) { return; }
     var sel = window.getSelection();
     if (!sel || !editor.contains(sel.anchorNode)) {
+      clearTimeout(inlineCheckTimer);
       if (picker.style.display === 'block') { closeNotePicker(); }
-      // Cursor fuera del editor: salir de cualquier modo raw
+      // Cursor fuera del editor: salir de cualquier modo raw inmediatamente
       if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
       if (currentRawBlock)  { exitRawMode(currentRawBlock);    currentRawBlock  = null; }
       currentBlock = null;
       return;
     }
-    // ── Block-level live-preview (headings / imágenes) ──
+    // ── Block-level live-preview (headings / imágenes): inmediato ──
     var block = getTopLevelBlock(sel.anchorNode);
     if (block !== currentBlock) {
+      clearTimeout(inlineCheckTimer);
       currentBlock = block;
-      // Salir del inline al cambiar de bloque
       if (currentRawInline) { exitInlineRaw(currentRawInline); currentRawInline = null; }
-      // Salir del raw de bloque anterior
       if (currentRawBlock && currentRawBlock !== block) { exitRawMode(currentRawBlock); currentRawBlock = null; }
-      // Entrar raw de bloque si corresponde
       if (!currentRawBlock && block && (isHeading(block) || hasObsidianImage(block))) {
         currentRawBlock = block;
         enterRawMode(block);
       }
     }
-    // Inline live-preview: gestionado exclusivamente por click y keyup
+    // ── Inline live-preview: diferido para que el DOM se estabilice ──
+    // Esto cubre movimientos de cursor que no son click ni tecla de navegación
+    // (p.ej. Ctrl+A, selección con shift, etc.) y también actúa como respaldo.
+    scheduleInlineCheck();
   });
 
   /* ── DOM → Markdown ── */
