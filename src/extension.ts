@@ -210,11 +210,19 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             return;
           }
           const newUri = vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), newName + '.md'));
-          // Guardar antes de renombrar (el webview ya envió 'sync' justo antes de 'rename')
+          // 1. Guardar contenido actual al path antiguo
+          // 2. Renombrar via WorkspaceEdit (actualiza tracking de editores abiertos en VS Code)
           document.save().then(() => {
-            return vscode.workspace.fs.rename(document.uri, newUri, { overwrite: false });
+            const wsEdit = new vscode.WorkspaceEdit();
+            wsEdit.renameFile(document.uri, newUri, { overwrite: false });
+            return vscode.workspace.applyEdit(wsEdit);
           }).then(
-            () => {},
+            success => {
+              if (!success) {
+                webviewPanel.webview.postMessage({ type: 'title-revert', name: oldName });
+                vscode.window.showErrorMessage(`No se pudo renombrar a "${newName}".`);
+              }
+            },
             err => {
               webviewPanel.webview.postMessage({ type: 'title-revert', name: oldName });
               vscode.window.showErrorMessage(`No se pudo renombrar a "${newName}": ${err}`);
