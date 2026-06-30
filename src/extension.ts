@@ -66,6 +66,40 @@ function getThemeCss(): string {
   try { return fs.readFileSync(cssPath, 'utf-8'); } catch { return ''; }
 }
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function updateWikiLinks(oldName: string, newName: string): Promise<void> {
+  const files = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
+  const edit = new vscode.WorkspaceEdit();
+  for (const uri of files) {
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const text = doc.getText();
+    // Matches [[OldName]] and [[OldName|alias]]
+    const re = new RegExp(`\\[\\[${escapeRegex(oldName)}(\\|[^\\]]*)?\\]\\]`, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const alias = m[1] ?? '';
+      edit.replace(uri,
+        new vscode.Range(doc.positionAt(m.index), doc.positionAt(m.index + m[0].length)),
+        `[[${newName}${alias}]]`
+      );
+    }
+  }
+  if (edit.size > 0) { await vscode.workspace.applyEdit(edit); }
+}
+
+function computeBreadcrumb(docUri: vscode.Uri): Array<{ name: string; fsPath: string }> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+  const rel   = path.relative(root, docUri.fsPath);
+  const parts = rel.split(path.sep).filter(Boolean);
+  return parts.map((part, i) => ({
+    name:   i === parts.length - 1 ? path.basename(part, '.md') : part,
+    fsPath: path.join(root, ...parts.slice(0, i + 1)),
+  }));
+}
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 let extensionUri: vscode.Uri;
@@ -117,7 +151,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       if (i !== -1) { activePanels.splice(i, 1); }
     });
 
-    const imgMap = getImageMap(webviewPanel.webview, document.uri);
+    const imgMap    = getImageMap(webviewPanel.webview, document.uri);
+    const themeCss  = getThemeCss();
+    const breadcrumb = computeBreadcrumb(document.uri);
+
     webviewPanel.webview.html = this.buildHtml(
       document.getText(),
       getFont(),
@@ -125,13 +162,14 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       webviewPanel.webview.cspSource,
       scriptUri.toString(),
       path.basename(document.uri.fsPath, '.md'),
-      imgMap
+      imgMap,
+      themeCss,
+      breadcrumb
     );
 
+    // Send note index after webview is ready
     setTimeout(() => {
       webviewPanel.webview.postMessage({ type: 'note-index', notes: noteIndex });
-      const themeCss = getThemeCss();
-      if (themeCss) { webviewPanel.webview.postMessage({ type: 'theme-css', css: themeCss }); }
     }, 300);
 
     let pendingSaveResolve: ((content: string) => void) | undefined;
@@ -227,8 +265,6 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             return;
           }
           const newUri = vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), newName + '.md'));
-          // 1. Guardar contenido actual al path antiguo
-          // 2. Renombrar via WorkspaceEdit (actualiza tracking de editores abiertos en VS Code)
           document.save().then(() => {
             const wsEdit = new vscode.WorkspaceEdit();
             wsEdit.renameFile(document.uri, newUri, { overwrite: false });
@@ -238,7 +274,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
               if (!success) {
                 webviewPanel.webview.postMessage({ type: 'title-revert', name: oldName });
                 vscode.window.showErrorMessage(`No se pudo renombrar a "${newName}".`);
+                return;
               }
+              // Update [[OldName]] links across all vault files
+              updateWikiLinks(oldName, newName);
             },
             err => {
               webviewPanel.webview.postMessage({ type: 'title-revert', name: oldName });
@@ -249,27 +288,25 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         } else if (msg.type === 'open-note') {
           const noteName = (msg.name as string || '').trim();
           if (!noteName) { return; }
-          // Find existing file anywhere in vault, or create blank in same folder
           vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**', 1).then(found => {
             const targetUri = found.length > 0
               ? found[0]
               : vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), noteName + '.md'));
             if (found.length === 0) {
-              // Create blank file
               fs.writeFileSync(targetUri.fsPath, '', 'utf-8');
             }
             const col = webviewPanel.viewColumn ?? vscode.ViewColumn.Active;
-            // Open in same column; dispose current panel after new one opens
-            vscode.commands.executeCommand(
-              'vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col
-            ).then(() => {
-              setTimeout(() => { try { webviewPanel.dispose(); } catch {} }, 150);
-            });
+            vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col)
+              .then(() => { setTimeout(() => { try { webviewPanel.dispose(); } catch {} }, 150); });
           });
 
         } else if (msg.type === 'open-url') {
           const url = (msg.url as string || '').trim();
           if (url) { vscode.env.openExternal(vscode.Uri.parse(url)); }
+
+        } else if (msg.type === 'reveal-path') {
+          const fsPath = (msg.fsPath as string || '').trim();
+          if (fsPath) { vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(fsPath)); }
 
         } else if (msg.type === 'paste-image') {
           try {
@@ -281,7 +318,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             const saveDir = getSaveDir(document.uri.fsPath);
             if (!fs.existsSync(saveDir)) { fs.mkdirSync(saveDir, { recursive: true }); }
             fs.writeFileSync(path.join(saveDir, filename), buffer);
-            const fileUri = vscode.Uri.file(path.join(saveDir, filename));
+            const fileUri    = vscode.Uri.file(path.join(saveDir, filename));
             const webviewUri = webviewPanel.webview.asWebviewUri(fileUri).toString();
             webviewPanel.webview.postMessage({ type: 'image-pasted', filename, uri: webviewUri });
           } catch (err) {
@@ -295,11 +332,19 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
   }
 
   private buildHtml(
-    content: string, font: string, fontSize: number,
-    cspSource: string, scriptUri: string, title: string,
-    imageMap: Record<string, string> = {}
+    content: string,
+    font: string,
+    fontSize: number,
+    cspSource: string,
+    scriptUri: string,
+    title: string,
+    imageMap:  Record<string, string> = {},
+    themeCss:  string = '',
+    breadcrumb: Array<{ name: string; fsPath: string }> = []
   ): string {
-    const init = JSON.stringify({ content, font, fontSize, noteIndex, title, imageMap });
+    const init = JSON.stringify({ content, font, fontSize, noteIndex, title, imageMap, breadcrumb });
+    // Escape </style> in theme CSS to prevent breaking the style block
+    const safeCss = themeCss.replace(/<\/style>/gi, '<\\/style>');
     return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -313,10 +358,24 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       color: var(--vscode-editor-foreground, #d4d4d4);
       display: flex; flex-direction: column;
     }
+    #doc-breadcrumb {
+      flex-shrink: 0;
+      max-width: 780px; width: 100%;
+      margin: 0 auto; padding: 10px 28px 0; box-sizing: border-box;
+      font-size: 11px; opacity: 0.55;
+      display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+      user-select: none;
+    }
+    .bc-part {
+      cursor: pointer; color: inherit; transition: opacity 0.15s;
+    }
+    .bc-part:hover { opacity: 1; text-decoration: underline; }
+    .bc-last { font-weight: 600; opacity: 1; }
+    .bc-sep { margin: 0 2px; opacity: 0.4; }
     #doc-header {
       flex-shrink: 0;
       max-width: 780px; width: 100%;
-      margin: 0 auto; padding: 40px 28px 0; box-sizing: border-box;
+      margin: 0 auto; padding: 18px 28px 0; box-sizing: border-box;
     }
     #doc-title {
       font-size: 2em; font-weight: 700; line-height: 1.3;
@@ -337,8 +396,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     }
     #editor { flex: 1; min-height: 0; overflow: hidden; }
   </style>
+  <style id="__obsidian-theme">${safeCss}</style>
 </head>
 <body>
+  <div id="doc-breadcrumb"></div>
   <div id="doc-header">
     <div id="doc-title" contenteditable="plaintext-only" spellcheck="false"></div>
     <hr id="doc-divider">
@@ -346,6 +407,23 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
   <div id="editor"></div>
   <script>window.__vaultInitial = ${init.replace(/<\/script>/gi, '<\\/script>')};</script>
   <script src="${scriptUri}"></script>
+  <script>
+    /* Sync VS Code theme class → Obsidian theme.css selectors (.theme-dark / .theme-light).
+       Runs after <body> exists so document.body is always available. */
+    (function() {
+      function sync() {
+        var b = document.body;
+        if (!b) return;
+        var dark = b.classList.contains('vscode-dark') || b.classList.contains('vscode-high-contrast');
+        b.classList.toggle('theme-dark', dark);
+        b.classList.toggle('theme-light', !dark);
+        document.documentElement.classList.toggle('theme-dark', dark);
+        document.documentElement.classList.toggle('theme-light', !dark);
+      }
+      sync();
+      new MutationObserver(sync).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    })();
+  </script>
 </body>
 </html>`;
   }

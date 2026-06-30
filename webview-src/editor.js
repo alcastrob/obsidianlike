@@ -43,33 +43,30 @@ const vsTheme = EditorView.theme({
   },
   '.cm-activeLine':  { background: 'rgba(255,255,255,0.03)' },
   '.cm-line': { padding: '0' },
-  // Wiki-link display style
   '.cm-wiki-link': {
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
     textDecoration: 'underline',
     textUnderlineOffset: '2px',
     cursor: 'pointer',
   },
-  // Hyperlink style (markdown links and bare URLs on non-active lines)
   '.cm-md-link': {
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
     textDecoration: 'underline',
     textUnderlineOffset: '2px',
     cursor: 'pointer',
   },
-  // Table styles
-  '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
-  '.cm-md-table': {
-    borderCollapse: 'collapse',
-    width: '100%',
-    fontSize: 'inherit',
-    fontFamily: 'inherit',
+  // Table lines: invisible but still in layout so CM6 can measure them
+  '.cm-table-line-hidden': { visibility: 'hidden' },
+  // Overlay layer that renders table widgets above the hidden raw lines
+  '.cm-table-overlay-layer': {
+    position: 'absolute', top: '0', left: '0', right: '0', bottom: '0',
+    pointerEvents: 'none', overflow: 'visible', zIndex: '2',
   },
+  '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px', pointerEvents: 'auto' },
+  '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
     border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
-    padding: '6px 12px',
-    lineHeight: '1.5',
-    verticalAlign: 'top',
+    padding: '6px 12px', lineHeight: '1.5', verticalAlign: 'top',
   },
   '.cm-md-table th': {
     fontWeight: '600',
@@ -79,7 +76,6 @@ const vsTheme = EditorView.theme({
   '.cm-md-table tr:nth-child(even) td': {
     background: 'var(--table-row-alt-background, rgba(128,128,128,0.04))',
   },
-  // Autocomplete tooltip
   '.cm-tooltip': {
     background: 'var(--vscode-editorSuggestWidget-background, #252526)',
     border: '1px solid var(--vscode-editorSuggestWidget-border, #454545)',
@@ -103,6 +99,8 @@ const vsTheme = EditorView.theme({
 
 // ── Syntax highlight style ────────────────────────────────────────────────────
 // Uses Obsidian CSS variables (--bold-color, --h1-color, etc.) with VS Code fallbacks.
+// The theme-dark / theme-light class on body (synced by inline script in buildHtml)
+// makes these variables resolve from the loaded theme.css.
 const mdHighlight = HighlightStyle.define([
   { tag: tags.heading1,
     fontSize: 'var(--h1-size, 1.75em)', fontWeight: '700', lineHeight: '1.3',
@@ -182,14 +180,14 @@ class TableWidget extends WidgetType {
     });
 
     const thead = document.createElement('thead');
-    const headerRow = document.createElement('tr');
+    const hr = document.createElement('tr');
     headers.forEach((h, i) => {
       const th = document.createElement('th');
       th.textContent = h;
       th.style.textAlign = aligns[i] || 'left';
-      headerRow.appendChild(th);
+      hr.appendChild(th);
     });
-    thead.appendChild(headerRow);
+    thead.appendChild(hr);
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
@@ -224,7 +222,7 @@ class ImageWidget extends WidgetType {
   ignoreEvent() { return false; }
 }
 
-// ── Live-preview plugin (headings, emphasis marks, tables) ────────────────────
+// ── Live-preview plugin ───────────────────────────────────────────────────────
 const livePreviewPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
@@ -233,73 +231,166 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
     }
   }
   _build(view) {
+    try {
+      const { state } = view;
+      const active = getActiveLines(state);
+      // Two separate arrays: span/widget decorations and line-level class decorations.
+      // Line decorations must be added to the builder as (line.from, line.from, dec).
+      const decs     = [];  // { from, to, dec }
+      const lineDecs = [];  // { from, dec }   — line.from only, to=from
+
+      syntaxTree(state).iterate({
+        from: view.viewport.from,
+        to:   view.viewport.to,
+        enter(node) {
+          const n = node.name;
+
+          // ── Tables ────────────────────────────────────────────────────────
+          // Rendered by tableOverlayPlugin (absolutely positioned overlay).
+          // Here we only hide the raw table lines when not active so the
+          // overlay is visible. We use visibility:hidden (NOT display:none)
+          // so CM6 can still measure line heights without crashing.
+          if (n === 'Table') {
+            try {
+              const fromLine = state.doc.lineAt(node.from);
+              const endPos = Math.max(node.from,
+                Math.min(node.to, state.doc.length) - 1);
+              const toLine = state.doc.lineAt(endPos);
+
+              let isActive = false;
+              for (let i = fromLine.number; i <= toLine.number; i++) {
+                if (active.has(i)) { isActive = true; break; }
+              }
+              if (!isActive) {
+                for (let ln = fromLine.number; ln <= toLine.number; ln++) {
+                  lineDecs.push({ from: state.doc.line(ln).from,
+                    dec: Decoration.line({ class: 'cm-table-line-hidden' }) });
+                }
+              }
+            } catch (_) {}
+            return false;
+          }
+
+          const ln = state.doc.lineAt(node.from).number;
+          if (active.has(ln)) return;
+
+          if (n === 'HeaderMark') {
+            let end = node.to;
+            if (state.doc.sliceString(end, end + 1) === ' ') end++;
+            decs.push({ from: node.from, to: end, dec: Decoration.replace({}) });
+            return false;
+          }
+          if (n === 'EmphasisMark' || n === 'CodeMark' || n === 'StrikethroughMark') {
+            decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
+            return false;
+          }
+          if (n === 'LinkMark') {
+            decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
+            return false;
+          }
+          if (n === 'URL') {
+            decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
+            return false;
+          }
+        }
+      });
+
+      // Merge span/widget decs + line decs, sort by position, add to builder.
+      const all = [
+        ...decs,
+        ...lineDecs.map(d => ({ from: d.from, to: d.from, dec: d.dec })),
+      ];
+      all.sort((a, b) => a.from - b.from || a.to - b.to);
+
+      const builder = new RangeSetBuilder();
+      let lastTo = -1;
+      for (const { from, to, dec } of all) {
+        // Skip overlapping non-zero-length ranges.
+        // Zero-length (from===to) decorations are always safe to add regardless
+        // of lastTo because they don't occupy any span.
+        if (from !== to && from < lastTo) continue;
+        try { builder.add(from, to, dec); } catch (_) {}
+        if (to > lastTo) lastTo = to;
+      }
+      return builder.finish();
+    } catch (_) {
+      return Decoration.none;
+    }
+  }
+}, { decorations: v => v.decorations });
+
+// ── Table overlay plugin ──────────────────────────────────────────────────────
+// Renders tables as absolutely-positioned widgets in an overlay div that sits
+// on top of the (visibility:hidden) raw table lines. This avoids all CM6
+// block-decoration constraints that caused measurement crashes.
+const tableOverlayPlugin = ViewPlugin.fromClass(class {
+  constructor(view) {
+    this.overlay = document.createElement('div');
+    this.overlay.className = 'cm-table-overlay-layer';
+    // Append inside scrollDOM so the overlay scrolls with content.
+    // scrollDOM needs position:relative for absolute children.
+    if (getComputedStyle(view.scrollDOM).position === 'static') {
+      view.scrollDOM.style.position = 'relative';
+    }
+    view.scrollDOM.appendChild(this.overlay);
+    this._render(view);
+  }
+  update(u) {
+    if (u.docChanged || u.viewportChanged || u.selectionSet) {
+      this._render(u.view);
+    }
+  }
+  _render(view) {
+    // Clear previous table widgets
+    while (this.overlay.firstChild) this.overlay.removeChild(this.overlay.firstChild);
+
     const { state } = view;
     const active = getActiveLines(state);
-    const decs = []; // { from, to, dec }
+    const scrollDOM = view.scrollDOM;
+    const scrollTop  = scrollDOM.scrollTop;
+    const scrollLeft = scrollDOM.scrollLeft;
+    const scrollRect = scrollDOM.getBoundingClientRect();
+    const contentRect = view.contentDOM.getBoundingClientRect();
 
     syntaxTree(state).iterate({
       from: view.viewport.from,
       to:   view.viewport.to,
-      enter(node) {
-        const n = node.name;
+      enter: (node) => {
+        if (node.name !== 'Table') return;
+        try {
+          const fromLine = state.doc.lineAt(node.from);
+          const endPos   = Math.max(node.from, Math.min(node.to, state.doc.length) - 1);
+          const toLine   = state.doc.lineAt(endPos);
 
-        // ── Tables: replace whole block with rendered widget ──
-        if (n === 'Table') {
-          const firstLine = state.doc.lineAt(node.from);
-          // node.to may point past the last \n — resolve safely
-          const lastPos = node.to > node.from ? node.to - 1 : node.from;
-          const lastLine = state.doc.lineAt(lastPos);
           let isActive = false;
-          for (let i = firstLine.number; i <= lastLine.number; i++) {
+          for (let i = fromLine.number; i <= toLine.number; i++) {
             if (active.has(i)) { isActive = true; break; }
           }
-          if (!isActive) {
-            const src = state.doc.sliceString(firstLine.from, lastLine.to);
-            decs.push({
-              from: firstLine.from,
-              to:   lastLine.to,
-              dec:  Decoration.replace({ widget: new TableWidget(src), block: true }),
-            });
-          }
-          return false; // don't descend into table children
-        }
+          if (isActive) return false;
 
-        // For all other nodes, only process non-active lines
-        const ln = state.doc.lineAt(node.from).number;
-        if (active.has(ln)) return;
+          const fromCoords = view.coordsAtPos(fromLine.from);
+          if (!fromCoords) return false;
 
-        if (n === 'HeaderMark') {
-          let end = node.to;
-          if (state.doc.sliceString(end, end + 1) === ' ') end++;
-          decs.push({ from: node.from, to: end, dec: Decoration.replace({}) });
-          return false;
-        }
-        if (n === 'EmphasisMark' || n === 'CodeMark' || n === 'StrikethroughMark') {
-          decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
-          return false;
-        }
-        if (n === 'LinkMark') {
-          decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
-          return false;
-        }
-        if (n === 'URL') {
-          decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
-          return false;
-        }
-      }
+          const src = state.doc.sliceString(fromLine.from, toLine.to);
+          const el  = new TableWidget(src).toDOM();
+
+          // Position relative to scrollDOM's content origin (scroll-adjusted)
+          const top  = fromCoords.top  - scrollRect.top  + scrollTop;
+          const left = contentRect.left - scrollRect.left + scrollLeft;
+          el.style.cssText =
+            `position:absolute;top:${top}px;left:${left}px;` +
+            `width:${contentRect.width}px;box-sizing:border-box;`;
+
+          this.overlay.appendChild(el);
+        } catch (_) {}
+        return false;
+      },
     });
-
-    decs.sort((a, b) => a.from - b.from || a.to - b.to);
-    const builder = new RangeSetBuilder();
-    let lastTo = -1;
-    for (const { from, to, dec } of decs) {
-      if (from < lastTo) continue;
-      try { builder.add(from, to, dec); } catch (_) {}
-      lastTo = to;
-    }
-    return builder.finish();
   }
-}, { decorations: v => v.decorations });
+  destroy() {
+    this.overlay.remove();
+  }
+});
 
 // ── Wiki-link plugin ──────────────────────────────────────────────────────────
 const wikiLinkPlugin = ViewPlugin.fromClass(class {
@@ -369,14 +460,11 @@ const imgPlugin = ViewPlugin.fromClass(class {
       const mTo   = mFrom + m[0].length;
       const ln = state.doc.lineAt(mFrom).number;
       if (active.has(ln)) continue;
-      // Lookup webview URI — try full name, then basename
       const basename = filename.split('/').pop();
       const src = imageMap[filename] || imageMap[basename] || '';
       if (!src) continue;
-      all.push({
-        from: mFrom, to: mTo,
-        dec: Decoration.replace({ widget: new ImageWidget(src, filename) }),
-      });
+      all.push({ from: mFrom, to: mTo,
+        dec: Decoration.replace({ widget: new ImageWidget(src, filename) }) });
     }
     all.sort((a, b) => a.from - b.from);
     const builder = new RangeSetBuilder();
@@ -432,68 +520,83 @@ function toggleWrap(view, marker) {
   return true;
 }
 
-// ── Click handler: wiki links and URL links ───────────────────────────────────
-const linkClickHandler = EditorView.domEventHandlers({
-  click(e, view) {
-    // Wiki-link: click on a .cm-wiki-link span → open/create note
-    let el = e.target;
-    while (el && el !== view.dom) {
-      if (el.classList && el.classList.contains('cm-wiki-link')) {
-        e.preventDefault();
-        vscode.postMessage({ type: 'open-note', name: el.textContent.trim() });
-        return true;
-      }
-      el = el.parentElement;
+// ── Click / link handler ──────────────────────────────────────────────────────
+// mousedown: prevent CM6 from moving cursor onto wiki-link or URL spans.
+// click: fire the actual action (open note or URL).
+function findUrlAtPos(view, pos) {
+  const line = view.state.doc.lineAt(pos);
+  let url = null;
+  let cur = syntaxTree(view.state).resolve(pos, 1);
+  while (cur) {
+    if (cur.name === 'URL') {
+      let raw = view.state.doc.sliceString(cur.from, cur.to);
+      if (raw.startsWith('<') && raw.endsWith('>')) raw = raw.slice(1, -1);
+      url = raw;
+      break;
     }
-
-    // URL link: on non-active lines, click opens in browser
-    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
-    if (pos == null) return false;
-    const line = view.state.doc.lineAt(pos);
-    if (getActiveLines(view.state).has(line.number)) return false;
-
-    // Walk syntax tree to find URL node at click position
-    let url = null;
-    const tree = syntaxTree(view.state);
-    let cur = tree.resolve(pos, 1);
-    while (cur) {
-      if (cur.name === 'URL') {
-        let raw = view.state.doc.sliceString(cur.from, cur.to);
-        if (raw.startsWith('<') && raw.endsWith('>')) raw = raw.slice(1, -1);
-        url = raw;
-        break;
-      }
-      if (cur.name === 'Link') {
-        // Find first URL child
-        let child = cur.firstChild;
-        while (child) {
-          if (child.name === 'URL') {
-            let raw = view.state.doc.sliceString(child.from, child.to);
-            if (raw.startsWith('<') && raw.endsWith('>')) raw = raw.slice(1, -1);
-            url = raw;
-            break;
-          }
-          child = child.nextSibling;
-        }
-        break;
-      }
-      cur = cur.parent;
-    }
-
-    // Regex fallback for bare https?:// URLs not captured by the syntax tree
-    if (!url) {
-      const colOffset = pos - line.from;
-      const re = /https?:\/\/[^\s)"'\]>]+/g;
-      let m;
-      while ((m = re.exec(line.text)) !== null) {
-        if (m.index <= colOffset && colOffset <= m.index + m[0].length) {
-          url = m[0];
+    if (cur.name === 'Link') {
+      let child = cur.firstChild;
+      while (child) {
+        if (child.name === 'URL') {
+          let raw = view.state.doc.sliceString(child.from, child.to);
+          if (raw.startsWith('<') && raw.endsWith('>')) raw = raw.slice(1, -1);
+          url = raw;
           break;
         }
+        child = child.nextSibling;
+      }
+      break;
+    }
+    cur = cur.parent;
+  }
+  if (!url) {
+    const colOffset = pos - line.from;
+    const re = /https?:\/\/[^\s)"'\]>]+/g;
+    let m;
+    while ((m = re.exec(line.text)) !== null) {
+      if (m.index <= colOffset && colOffset <= m.index + m[0].length) {
+        url = m[0]; break;
       }
     }
+  }
+  return url && /^https?:\/\//.test(url) ? url : null;
+}
 
-    if (url && /^https?:\/\//.test(url)) {
+function isWikiLinkEl(target, editorDom) {
+  let el = target;
+  while (el && el !== editorDom) {
+    if (el.classList && el.classList.contains('cm-wiki-link')) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+const linkClickHandler = EditorView.domEventHandlers({
+  // mousedown: prevent CM6 cursor placement when clicking navigable elements
+  mousedown(e, view) {
+    const wikiEl = isWikiLinkEl(e.target, view.dom);
+    if (wikiEl) { e.preventDefault(); return true; }
+
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos == null) return false;
+    if (getActiveLines(view.state).has(view.state.doc.lineAt(pos).number)) return false;
+    if (findUrlAtPos(view, pos)) { e.preventDefault(); return true; }
+    return false;
+  },
+  // click: fire the action
+  click(e, view) {
+    const wikiEl = isWikiLinkEl(e.target, view.dom);
+    if (wikiEl) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'open-note', name: wikiEl.textContent.trim() });
+      return true;
+    }
+
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos == null) return false;
+    if (getActiveLines(view.state).has(view.state.doc.lineAt(pos).number)) return false;
+    const url = findUrlAtPos(view, pos);
+    if (url) {
       e.preventDefault();
       vscode.postMessage({ type: 'open-url', url });
       return true;
@@ -516,7 +619,7 @@ function createEditor(parent, content) {
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
-      previewCompartment.of([livePreviewPlugin, wikiLinkPlugin, imgPlugin]),
+      previewCompartment.of([livePreviewPlugin, tableOverlayPlugin, wikiLinkPlugin, imgPlugin]),
       linkClickHandler,
       autocompletion({ override: [wikiComplete], closeOnBlur: true }),
       keymap.of([
@@ -545,8 +648,30 @@ const root = document.documentElement;
 root.style.setProperty('--md-font', init.font || '');
 root.style.setProperty('--md-font-size', (init.fontSize || 14) + 'px');
 
+// ── Breadcrumb ────────────────────────────────────────────────────────────────
+const breadcrumbEl = document.getElementById('doc-breadcrumb');
+if (init.breadcrumb && init.breadcrumb.length > 1) {
+  init.breadcrumb.forEach((part, i) => {
+    if (i > 0) {
+      const sep = document.createElement('span');
+      sep.className = 'bc-sep';
+      sep.textContent = '/';
+      breadcrumbEl.appendChild(sep);
+    }
+    const span = document.createElement('span');
+    span.className = 'bc-part' + (i === init.breadcrumb.length - 1 ? ' bc-last' : '');
+    span.textContent = part.name;
+    span.dataset.fspath = part.fsPath;
+    breadcrumbEl.appendChild(span);
+  });
+  breadcrumbEl.addEventListener('click', e => {
+    const part = e.target.closest('.bc-part');
+    if (part) vscode.postMessage({ type: 'reveal-path', fsPath: part.dataset.fspath });
+  });
+}
+
 // ── Document title ────────────────────────────────────────────────────────────
-const titleEl  = document.getElementById('doc-title');
+const titleEl = document.getElementById('doc-title');
 let currentTitle = init.title || '';
 titleEl.textContent = currentTitle;
 
@@ -579,7 +704,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin, imgPlugin]
+      sourceMode ? [] : [livePreviewPlugin, tableOverlayPlugin, wikiLinkPlugin, imgPlugin]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);
@@ -594,7 +719,6 @@ window.addEventListener('message', ev => {
       break;
     case 'image-map':
       imageMap = msg.map || {};
-      // Force imgPlugin to redraw
       view.dispatch({});
       break;
     case 'title-revert':
@@ -604,9 +728,7 @@ window.addEventListener('message', ev => {
     case 'external-update': {
       const cur = view.state.doc.toString();
       if (msg.content !== cur) {
-        view.dispatch({
-          changes: { from: 0, to: view.state.doc.length, insert: msg.content },
-        });
+        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: msg.content } });
       }
       break;
     }
@@ -618,12 +740,11 @@ window.addEventListener('message', ev => {
       vscode.postMessage({ type: 'sync', content: view.state.doc.toString() });
       break;
     case 'image-pasted': {
-      // Add new image to map so it renders immediately
       if (msg.filename && msg.uri) imageMap[msg.filename] = msg.uri;
       const embed = `![[${msg.filename}]]`;
       const pos   = view.state.selection.main.head;
       view.dispatch({
-        changes:   { from: pos, insert: embed },
+        changes: { from: pos, insert: embed },
         selection: { anchor: pos + embed.length },
         userEvent: 'input',
       });
