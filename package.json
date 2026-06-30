@@ -57,6 +57,11 @@
           "type": "string",
           "default": "attachments",
           "description": "Nombre de la subcarpeta (modo 'subfolder') o ruta completa/relativa a la bóveda (modo 'specificfolder')"
+        },
+        "vaultTool.obsidianTheme": {
+          "type": "string",
+          "default": "",
+          "description": "Nombre del tema de Obsidian a aplicar. Carga .obsidian/themes/{nombre}/theme.css desde la carpeta raíz del vault."
         }
       }
     },
@@ -68,6 +73,10 @@
       {
         "command": "vaultTool.openKanban",
         "title": "Vault Tool: Abrir Kanban del vault"
+      },
+      {
+        "command": "vaultTool.toggleSourceMode",
+        "title": "Vault Tool: Alternar vista fuente / WYSIWYG"
       }
     ],
     "configurationDefaults": {

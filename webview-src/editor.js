@@ -1,7 +1,7 @@
 // webview-src/editor.js — CodeMirror 6 editor for the VS Code vault extension.
 // Bundled by esbuild into out/editor.bundle.js.
 
-import { EditorState, EditorSelection, RangeSetBuilder } from "@codemirror/state";
+import { EditorState, EditorSelection, RangeSetBuilder, Compartment } from "@codemirror/state";
 import {
   EditorView, ViewPlugin, Decoration, keymap, drawSelection
 } from "@codemirror/view";
@@ -41,7 +41,6 @@ const vsTheme = EditorView.theme({
     background: 'var(--vscode-editor-selectionBackground, rgba(173,214,255,0.3)) !important',
   },
   '.cm-activeLine':  { background: 'rgba(255,255,255,0.03)' },
-  '.cm-activeLineGutter': { background: 'transparent' },
   '.cm-line': { padding: '0' },
   // Wiki-link display style
   '.cm-wiki-link': {
@@ -93,7 +92,6 @@ const mdHighlight = HighlightStyle.define([
     borderLeft: '3px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.4))',
     paddingLeft: '12px',
     opacity: '0.85' },
-  // Markdown markers (#, **, *, `, ~~) — rendered dimmer
   { tag: tags.processingInstruction,
     color: 'var(--vscode-editorLineNumber-foreground, rgba(128,128,128,0.5))',
     fontSize: '0.82em' },
@@ -113,7 +111,6 @@ function getActiveLines(state) {
 }
 
 // ── Live-preview plugin ───────────────────────────────────────────────────────
-// Hides markdown syntax markers on lines where the cursor is NOT present.
 const livePreviewPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
@@ -124,7 +121,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
   _build(view) {
     const { state } = view;
     const active = getActiveLines(state);
-    const ranges = []; // { from, to }
+    const ranges = [];
 
     syntaxTree(state).iterate({
       from: view.viewport.from,
@@ -133,9 +130,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
         const ln = state.doc.lineAt(node.from).number;
         if (active.has(ln)) return;
         const n = node.name;
-
         if (n === 'HeaderMark') {
-          // Hide "# " (including the space that follows)
           let end = node.to;
           if (state.doc.sliceString(end, end + 1) === ' ') end++;
           ranges.push({ from: node.from, to: end });
@@ -150,19 +145,17 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           return false;
         }
         if (n === 'URL') {
-          // Hide URL (the surrounding ( ) are already hidden as LinkMark)
           ranges.push({ from: node.from, to: node.to });
           return false;
         }
       }
     });
 
-    // Sort then merge overlapping/adjacent and build
     ranges.sort((a, b) => a.from - b.from || a.to - b.to);
     const builder = new RangeSetBuilder();
     let lastTo = -1;
     for (const { from, to } of ranges) {
-      if (from < lastTo) continue; // skip overlap
+      if (from < lastTo) continue;
       try { builder.add(from, to, Decoration.replace({})); } catch (_) {}
       lastTo = to;
     }
@@ -171,7 +164,6 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
 }, { decorations: v => v.decorations });
 
 // ── Wiki-link plugin ──────────────────────────────────────────────────────────
-// On non-active lines: hides [[ ]] and styles the visible link text.
 const wikiLinkPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
@@ -184,9 +176,8 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
     const active = getActiveLines(state);
     const { from: vf, to: vt } = view.viewport;
     const str = state.doc.sliceString(vf, vt);
-    // Negative lookbehind: skip ![[image]]
     const re = /(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
-    const all = []; // { from, to, dec }
+    const all = [];
     let m;
     while ((m = re.exec(str)) !== null) {
       const mFrom = vf + m.index;
@@ -194,19 +185,15 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
       const ln = state.doc.lineAt(mFrom).number;
       if (active.has(ln)) continue;
       const name  = m[1];
-      const alias = m[2]; // undefined if no |alias
-      // Hide [[
+      const alias = m[2];
       all.push({ from: mFrom,     to: mFrom + 2,              dec: Decoration.replace({}) });
       if (alias !== undefined) {
-        // [[name| → hide; alias → style
         all.push({ from: mFrom + 2, to: mFrom + 2 + name.length + 1, dec: Decoration.replace({}) });
         const aFrom = mFrom + 2 + name.length + 1;
         all.push({ from: aFrom,  to: aFrom + alias.length,    dec: Decoration.mark({ class: 'cm-wiki-link' }) });
       } else {
-        // name → style
         all.push({ from: mFrom + 2, to: mFrom + 2 + name.length, dec: Decoration.mark({ class: 'cm-wiki-link' }) });
       }
-      // Hide ]]
       all.push({ from: mTo - 2, to: mTo,                      dec: Decoration.replace({}) });
     }
     all.sort((a, b) => a.from - b.from || a.to - b.to);
@@ -262,6 +249,10 @@ function toggleWrap(view, marker) {
   return true;
 }
 
+// ── Source mode (Compartment) ─────────────────────────────────────────────────
+const previewCompartment = new Compartment();
+let sourceMode = false;
+
 // ── Editor creation ───────────────────────────────────────────────────────────
 function createEditor(parent, content) {
   const state = EditorState.create({
@@ -272,8 +263,7 @@ function createEditor(parent, content) {
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
-      livePreviewPlugin,
-      wikiLinkPlugin,
+      previewCompartment.of([livePreviewPlugin, wikiLinkPlugin]),
       autocompletion({ override: [wikiComplete], closeOnBlur: true }),
       keymap.of([
         { key: 'Mod-b', run: v => toggleWrap(v, '**') },
@@ -313,7 +303,9 @@ titleEl.addEventListener('input', () => {
   renameTimer = setTimeout(() => {
     const newName = titleEl.textContent.trim();
     if (newName && newName !== currentTitle) {
-      currentTitle = newName; // optimistic update; revertido con title-revert si falla
+      currentTitle = newName;
+      // Sync content first so el host guarda antes de renombrar
+      vscode.postMessage({ type: 'sync', content: view.state.doc.toString() });
       vscode.postMessage({ type: 'rename', newName });
     }
   }, 800);
@@ -334,6 +326,17 @@ titleEl.addEventListener('keydown', e => {
 const container = document.getElementById('editor');
 const view = createEditor(container, init.content || '');
 view.focus();
+
+// ── Source mode toggle ────────────────────────────────────────────────────────
+function toggleSourceMode() {
+  sourceMode = !sourceMode;
+  view.dispatch({
+    effects: previewCompartment.reconfigure(
+      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin]
+    ),
+  });
+  document.body.classList.toggle('source-mode', sourceMode);
+}
 
 // ── Message handling ──────────────────────────────────────────────────────────
 window.addEventListener('message', ev => {
@@ -375,6 +378,19 @@ window.addEventListener('message', ev => {
     case 'font-update':
       if (msg.font)     root.style.setProperty('--md-font', msg.font);
       if (msg.fontSize) root.style.setProperty('--md-font-size', msg.fontSize);
+      break;
+    case 'theme-css': {
+      let st = document.getElementById('__obsidian-theme');
+      if (!st) {
+        st = document.createElement('style');
+        st.id = '__obsidian-theme';
+        document.head.appendChild(st);
+      }
+      st.textContent = msg.css || '';
+      break;
+    }
+    case 'toggle-source-mode':
+      toggleSourceMode();
       break;
   }
 });

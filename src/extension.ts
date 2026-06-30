@@ -42,6 +42,15 @@ function getAttachmentRoots(docUri: vscode.Uri): vscode.Uri[] {
   return [...new Set(roots)].map(r => vscode.Uri.file(r));
 }
 
+function getThemeCss(): string {
+  const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!vaultRoot) { return ''; }
+  const themeName = vscode.workspace.getConfiguration('vaultTool').get<string>('obsidianTheme', '').trim();
+  if (!themeName) { return ''; }
+  const cssPath = path.join(vaultRoot, '.obsidian', 'themes', themeName, 'theme.css');
+  try { return fs.readFileSync(cssPath, 'utf-8'); } catch { return ''; }
+}
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 let extensionUri: vscode.Uri;
@@ -104,6 +113,8 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
     setTimeout(() => {
       webviewPanel.webview.postMessage({ type: 'note-index', notes: noteIndex });
+      const themeCss = getThemeCss();
+      if (themeCss) { webviewPanel.webview.postMessage({ type: 'theme-css', css: themeCss }); }
     }, 300);
 
     let pendingSaveResolve: ((content: string) => void) | undefined;
@@ -139,6 +150,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
               ...getAttachmentRoots(document.uri),
             ],
           };
+        }
+        if (e.affectsConfiguration('vaultTool.obsidianTheme')) {
+          webviewPanel.webview.postMessage({ type: 'theme-css', css: getThemeCss() });
         }
       }),
 
@@ -196,8 +210,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             return;
           }
           const newUri = vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), newName + '.md'));
-          vscode.workspace.fs.rename(document.uri, newUri, { overwrite: false }).then(
-            () => { /* VS Code actualiza el panel automáticamente */ },
+          // Guardar antes de renombrar (el webview ya envió 'sync' justo antes de 'rename')
+          document.save().then(() => {
+            return vscode.workspace.fs.rename(document.uri, newUri, { overwrite: false });
+          }).then(
+            () => {},
             err => {
               webviewPanel.webview.postMessage({ type: 'title-revert', name: oldName });
               vscode.window.showErrorMessage(`No se pudo renombrar a "${newName}": ${err}`);
@@ -324,7 +341,12 @@ export function activate(context: vscode.ExtensionContext) {
 <body style="font-family:sans-serif;padding:1rem;"><h2>Kanban del Vault (placeholder)</h2></body></html>`;
   });
 
-  context.subscriptions.push(listNotesCmd, openKanbanCmd);
+  const toggleSourceCmd = vscode.commands.registerCommand('vaultTool.toggleSourceMode', () => {
+    const panel = activePanels.find(p => p.active) ?? activePanels.find(p => p.visible);
+    panel?.webview.postMessage({ type: 'toggle-source-mode' });
+  });
+
+  context.subscriptions.push(listNotesCmd, openKanbanCmd, toggleSourceCmd);
 }
 
 export function deactivate() {}
