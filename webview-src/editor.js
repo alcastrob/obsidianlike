@@ -1,7 +1,7 @@
 // webview-src/editor.js — CodeMirror 6 editor for the VS Code vault extension.
 // Bundled by esbuild into out/editor.bundle.js.
 
-import { EditorState, EditorSelection, RangeSetBuilder, Compartment } from "@codemirror/state";
+import { EditorState, EditorSelection, RangeSetBuilder, Compartment, StateEffect } from "@codemirror/state";
 import {
   EditorView, ViewPlugin, Decoration, WidgetType, keymap, drawSelection
 } from "@codemirror/view";
@@ -43,8 +43,8 @@ const vsTheme = EditorView.theme({
   },
   '.cm-activeLine':  { background: 'rgba(255,255,255,0.03)' },
   '.cm-line': { padding: '0' },
-  '.cm-wiki-link': {
-    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
+  '.cm-wiki-link, .cm-md-link': {
+    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
     textDecoration: 'underline',
     textUnderlineOffset: '2px',
     cursor: 'pointer',
@@ -55,14 +55,27 @@ const vsTheme = EditorView.theme({
     textUnderlineOffset: '2px',
     cursor: 'pointer',
   },
-  // Table lines: invisible but still in layout so CM6 can measure them
-  '.cm-table-line-hidden': { visibility: 'hidden' },
-  // Overlay layer that renders table widgets above the hidden raw lines
-  '.cm-table-overlay-layer': {
-    position: 'absolute', top: '0', left: '0', right: '0', bottom: '0',
-    pointerEvents: 'none', overflow: 'visible', zIndex: '2',
+  // Collapsed table rows (lines 2..N replaced by empty + height:0)
+  '.cm-table-row-hidden': {
+    height: '0 !important', lineHeight: '0 !important',
+    overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
   },
-  '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px', pointerEvents: 'auto' },
+  // Folded heading content
+  '.cm-fold-hidden': {
+    height: '0 !important', lineHeight: '0 !important',
+    overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
+    visibility: 'hidden',
+  },
+  // Fold toggle triangle that appears before each heading
+  '.cm-fold-toggle': {
+    display: 'inline-block', width: '1.2em', textAlign: 'center',
+    fontSize: '0.6em', verticalAlign: 'middle',
+    opacity: '0.4', cursor: 'pointer', userSelect: 'none',
+    transition: 'opacity 0.15s',
+    marginRight: '2px',
+  },
+  '.cm-fold-toggle:hover': { opacity: '0.85' },
+  '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
   '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
     border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
@@ -122,11 +135,11 @@ const mdHighlight = HighlightStyle.define([
     color: 'var(--italic-color, inherit)' },
   { tag: tags.strikethrough, textDecoration: 'line-through' },
   { tag: tags.link,
-    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
+    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
     textDecoration: 'underline', textUnderlineOffset: '2px' },
   { tag: tags.url,
-    color: 'var(--text-muted, var(--vscode-textLink-foreground, #4ec9b0))',
-    opacity: '0.6', fontSize: '0.82em' },
+    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
+    textDecoration: 'underline', textUnderlineOffset: '2px' },
   { tag: tags.monospace,
     fontFamily: 'var(--font-monospace, var(--vscode-editor-font-family, monospace))',
     fontSize: '0.88em',
@@ -156,47 +169,83 @@ function getActiveLines(state) {
 }
 
 // ── Table widget ──────────────────────────────────────────────────────────────
+// Renders inline markdown (bold, italic, code, wiki-links) inside table cells.
+function renderCell(raw) {
+  // HTML-escape first to prevent injection
+  let s = raw
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Protect inline code from further processing
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return `\x00C${codes.length - 1}\x00`; });
+  // Bold-italic → bold → italic (order matters: ** before *)
+  s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
+  s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+  // Wiki-links [[target]] or [[target|alias]]
+  s = s.replace(/(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_, tgt, alias) =>
+    `<span data-wiki="${tgt}" style="color:var(--link-color,var(--vscode-textLink-foreground,#4a9eff));` +
+    `text-decoration:underline;cursor:pointer;">${alias || tgt}</span>`
+  );
+  // Restore inline code
+  s = s.replace(/\x00C(\d+)\x00/g, (_, i) =>
+    `<code style="font-family:monospace;background:rgba(128,128,128,0.18);padding:1px 4px;border-radius:3px;">${codes[+i]}</code>`
+  );
+  return s;
+}
+
 class TableWidget extends WidgetType {
   constructor(src) { super(); this.src = src; }
   eq(other) { return this.src === other.src; }
   toDOM() {
-    const wrap  = document.createElement('div');
-    wrap.className = 'cm-md-table-wrap';
-    const table = document.createElement('table');
-    table.className = 'cm-md-table';
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'overflow-x:auto;margin:4px 0 10px;width:100%;display:block;';
 
-    const lines = this.src.split('\n').filter(l => l.trim() && l.includes('|'));
-    if (lines.length < 2) { wrap.textContent = this.src; return wrap; }
+    const lines = (this.src || '').split('\n').filter(l => l.trim() && l.includes('|'));
+    if (lines.length < 2) {
+      wrap.style.cssText += 'white-space:pre;font-family:monospace;opacity:0.75;';
+      wrap.textContent = this.src;
+      return wrap;
+    }
 
     const parseRow = line =>
       line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
 
-    const headers = parseRow(lines[0]);
-    const aligns  = parseRow(lines[1]).map(s => {
+    const aligns = parseRow(lines[1]).map(s => {
       const t = s.trim();
       if (t.startsWith(':') && t.endsWith(':')) return 'center';
       if (t.endsWith(':')) return 'right';
       return 'left';
     });
 
+    const BORDER   = '1px solid rgba(128,128,128,0.38)';
+    const CELL     = `border:${BORDER};padding:5px 12px;line-height:1.5;vertical-align:top;color:inherit;`;
+    const TH_EXTRA = 'font-weight:600;background:rgba(128,128,128,0.12);';
+
+    const table = document.createElement('table');
+    table.style.cssText =
+      'border-collapse:collapse;width:100%;font-size:inherit;font-family:inherit;color:inherit;';
+
     const thead = document.createElement('thead');
-    const hr = document.createElement('tr');
-    headers.forEach((h, i) => {
+    const hRow  = document.createElement('tr');
+    parseRow(lines[0]).forEach((h, i) => {
       const th = document.createElement('th');
-      th.textContent = h;
-      th.style.textAlign = aligns[i] || 'left';
-      hr.appendChild(th);
+      th.style.cssText = CELL + TH_EXTRA + `text-align:${aligns[i] || 'left'};`;
+      th.innerHTML = renderCell(h);
+      hRow.appendChild(th);
     });
-    thead.appendChild(hr);
+    thead.appendChild(hRow);
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    lines.slice(2).forEach(line => {
+    lines.slice(2).forEach((line, ri) => {
       const tr = document.createElement('tr');
+      if (ri % 2 === 1) tr.style.background = 'rgba(128,128,128,0.05)';
       parseRow(line).forEach((cell, i) => {
         const td = document.createElement('td');
-        td.textContent = cell;
-        td.style.textAlign = aligns[i] || 'left';
+        td.style.cssText = CELL + `text-align:${aligns[i] || 'left'};`;
+        td.innerHTML = renderCell(cell);
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
@@ -210,13 +259,30 @@ class TableWidget extends WidgetType {
 
 // ── Image widget ──────────────────────────────────────────────────────────────
 class ImageWidget extends WidgetType {
-  constructor(src, alt) { super(); this.src = src; this.alt = alt; }
-  eq(other) { return this.src === other.src; }
+  constructor(src, alt, width, caption) {
+    super(); this.src = src; this.alt = alt; this.width = width; this.caption = caption;
+  }
+  eq(other) {
+    return this.src === other.src && this.width === other.width && this.caption === other.caption;
+  }
   toDOM() {
     const img = document.createElement('img');
     img.src = this.src;
-    img.alt = this.alt;
-    img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:4px;';
+    img.alt = this.alt || '';
+    img.style.cssText = 'height:auto;display:block;border-radius:4px;';
+    img.style.maxWidth = this.width || '100%';
+    if (this.width) img.style.width = this.width;
+    if (this.caption) {
+      const fig = document.createElement('figure');
+      fig.style.cssText = 'display:block;margin:4px 0 8px;';
+      fig.appendChild(img);
+      const cap = document.createElement('figcaption');
+      cap.style.cssText = 'text-align:center;font-size:0.85em;opacity:0.6;margin-top:4px;';
+      cap.textContent = this.caption;
+      fig.appendChild(cap);
+      return fig;
+    }
+    img.style.margin = '4px 0';
     return img;
   }
   ignoreEvent() { return false; }
@@ -226,7 +292,8 @@ class ImageWidget extends WidgetType {
 const livePreviewPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
-    if (u.docChanged || u.selectionSet || u.viewportChanged) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged ||
+        syntaxTree(u.startState) !== syntaxTree(u.state)) {
       this.decorations = this._build(u.view);
     }
   }
@@ -246,25 +313,34 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           const n = node.name;
 
           // ── Tables ────────────────────────────────────────────────────────
-          // Rendered by tableOverlayPlugin (absolutely positioned overlay).
-          // Here we only hide the raw table lines when not active so the
-          // overlay is visible. We use visibility:hidden (NOT display:none)
-          // so CM6 can still measure line heights without crashing.
+          // Strategy (no block:true → no CM6 measurement crash):
+          //   Line 1 (header): Decoration.replace with TableWidget — single-line
+          //   Lines 2..N:      Decoration.replace({}) to empty + Decoration.line
+          //                    to collapse height to 0.
+          // The widget uses inline styles so it renders without CM6 class scoping.
           if (n === 'Table') {
             try {
               const fromLine = state.doc.lineAt(node.from);
-              const endPos = Math.max(node.from,
+              const endPos   = Math.max(node.from,
                 Math.min(node.to, state.doc.length) - 1);
-              const toLine = state.doc.lineAt(endPos);
+              const toLine   = state.doc.lineAt(endPos);
 
               let isActive = false;
               for (let i = fromLine.number; i <= toLine.number; i++) {
                 if (active.has(i)) { isActive = true; break; }
               }
               if (!isActive) {
-                for (let ln = fromLine.number; ln <= toLine.number; ln++) {
-                  lineDecs.push({ from: state.doc.line(ln).from,
-                    dec: Decoration.line({ class: 'cm-table-line-hidden' }) });
+                const src = state.doc.sliceString(fromLine.from, toLine.to);
+                // First line replaced by the rendered widget (single-line, safe)
+                decs.push({ from: fromLine.from, to: fromLine.to,
+                  dec: Decoration.replace({ widget: new TableWidget(src) }) });
+                // Remaining lines: replace content + collapse via line decoration
+                for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
+                  const line = state.doc.line(ln);
+                  decs.push({ from: line.from, to: line.to,
+                    dec: Decoration.replace({}) });
+                  lineDecs.push({ from: line.from,
+                    dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
                 }
               }
             } catch (_) {}
@@ -284,14 +360,10 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
             return false;
           }
-          if (n === 'LinkMark') {
-            decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
-            return false;
-          }
-          if (n === 'URL') {
-            decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
-            return false;
-          }
+          // LinkMark and URL nodes are handled by mdLinkPlugin (regex-based).
+          // Returning false here prevents double-processing if the tree-walker still visits them.
+          if (n === 'LinkMark') { return false; }
+          if (n === 'URL')      { return false; }
         }
       });
 
@@ -313,90 +385,70 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
         if (to > lastTo) lastTo = to;
       }
       return builder.finish();
-    } catch (_) {
+    } catch (e) {
+      console.error('[livePreview] _build error:', e);
       return Decoration.none;
     }
   }
 }, { decorations: v => v.decorations });
 
-// ── Table overlay plugin ──────────────────────────────────────────────────────
-// Renders tables as absolutely-positioned widgets in an overlay div that sits
-// on top of the (visibility:hidden) raw table lines. This avoids all CM6
-// block-decoration constraints that caused measurement crashes.
-const tableOverlayPlugin = ViewPlugin.fromClass(class {
-  constructor(view) {
-    this.overlay = document.createElement('div');
-    this.overlay.className = 'cm-table-overlay-layer';
-    // Append inside scrollDOM so the overlay scrolls with content.
-    // scrollDOM needs position:relative for absolute children.
-    if (getComputedStyle(view.scrollDOM).position === 'static') {
-      view.scrollDOM.style.position = 'relative';
-    }
-    view.scrollDOM.appendChild(this.overlay);
-    this._render(view);
+// ── Standard markdown link plugin ([text](url) → styled clickable span) ───────
+class MdLinkWidget extends WidgetType {
+  constructor(text, url) { super(); this.text = text; this.url = url; }
+  eq(o) { return this.text === o.text && this.url === o.url; }
+  toDOM() {
+    const el = document.createElement('span');
+    el.className = 'cm-md-link';
+    el.textContent = this.text;
+    el.dataset.url = this.url;
+    return el;
   }
-  update(u) {
-    if (u.docChanged || u.viewportChanged || u.selectionSet) {
-      this._render(u.view);
-    }
-  }
-  _render(view) {
-    // Clear previous table widgets
-    while (this.overlay.firstChild) this.overlay.removeChild(this.overlay.firstChild);
+  ignoreEvent() { return false; }
+}
 
+const mdLinkPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this._build(view); }
+  update(u) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged) {
+      this.decorations = this._build(u.view);
+    }
+  }
+  _build(view) {
     const { state } = view;
     const active = getActiveLines(state);
-    const scrollDOM = view.scrollDOM;
-    const scrollTop  = scrollDOM.scrollTop;
-    const scrollLeft = scrollDOM.scrollLeft;
-    const scrollRect = scrollDOM.getBoundingClientRect();
-    const contentRect = view.contentDOM.getBoundingClientRect();
-
-    syntaxTree(state).iterate({
-      from: view.viewport.from,
-      to:   view.viewport.to,
-      enter: (node) => {
-        if (node.name !== 'Table') return;
-        try {
-          const fromLine = state.doc.lineAt(node.from);
-          const endPos   = Math.max(node.from, Math.min(node.to, state.doc.length) - 1);
-          const toLine   = state.doc.lineAt(endPos);
-
-          let isActive = false;
-          for (let i = fromLine.number; i <= toLine.number; i++) {
-            if (active.has(i)) { isActive = true; break; }
-          }
-          if (isActive) return false;
-
-          const fromCoords = view.coordsAtPos(fromLine.from);
-          if (!fromCoords) return false;
-
-          const src = state.doc.sliceString(fromLine.from, toLine.to);
-          const el  = new TableWidget(src).toDOM();
-
-          // Position relative to scrollDOM's content origin (scroll-adjusted)
-          const top  = fromCoords.top  - scrollRect.top  + scrollTop;
-          const left = contentRect.left - scrollRect.left + scrollLeft;
-          el.style.cssText =
-            `position:absolute;top:${top}px;left:${left}px;` +
-            `width:${contentRect.width}px;box-sizing:border-box;`;
-
-          this.overlay.appendChild(el);
-        } catch (_) {}
-        return false;
-      },
-    });
+    const { from: vf, to: vt } = view.viewport;
+    const str = state.doc.sliceString(vf, vt);
+    // Match [text](url) but NOT ![ (image syntax)
+    const re = /(?<!!)\[([^\[\]\n]*)\]\(([^)\n]*)\)/g;
+    const all = [];
+    let m;
+    while ((m = re.exec(str)) !== null) {
+      const mFrom = vf + m.index;
+      const mTo   = mFrom + m[0].length;
+      const ln = state.doc.lineAt(mFrom).number;
+      if (active.has(ln)) continue;
+      const text = m[1];
+      const url  = m[2].trim();
+      all.push({ from: mFrom, to: mTo,
+        dec: Decoration.replace({ widget: new MdLinkWidget(text, url) }) });
+    }
+    all.sort((a, b) => a.from - b.from || a.to - b.to);
+    const builder = new RangeSetBuilder();
+    let lastTo = -1;
+    for (const { from, to, dec } of all) {
+      if (from < lastTo) continue;
+      try { builder.add(from, to, dec); lastTo = Math.max(lastTo, to); } catch (_) {}
+    }
+    return builder.finish();
   }
-  destroy() {
-    this.overlay.remove();
-  }
-});
+}, { decorations: v => v.decorations });
 
 // ── Wiki-link plugin ──────────────────────────────────────────────────────────
 const wikiLinkPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
-    if (u.docChanged || u.selectionSet || u.viewportChanged) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged ||
+        syntaxTree(u.startState) !== syntaxTree(u.state)) {
       this.decorations = this._build(u.view);
     }
   }
@@ -441,7 +493,8 @@ const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
 const imgPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
-    if (u.docChanged || u.selectionSet || u.viewportChanged) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged ||
+        syntaxTree(u.startState) !== syntaxTree(u.state)) {
       this.decorations = this._build(u.view);
     }
   }
@@ -454,8 +507,16 @@ const imgPlugin = ViewPlugin.fromClass(class {
     const all = [];
     let m;
     while ((m = re.exec(str)) !== null) {
-      const filename = m[1].trim();
+      const raw = m[1];
+      const pipeIdx = raw.indexOf('|');
+      const filename = (pipeIdx >= 0 ? raw.slice(0, pipeIdx) : raw).trim();
       if (!IMG_EXT.test(filename)) continue;
+      let width = null, caption = null;
+      if (pipeIdx >= 0) {
+        const param = raw.slice(pipeIdx + 1).trim();
+        if (/^\d+(?:px)?$/i.test(param)) width = parseInt(param, 10) + 'px';
+        else if (param) caption = param;
+      }
       const mFrom = vf + m.index;
       const mTo   = mFrom + m[0].length;
       const ln = state.doc.lineAt(mFrom).number;
@@ -464,7 +525,7 @@ const imgPlugin = ViewPlugin.fromClass(class {
       const src = imageMap[filename] || imageMap[basename] || '';
       if (!src) continue;
       all.push({ from: mFrom, to: mTo,
-        dec: Decoration.replace({ widget: new ImageWidget(src, filename) }) });
+        dec: Decoration.replace({ widget: new ImageWidget(src, filename, width, caption) }) });
     }
     all.sort((a, b) => a.from - b.from);
     const builder = new RangeSetBuilder();
@@ -576,10 +637,13 @@ const linkClickHandler = EditorView.domEventHandlers({
   mousedown(e, view) {
     const wikiEl = isWikiLinkEl(e.target, view.dom);
     if (wikiEl) { e.preventDefault(); return true; }
+    const tableWiki = e.target.closest('[data-wiki]');
+    if (tableWiki) { e.preventDefault(); return true; }
+    const mdLink = e.target.closest('.cm-md-link');
+    if (mdLink) { e.preventDefault(); return true; }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
-    if (getActiveLines(view.state).has(view.state.doc.lineAt(pos).number)) return false;
     if (findUrlAtPos(view, pos)) { e.preventDefault(); return true; }
     return false;
   },
@@ -591,10 +655,21 @@ const linkClickHandler = EditorView.domEventHandlers({
       vscode.postMessage({ type: 'open-note', name: wikiEl.textContent.trim() });
       return true;
     }
+    const tableWiki = e.target.closest('[data-wiki]');
+    if (tableWiki) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'open-note', name: tableWiki.dataset.wiki });
+      return true;
+    }
+    const mdLink = e.target.closest('.cm-md-link');
+    if (mdLink) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'open-url', url: mdLink.dataset.url });
+      return true;
+    }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
-    if (getActiveLines(view.state).has(view.state.doc.lineAt(pos).number)) return false;
     const url = findUrlAtPos(view, pos);
     if (url) {
       e.preventDefault();
@@ -604,6 +679,124 @@ const linkClickHandler = EditorView.domEventHandlers({
     return false;
   },
 });
+
+// ── Heading fold ──────────────────────────────────────────────────────────────
+const foldEffect    = StateEffect.define();
+const foldedSet     = new Set(); // set of heading line.from positions that are folded
+let   currentView   = null;      // set after editor creation
+
+class FoldToggle extends WidgetType {
+  constructor(lineFrom, folded) { super(); this.lineFrom = lineFrom; this.folded = folded; }
+  eq(o) { return this.lineFrom === o.lineFrom && this.folded === o.folded; }
+  toDOM() {
+    const el = document.createElement('span');
+    el.className = 'cm-fold-toggle';
+    el.textContent = this.folded ? '▶' : '▾';
+    const lf = this.lineFrom;
+    el.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    el.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      if (foldedSet.has(lf)) foldedSet.delete(lf); else foldedSet.add(lf);
+      if (currentView) currentView.dispatch({ effects: foldEffect.of(lf) });
+    });
+    return el;
+  }
+  ignoreEvent() { return false; }
+}
+
+function collectHeadings(state) {
+  const hs = [];
+  syntaxTree(state).iterate({
+    enter(node) {
+      const m = /^ATXHeading([1-6])$/.exec(node.name);
+      if (m) {
+        const line = state.doc.lineAt(node.from);
+        hs.push({ level: +m[1], lineFrom: line.from, lineTo: line.to });
+        return false;
+      }
+    }
+  });
+  return hs;
+}
+
+const foldPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this._build(view); }
+  update(u) {
+    if (u.docChanged) {
+      // Remap folded positions through document edits
+      const mapped = new Set();
+      for (const p of foldedSet) {
+        const mp = u.changes.mapPos(p, 1);
+        if (mp != null) mapped.add(mp);
+      }
+      foldedSet.clear();
+      mapped.forEach(p => foldedSet.add(p));
+    }
+    if (u.docChanged || u.viewportChanged || u.selectionSet ||
+        u.transactions.some(t => t.effects.some(e => e.is(foldEffect)))) {
+      this.decorations = this._build(u.view);
+    }
+  }
+  _build(view) {
+    try {
+      const { state } = view;
+      const { from: vf, to: vt } = view.viewport;
+      const headings = collectHeadings(state);
+      const all = [], lineDecs = [];
+
+      for (let i = 0; i < headings.length; i++) {
+        const h = headings[i];
+        const folded = foldedSet.has(h.lineFrom);
+
+        // Fold toggle widget — only render when in viewport
+        if (h.lineTo >= vf && h.lineFrom <= vt) {
+          all.push({ from: h.lineFrom, to: h.lineFrom,
+            dec: Decoration.widget({ widget: new FoldToggle(h.lineFrom, folded), side: -1 }) });
+        }
+
+        if (!folded) continue;
+
+        // Find end of folded range: next heading at same or higher level
+        let foldEnd = state.doc.length;
+        for (let j = i + 1; j < headings.length; j++) {
+          if (headings[j].level <= h.level) {
+            foldEnd = headings[j].lineFrom > 0 ? headings[j].lineFrom - 1 : 0;
+            break;
+          }
+        }
+
+        // Collapse every line after the heading up to foldEnd
+        if (foldEnd > h.lineTo) {
+          const startLn = state.doc.lineAt(h.lineTo + 1).number;
+          const endLn   = state.doc.lineAt(foldEnd).number;
+          for (let ln = startLn; ln <= endLn; ln++) {
+            const line = state.doc.line(ln);
+            all.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
+            lineDecs.push({ from: line.from,
+              dec: Decoration.line({ class: 'cm-fold-hidden' }) });
+          }
+        }
+      }
+
+      const combined = [
+        ...all,
+        ...lineDecs.map(d => ({ from: d.from, to: d.from, dec: d.dec })),
+      ];
+      combined.sort((a, b) => a.from - b.from || a.to - b.to);
+      const builder = new RangeSetBuilder();
+      let lastTo = -1;
+      for (const { from, to, dec } of combined) {
+        if (from !== to && from < lastTo) continue;
+        try { builder.add(from, to, dec); } catch (_) {}
+        if (to > lastTo) lastTo = to;
+      }
+      return builder.finish();
+    } catch (e) {
+      console.error('[foldPlugin]', e);
+      return Decoration.none;
+    }
+  }
+}, { decorations: v => v.decorations });
 
 // ── Source mode (Compartment) ─────────────────────────────────────────────────
 const previewCompartment = new Compartment();
@@ -619,7 +812,8 @@ function createEditor(parent, content) {
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
-      previewCompartment.of([livePreviewPlugin, tableOverlayPlugin, wikiLinkPlugin, imgPlugin]),
+      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin]),
+      foldPlugin,
       linkClickHandler,
       autocompletion({ override: [wikiComplete], closeOnBlur: true }),
       keymap.of([
@@ -650,7 +844,7 @@ root.style.setProperty('--md-font-size', (init.fontSize || 14) + 'px');
 
 // ── Breadcrumb ────────────────────────────────────────────────────────────────
 const breadcrumbEl = document.getElementById('doc-breadcrumb');
-if (init.breadcrumb && init.breadcrumb.length > 1) {
+if (init.breadcrumb && init.breadcrumb.length > 0) {
   init.breadcrumb.forEach((part, i) => {
     if (i > 0) {
       const sep = document.createElement('span');
@@ -658,15 +852,18 @@ if (init.breadcrumb && init.breadcrumb.length > 1) {
       sep.textContent = '/';
       breadcrumbEl.appendChild(sep);
     }
+    const isLast = i === init.breadcrumb.length - 1;
     const span = document.createElement('span');
-    span.className = 'bc-part' + (i === init.breadcrumb.length - 1 ? ' bc-last' : '');
+    span.className = 'bc-part' + (isLast ? ' bc-last' : '');
     span.textContent = part.name;
-    span.dataset.fspath = part.fsPath;
+    if (!isLast) { span.dataset.fspath = part.fsPath; }
     breadcrumbEl.appendChild(span);
   });
   breadcrumbEl.addEventListener('click', e => {
     const part = e.target.closest('.bc-part');
-    if (part) vscode.postMessage({ type: 'reveal-path', fsPath: part.dataset.fspath });
+    if (part && part.dataset.fspath) {
+      vscode.postMessage({ type: 'reveal-path', fsPath: part.dataset.fspath });
+    }
   });
 }
 
@@ -697,6 +894,7 @@ titleEl.addEventListener('keydown', e => {
 // ── Editor ────────────────────────────────────────────────────────────────────
 const container = document.getElementById('editor');
 const view = createEditor(container, init.content || '');
+currentView = view;
 view.focus();
 
 // ── Source mode toggle ────────────────────────────────────────────────────────
@@ -704,7 +902,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, tableOverlayPlugin, wikiLinkPlugin, imgPlugin]
+      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin, imgPlugin]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);

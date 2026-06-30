@@ -28,7 +28,7 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 | File | Role |
 |---|---|
 | `src/extension.ts` | Extension host: ~430 lines. Provider, message handling, file I/O. |
-| `webview-src/editor.js` | Webview CM6 editor: ~750 lines. All editor logic. |
+| `webview-src/editor.js` | Webview CM6 editor: ~1000 lines. All editor logic. |
 | `out/extension.js` | Compiled host (committed, required for packaging). |
 | `out/editor.bundle.js` | esbuild bundle of webview (committed, required for packaging). |
 | `package.json` | Publisher must be `angel-local` (vsce 3.x validates this). |
@@ -53,9 +53,13 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 
 - Sets `webviewPanel.webview.options` with `localResourceRoots` covering `out/` and all attachment dirs.
 - Calls `getThemeCss()`, `getImageMap()`, `computeBreadcrumb()` and passes all to `buildHtml()`.
-- Sends `{ type: 'note-index', notes }` after 300ms (webview ready).
+- After 300ms: sends `{ type: 'note-index', notes }` and `{ type: 'theme-css', css }` (theme CSS is **not** inlined in HTML — see below).
 - Handles `onWillSaveTextDocument`: sends `get-content` to webview, awaits `content-for-save` response (5s timeout).
 - Handles `onDidChangeTextDocument`: sends `external-update` to webview when the file changes outside the webview.
+
+### Why theme CSS is sent via postMessage, not inlined in HTML
+
+Obsidian themes (e.g. Border) embed SVG data URLs in CSS properties like `-webkit-mask-image`. Those SVGs contain `<style>...</style>` tags, which prematurely close the `<style id="__obsidian-theme">` HTML element. The fix: leave the style element empty in HTML, send CSS via `postMessage({ type: 'theme-css', css })`, apply with `element.textContent = css` (bypasses the HTML parser entirely).
 
 ### Message handlers (webview → host)
 
@@ -69,14 +73,14 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 | `reveal-path` | `vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(fsPath))` |
 | `paste-image` | Saves base64 buffer as `Pasted image YYYYMMDDHHMMSS.png` to configured attachments dir, sends back `image-pasted` with webview URI |
 
-### `buildHtml(content, font, fontSize, cspSource, scriptUri, title, imageMap, themeCss, breadcrumb)`
+### `buildHtml(content, font, fontSize, noteIndex, cspSource, scriptUri, title, imageMap, breadcrumb)`
 
 Generates the full webview HTML. Key points:
 - CSP: `script-src ${cspSource} 'unsafe-inline'` (inline scripts are needed).
-- `<style id="__obsidian-theme">` — injected theme CSS (pre-escaped `</style>`).
+- `<style id="__obsidian-theme"></style>` — **empty** in HTML; filled via `theme-css` postMessage.
 - `window.__vaultInitial = { content, font, fontSize, noteIndex, title, imageMap, breadcrumb }` — all initial data.
 - The theme class sync script (`theme-dark`/`theme-light` on body) runs **after** `<body>` (at end of body, not in head) so `document.body` is never null.
-- `#doc-breadcrumb` — clickable path segments above the title.
+- `#doc-breadcrumb` — clickable path segments above the title. Always visible (even for root-level files). Last segment (filename) is non-clickable. Directory segments send `reveal-path`.
 - `#doc-title` — editable H1 that triggers rename on blur (800ms debounce).
 - `#editor` — the CM6 mount point.
 
@@ -91,9 +95,10 @@ Generates the full webview HTML. Key points:
   EditorView.lineWrapping,
   markdown({ base: markdownLanguage }),
   syntaxHighlighting(mdHighlight),
-  previewCompartment.of([livePreviewPlugin, tableOverlayPlugin, wikiLinkPlugin, imgPlugin]),
+  previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin]),
+  foldPlugin,
   linkClickHandler,
-  autocompletion({ override: [wikiComplete] }),
+  autocompletion({ override: [wikiComplete], closeOnBlur: true }),
   keymap.of([Mod-b (bold), Mod-i (italic), ...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
   vsTheme,
   EditorView.updateListener (400ms sync debounce),
@@ -102,44 +107,69 @@ Generates the full webview HTML. Key points:
 
 ### `vsTheme` / `mdHighlight`
 
-- `vsTheme`: `EditorView.theme({})` with CSS vars from VS Code (`--vscode-editor-*`) for all CM6 UI elements.
-- `mdHighlight`: `HighlightStyle` using Obsidian CSS vars (`--bold-color`, `--h1-color`, `--h1-size`, `--italic-color`, `--code-normal`, `--blockquote-color`, etc.) with VS Code fallbacks. Obsidian's theme CSS uses `.theme-dark`/`.theme-light` class selectors — these are added to `<body>` and `<html>` by the inline script at the end of body.
+- `vsTheme`: `EditorView.theme({})` with CSS vars from VS Code (`--vscode-editor-*`) for all CM6 UI elements. Also defines `.cm-wiki-link`, `.cm-md-link`, `.cm-fold-toggle`, `.cm-fold-hidden`, `.cm-table-row-hidden`, table styles, etc.
+- `mdHighlight`: `HighlightStyle` using Obsidian CSS vars (`--bold-color`, `--h1-color`, `--h1-size`, etc.) with VS Code fallbacks. `tags.link` and `tags.url` both use `--link-color` with underline (same style as wiki-links).
 
 ### `livePreviewPlugin`
 
-`ViewPlugin` that hides markdown syntax markers on non-active lines. Active lines = lines that contain any cursor selection anchor or head.
+`ViewPlugin` that hides markdown syntax markers on non-active lines via syntax tree iteration. Active lines = lines containing any cursor selection anchor or head.
 
-`_build(view)` iterates the syntax tree over the current viewport and:
-- **Tables** — adds `Decoration.line({ class: 'cm-table-line-hidden' })` (CSS: `visibility: hidden`) for each table line when none of the table lines are active. Rendering is delegated to `tableOverlayPlugin`. **Does NOT use `block: true` decorations** — these crash CM6's measurement phase (`measureVisibleLineHeights`, `coordsAt`) for multi-line blocks.
-- **HeaderMark** — `Decoration.replace({})` hides the `##` prefix (and trailing space).
-- **EmphasisMark, CodeMark, StrikethroughMark, LinkMark, URL** — `Decoration.replace({})` hides the markers.
+`_build(view)` iterates the syntax tree over the current viewport:
+- **Tables** — first line replaced by `Decoration.replace({ widget: TableWidget })` (single-line, no `block:true`). Remaining table lines replaced with `Decoration.replace({})` + `Decoration.line({ class: 'cm-table-row-hidden' })` to collapse height.
+- **HeaderMark** — `Decoration.replace({})` hides `## ` prefix (and trailing space).
+- **EmphasisMark, CodeMark, StrikethroughMark** — `Decoration.replace({})` hides the markers.
+- **LinkMark, URL** — returns `false` only (no hiding); handled by `mdLinkPlugin` instead.
 
-`_build` wraps everything in `try/catch` returning `Decoration.none` on any error.
+**`block: true` decorations are permanently banned** — they crash CM6's `measureVisibleLineHeights` / `coordsAt`. All multi-line hiding uses `Decoration.line({ class: '...' })` with `height: 0` CSS.
 
-### `tableOverlayPlugin`
+### `TableWidget` / `renderCell(raw)`
 
-`ViewPlugin` that renders tables visually without CM6 block decorations:
-- `constructor(view)`: creates `<div class="cm-table-overlay-layer">` appended to `view.scrollDOM` (position: absolute). Sets `view.scrollDOM.style.position = 'relative'` if not already.
-- `_render(view)`: on every docChanged/viewportChanged/selectionSet, clears the overlay and iterates the syntax tree. For each Table node where no line is active, calls `view.coordsAtPos(firstLine.from)` to get the screen Y position and places a `TableWidget` div at `top = coords.top - scrollRect.top + scrollDOM.scrollTop`. CSS: `pointer-events: none` on the layer, `pointer-events: auto` on each table element.
-- When the cursor enters a table line → `isActive` = true → no `cm-table-line-hidden` class → raw markdown visible, overlay widget hidden.
+`TableWidget` is a `WidgetType` rendered as a single-line `Decoration.replace` on the first table line. Renders a full `<table>` with `<th>` / `<td>` cells.
 
-**Critical**: `visibility: hidden` is used (not `display: none`) so CM6 can still measure line heights for scroll and viewport calculations.
+`renderCell(raw)` — inline markdown renderer for table cell content: HTML-escapes, then applies sequential regex for bold, italic, strikethrough, wiki-links (`data-wiki` attribute), inline code. Uses `innerHTML` so formatting renders.
+
+### `mdLinkPlugin`
+
+Regex-based `ViewPlugin` for standard markdown links `[text](url)`. More reliable than syntax-tree approach because lezer-markdown's `Link` node structure varies depending on URL format in href.
+
+- Regex: `/(?<!!)\[([^\[\]\n]*)\]\(([^)\n]*)\)/g` — matches `[text](url)` but NOT `![alt](url)`.
+- For non-active lines: replaces entire `[text](url)` with `MdLinkWidget` — a `<span class="cm-md-link" data-url="url">text</span>`.
+- Styled identically to wiki-links (underlined, `--link-color`).
+- `linkClickHandler` detects `.cm-md-link` clicks and sends `open-url` with `dataset.url`.
 
 ### `wikiLinkPlugin`
 
-Regex `/(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g` over viewport text. For non-active lines, hides `[[`, `]]`, and (when alias) the `target|` part, leaving only the display text with class `cm-wiki-link` (underlined, accent color).
+Regex `/(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g` over viewport text. For non-active lines, hides `[[`, `]]`, and (when alias) the `target|` part, leaving only the display text with class `cm-wiki-link`.
 
 ### `imgPlugin`
 
-Regex `/!\[\[([^\]]+)\]\]/g` over viewport. For non-active lines with known filenames in `imageMap`, replaces with `ImageWidget` (`<img max-width:100%>`).
+Regex `/!\[\[([^\]]+)\]\]/g` over viewport. Parses optional `|` parameter:
+- `![[file.png|400]]` or `![[file.png|400px]]` → image at 400px wide
+- `![[file.png|Caption text]]` → image with `<figcaption>` below
+
+For non-active lines with known filename in `imageMap`, replaces with `ImageWidget`.
+
+`ImageWidget(src, alt, width, caption)` — renders `<img>` optionally wrapped in `<figure>` + `<figcaption>`.
+
+### `foldPlugin`
+
+`ViewPlugin` outside `previewCompartment` (works in both live-preview and source mode) that implements collapsible headings.
+
+- `foldedSet: Set<number>` — module-level set of `line.from` positions of folded headings.
+- `foldEffect: StateEffect` — dispatched on toggle to trigger plugin rebuild.
+- `collectHeadings(state)` — scans the full syntax tree for `ATXHeading[1-6]` nodes.
+- For each heading in viewport: adds `FoldToggle` widget (`▾`/`▶`) at `line.from` with `side: -1`.
+- For each folded heading: collapses lines from heading+1 to start of next heading at same/higher level (or end of doc) using `Decoration.replace({})` + `Decoration.line({ class: 'cm-fold-hidden' })`.
+- Fold positions are remapped through document changes via `u.changes.mapPos()`.
+- `currentView` module-level ref is set after editor creation so `FoldToggle.toDOM()` can dispatch effects.
 
 ### `linkClickHandler`
 
 `EditorView.domEventHandlers`:
-- **`mousedown`**: if target is `.cm-wiki-link` or `coordsAtPos` finds a URL on a non-active line → `e.preventDefault()` to block CM6 from moving the cursor to that position.
-- **`click`**: `.cm-wiki-link` → `open-note`; URL found via syntax tree or regex → `open-url`.
+- **`mousedown`**: preventDefault + return true for `.cm-wiki-link`, `[data-wiki]` (table cells), `.cm-md-link`, or any position where `findUrlAtPos` finds a URL. No active-line restriction — URLs are always navigable.
+- **`click`**: same detection order; dispatches `open-note` (wiki-links) or `open-url` (URLs and `cm-md-link`).
 
-`findUrlAtPos(view, pos)`: walks the syntax tree up from `pos` looking for `URL` or `Link/URL` nodes; falls back to regex on the line text.
+`findUrlAtPos(view, pos)`: walks the syntax tree up from `pos` looking for `URL` or `Link/URL` nodes; falls back to regex `/https?:\/\/[^\s)"'\]>]+/g` on the line text.
 
 ### `wikiComplete`
 
@@ -157,7 +187,7 @@ CM6 autocompletion source. Triggered by `\[\[[^\]]*$` before cursor. Returns mat
 | `trigger-sync` | Flushes pending sync immediately |
 | `image-pasted` | Updates `imageMap` entry, inserts `![[filename]]` at cursor |
 | `font-update` | Updates `--md-font` and `--md-font-size` CSS vars on `<html>` |
-| `theme-css` | Replaces `<style id="__obsidian-theme">` content |
+| `theme-css` | Sets `element.textContent = css` on `<style id="__obsidian-theme">` |
 | `toggle-source-mode` | Reconfigures `previewCompartment` to `[]` or back |
 
 ## Configuration (`package.json` → `contributes.configuration`)
@@ -171,24 +201,13 @@ CM6 autocompletion source. Triggered by `\[\[[^\]]*$` before cursor. Returns mat
 
 ## Known issues / future work
 
-The following have NOT been investigated or fixed:
-1. **Image paste** — user mentioned it's broken but no investigation done yet.
-2. **`[[` wiki link picker** — autocomplete picker may have issues; not investigated.
-3. **Table overlay scroll sync** — the overlay positions are recalculated on `viewportChanged`, but rapid scroll may show momentary position lag.
-4. **Table line height mismatch** — the overlay widget may be taller/shorter than the hidden raw lines, causing slight scrollbar inaccuracy for documents heavy with tables.
+1. **Image paste** — reported broken, not investigated.
+2. **`[[` wiki link picker** — autocomplete picker may have issues, not investigated.
+3. **Standard markdown images** `![alt](url)` — not handled by imgPlugin (which only handles `![[file]]`). Shows as raw markdown.
 
 ## Git branch
 
-Working branch: `dev`. Main branch: `main`.
-
-Recent significant commits on `dev`:
-- Table rendering via overlay plugin (avoids CM6 block decoration crashes)
-- Theme class sync fix (script moved to end of `<body>`)
-- Clickable breadcrumb path at top of document
-- Wiki-link update on file rename (`updateWikiLinks`)
-- Link click: `mousedown` preventDefault + `click` action (prevents cursor-move-only behavior)
-- `computeBreadcrumb` + `reveal-path` message for Explorer reveal
-- Full migration from `contenteditable` + `marked` to CodeMirror 6
+Working branch: `render`. Main branch: `main`.
 
 ## npm / SSL note
 

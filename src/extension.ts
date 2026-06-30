@@ -163,13 +163,17 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       scriptUri.toString(),
       path.basename(document.uri.fsPath, '.md'),
       imgMap,
-      themeCss,
       breadcrumb
     );
 
-    // Send note index after webview is ready
+    // Send initial data after webview is ready.
+    // Theme CSS is sent as a message (not inlined in HTML) to avoid HTML-parser
+    // issues with </style> sequences inside SVG data URLs in theme files.
     setTimeout(() => {
       webviewPanel.webview.postMessage({ type: 'note-index', notes: noteIndex });
+      if (themeCss) {
+        webviewPanel.webview.postMessage({ type: 'theme-css', css: themeCss });
+      }
     }, 300);
 
     let pendingSaveResolve: ((content: string) => void) | undefined;
@@ -339,12 +343,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     scriptUri: string,
     title: string,
     imageMap:  Record<string, string> = {},
-    themeCss:  string = '',
     breadcrumb: Array<{ name: string; fsPath: string }> = []
   ): string {
     const init = JSON.stringify({ content, font, fontSize, noteIndex, title, imageMap, breadcrumb });
-    // Escape </style> in theme CSS to prevent breaking the style block
-    const safeCss = themeCss.replace(/<\/style>/gi, '<\\/style>');
     return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -363,15 +364,17 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       max-width: 780px; width: 100%;
       margin: 0 auto; padding: 10px 28px 0; box-sizing: border-box;
       font-size: 11px; opacity: 0.55;
-      display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+      display: flex; align-items: center; justify-content: center; gap: 2px; flex-wrap: wrap;
       user-select: none;
     }
     .bc-part {
       cursor: pointer; color: inherit; transition: opacity 0.15s;
+      padding: 2px 6px;
     }
     .bc-part:hover { opacity: 1; text-decoration: underline; }
-    .bc-last { font-weight: 600; opacity: 1; }
-    .bc-sep { margin: 0 2px; opacity: 0.4; }
+    .bc-last { font-weight: 600; opacity: 1; cursor: default; }
+    .bc-last:hover { text-decoration: none; }
+    .bc-sep { padding: 2px 2px; opacity: 0.4; }
     #doc-header {
       flex-shrink: 0;
       max-width: 780px; width: 100%;
@@ -396,7 +399,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     }
     #editor { flex: 1; min-height: 0; overflow: hidden; }
   </style>
-  <style id="__obsidian-theme">${safeCss}</style>
+  <style id="__obsidian-theme"></style>
 </head>
 <body>
   <div id="doc-breadcrumb"></div>
