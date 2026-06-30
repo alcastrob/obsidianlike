@@ -390,7 +390,7 @@ class MarkdownDocumentProvider {
     <div id="doc-title" contenteditable="plaintext-only" spellcheck="false"></div>
     <hr id="doc-divider">
   </div>
-  <div id="editor"></div>
+  <div id="editor" class="is-live-preview markdown-source-view mod-cm6"></div>
   <script>window.__vaultInitial = ${init.replace(/<\/script>/gi, '<\\/script>')};</script>
   <script src="${scriptUri}"></script>
   <script>

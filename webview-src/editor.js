@@ -66,15 +66,51 @@ const vsTheme = EditorView.theme({
     overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
     visibility: 'hidden',
   },
-  // Fold toggle triangle that appears before each heading
-  '.cm-fold-toggle': {
-    display: 'inline-block', width: '1.2em', textAlign: 'center',
-    fontSize: '0.6em', verticalAlign: 'middle',
-    opacity: '0.4', cursor: 'pointer', userSelect: 'none',
-    transition: 'opacity 0.15s',
-    marginRight: '2px',
+  // Heading fold indicator — mirrors Obsidian's .cm-fold-indicator structure
+  '.cm-fold-indicator': {
+    display: 'inline-block', cursor: 'pointer', userSelect: 'none',
+    opacity: '0.35', transition: 'opacity 0.15s', verticalAlign: 'middle',
   },
-  '.cm-fold-toggle:hover': { opacity: '0.85' },
+  '.cm-fold-indicator:hover': { opacity: '0.85' },
+  '.cm-fold-indicator .svg-icon.right-triangle': {
+    width: '14px', height: '14px', verticalAlign: 'middle',
+    transition: 'transform 0.15s',
+  },
+  '.cm-fold-indicator.is-collapsed .svg-icon.right-triangle': {
+    transform: 'rotate(-90deg)',
+  },
+  // Heading styles — mirrors Obsidian core CSS so theme vars apply.
+  // CM6 uses class-only in mdHighlight, so styles must live here.
+  '.cm-header-1': {
+    fontSize: 'var(--h1-size, 1.75em)', fontWeight: 'var(--h1-weight, 700)',
+    lineHeight: 'var(--h1-line-height, 1.3)', color: 'var(--h1-color, inherit)',
+    fontStyle: 'var(--h1-style, normal)', fontFamily: 'var(--h1-font, inherit)',
+  },
+  '.cm-header-2': {
+    fontSize: 'var(--h2-size, 1.4em)', fontWeight: 'var(--h2-weight, 700)',
+    lineHeight: 'var(--h2-line-height, 1.3)', color: 'var(--h2-color, inherit)',
+    fontStyle: 'var(--h2-style, normal)', fontFamily: 'var(--h2-font, inherit)',
+  },
+  '.cm-header-3': {
+    fontSize: 'var(--h3-size, 1.15em)', fontWeight: 'var(--h3-weight, 650)',
+    lineHeight: 'var(--h3-line-height, 1.3)', color: 'var(--h3-color, inherit)',
+    fontStyle: 'var(--h3-style, normal)', fontFamily: 'var(--h3-font, inherit)',
+  },
+  '.cm-header-4': {
+    fontSize: 'var(--h4-size, 1.1em)', fontWeight: 'var(--h4-weight, 625)',
+    lineHeight: 'var(--h4-line-height, 1.4)', color: 'var(--h4-color, inherit)',
+    fontStyle: 'var(--h4-style, normal)', fontFamily: 'var(--h4-font, inherit)',
+  },
+  '.cm-header-5': {
+    fontSize: 'var(--h5-size, 1em)', fontWeight: 'var(--h5-weight, 600)',
+    lineHeight: 'var(--h5-line-height, 1.4)', color: 'var(--h5-color, inherit)',
+    fontStyle: 'var(--h5-style, normal)', fontFamily: 'var(--h5-font, inherit)',
+  },
+  '.cm-header-6': {
+    fontSize: 'var(--h6-size, 0.95em)', fontWeight: 'var(--h6-weight, 575)',
+    lineHeight: 'var(--h6-line-height, 1.4)', color: 'var(--h6-color, inherit)',
+    fontStyle: 'var(--h6-style, normal)', fontFamily: 'var(--h6-font, inherit)',
+  },
   '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
   '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
@@ -115,18 +151,14 @@ const vsTheme = EditorView.theme({
 // The theme-dark / theme-light class on body (synced by inline script in buildHtml)
 // makes these variables resolve from the loaded theme.css.
 const mdHighlight = HighlightStyle.define([
-  { tag: tags.heading1,
-    fontSize: 'var(--h1-size, 1.75em)', fontWeight: '700', lineHeight: '1.3',
-    color: 'var(--h1-color, inherit)' },
-  { tag: tags.heading2,
-    fontSize: 'var(--h2-size, 1.4em)', fontWeight: '700', lineHeight: '1.3',
-    color: 'var(--h2-color, inherit)' },
-  { tag: tags.heading3,
-    fontSize: 'var(--h3-size, 1.15em)', fontWeight: '600',
-    color: 'var(--h3-color, inherit)' },
-  { tag: tags.heading4,
-    fontWeight: '600',
-    color: 'var(--h4-color, inherit)' },
+  // Heading levels — class ONLY (when class is set, CM6 ignores CSS props).
+  // Styles live in vsTheme under .cm-header-N so the Obsidian theme can override them.
+  { tag: tags.heading1, class: 'cm-header cm-header-1' },
+  { tag: tags.heading2, class: 'cm-header cm-header-2' },
+  { tag: tags.heading3, class: 'cm-header cm-header-3' },
+  { tag: tags.heading4, class: 'cm-header cm-header-4' },
+  { tag: tags.heading5, class: 'cm-header cm-header-5' },
+  { tag: tags.heading6, class: 'cm-header cm-header-6' },
   { tag: tags.strong,
     fontWeight: 'var(--bold-weight, 700)',
     color: 'var(--bold-color, inherit)' },
@@ -345,6 +377,15 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               }
             } catch (_) {}
             return false;
+          }
+
+          // ── Headings — line class for Obsidian theme (active + inactive) ──
+          const headingM = /^ATXHeading([1-6])$/.exec(n);
+          if (headingM) {
+            const lineStart = state.doc.lineAt(node.from).from;
+            lineDecs.push({ from: lineStart,
+              dec: Decoration.line({ class: `HyperMD-header HyperMD-header-${headingM[1]}` }) });
+            // Don't return false — children (HeaderMark etc.) still need processing
           }
 
           const ln = state.doc.lineAt(node.from).number;
@@ -689,17 +730,28 @@ class FoldToggle extends WidgetType {
   constructor(lineFrom, folded) { super(); this.lineFrom = lineFrom; this.folded = folded; }
   eq(o) { return this.lineFrom === o.lineFrom && this.folded === o.folded; }
   toDOM() {
-    const el = document.createElement('span');
-    el.className = 'cm-fold-toggle';
-    el.textContent = this.folded ? '▶' : '▾';
+    const outer = document.createElement('div');
+    outer.className = 'cm-fold-indicator' + (this.folded ? ' is-collapsed' : '');
+    outer.contentEditable = 'false';
+    const inner = document.createElement('div');
+    inner.className = 'collapse-indicator collapse-icon';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '24'); svg.setAttribute('height', '24');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+    svg.classList.add('svg-icon', 'right-triangle');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'M3 8L12 17L21 8');
+    svg.appendChild(path); inner.appendChild(svg); outer.appendChild(inner);
     const lf = this.lineFrom;
-    el.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
-    el.addEventListener('click', e => {
+    outer.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    outer.addEventListener('click', e => {
       e.preventDefault(); e.stopPropagation();
       if (foldedSet.has(lf)) foldedSet.delete(lf); else foldedSet.add(lf);
       if (currentView) currentView.dispatch({ effects: foldEffect.of(lf) });
     });
-    return el;
+    return outer;
   }
   ignoreEvent() { return false; }
 }
@@ -748,7 +800,7 @@ const foldPlugin = ViewPlugin.fromClass(class {
         const h = headings[i];
         const folded = foldedSet.has(h.lineFrom);
 
-        // Fold toggle widget — only render when in viewport
+        // Fold toggle widget — only for heading lines in viewport
         if (h.lineTo >= vf && h.lineFrom <= vt) {
           all.push({ from: h.lineFrom, to: h.lineFrom,
             dec: Decoration.widget({ widget: new FoldToggle(h.lineFrom, folded), side: -1 }) });

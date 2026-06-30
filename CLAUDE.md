@@ -82,7 +82,7 @@ Generates the full webview HTML. Key points:
 - The theme class sync script (`theme-dark`/`theme-light` on body) runs **after** `<body>` (at end of body, not in head) so `document.body` is never null.
 - `#doc-breadcrumb` — clickable path segments above the title. Always visible (even for root-level files). Last segment (filename) is non-clickable. Directory segments send `reveal-path`.
 - `#doc-title` — editable H1 that triggers rename on blur (800ms debounce).
-- `#editor` — the CM6 mount point.
+- `#editor` — the CM6 mount point. Has `class="is-live-preview markdown-source-view mod-cm6"` so Obsidian theme selectors activate.
 
 ## Architecture: webview (`webview-src/editor.js`)
 
@@ -107,17 +107,22 @@ Generates the full webview HTML. Key points:
 
 ### `vsTheme` / `mdHighlight`
 
-- `vsTheme`: `EditorView.theme({})` with CSS vars from VS Code (`--vscode-editor-*`) for all CM6 UI elements. Also defines `.cm-wiki-link`, `.cm-md-link`, `.cm-fold-toggle`, `.cm-fold-hidden`, `.cm-table-row-hidden`, table styles, etc.
-- `mdHighlight`: `HighlightStyle` using Obsidian CSS vars (`--bold-color`, `--h1-color`, `--h1-size`, etc.) with VS Code fallbacks. `tags.link` and `tags.url` both use `--link-color` with underline (same style as wiki-links).
+- `vsTheme`: `EditorView.theme({})` with CSS vars from VS Code (`--vscode-editor-*`) for all CM6 UI elements. Also defines `.cm-wiki-link`, `.cm-md-link`, `.cm-fold-indicator`, `.cm-fold-hidden`, `.cm-table-row-hidden`, table styles, and **`.cm-header-1` through `.cm-header-6`** heading styles.
+- `mdHighlight`: `HighlightStyle` for bold, italic, strikethrough, links, code. Heading levels use **`class` only** (`{ tag: tags.heading1, class: 'cm-header cm-header-1' }` etc.) — **critical**: when `class` is set in a HighlightStyle spec, CM6 ignores all CSS properties in that spec and uses the class name as-is. Heading styles (fontSize, fontWeight, color via CSS vars) must therefore live in `vsTheme` under `.cm-header-N`, not in `mdHighlight`.
+
+### Heading styling architecture (important)
+
+Heading spans receive stable class names (`cm-header cm-header-1`…`cm-header-6`) via `mdHighlight`'s `class` property. The CSS for those classes lives in `vsTheme` and references Obsidian theme vars (`--h1-size`, `--h1-weight`, `--h1-color`, etc.) with fallback defaults. The `#editor` div has `class="is-live-preview markdown-source-view mod-cm6"` so Obsidian theme selectors like `.is-live-preview .HyperMD-header-1::before` work. The `cm-line` div for each heading gets `HyperMD-header HyperMD-header-N` via `Decoration.line()` in `livePreviewPlugin` (added before the active-line check, so it applies to all heading lines).
 
 ### `livePreviewPlugin`
 
 `ViewPlugin` that hides markdown syntax markers on non-active lines via syntax tree iteration. Active lines = lines containing any cursor selection anchor or head.
 
 `_build(view)` iterates the syntax tree over the current viewport:
+- **ATXHeading[1-6]** — `Decoration.line({ class: 'HyperMD-header HyperMD-header-N' })` on every heading line (active or not), enabling Obsidian theme CSS selectors. Does not `return false` so children are still visited.
 - **Tables** — first line replaced by `Decoration.replace({ widget: TableWidget })` (single-line, no `block:true`). Remaining table lines replaced with `Decoration.replace({})` + `Decoration.line({ class: 'cm-table-row-hidden' })` to collapse height.
-- **HeaderMark** — `Decoration.replace({})` hides `## ` prefix (and trailing space).
-- **EmphasisMark, CodeMark, StrikethroughMark** — `Decoration.replace({})` hides the markers.
+- **HeaderMark** — `Decoration.replace({})` hides `## ` prefix (and trailing space) on non-active lines.
+- **EmphasisMark, CodeMark, StrikethroughMark** — `Decoration.replace({})` hides the markers on non-active lines.
 - **LinkMark, URL** — returns `false` only (no hiding); handled by `mdLinkPlugin` instead.
 
 **`block: true` decorations are permanently banned** — they crash CM6's `measureVisibleLineHeights` / `coordsAt`. All multi-line hiding uses `Decoration.line({ class: '...' })` with `height: 0` CSS.
@@ -158,10 +163,12 @@ For non-active lines with known filename in `imageMap`, replaces with `ImageWidg
 - `foldedSet: Set<number>` — module-level set of `line.from` positions of folded headings.
 - `foldEffect: StateEffect` — dispatched on toggle to trigger plugin rebuild.
 - `collectHeadings(state)` — scans the full syntax tree for `ATXHeading[1-6]` nodes.
-- For each heading in viewport: adds `FoldToggle` widget (`▾`/`▶`) at `line.from` with `side: -1`.
+- For each heading in viewport: adds `FoldToggle` widget at `line.from` with `side: -1`.
+- `FoldToggle.toDOM()` renders the exact Obsidian DOM structure: `div.cm-fold-indicator[contenteditable=false] > div.collapse-indicator.collapse-icon > svg.svg-icon.right-triangle`. When folded, `div.cm-fold-indicator` also gets `is-collapsed` class, which triggers the Border theme's accent-color CSS for the indicator icon.
 - For each folded heading: collapses lines from heading+1 to start of next heading at same/higher level (or end of doc) using `Decoration.replace({})` + `Decoration.line({ class: 'cm-fold-hidden' })`.
 - Fold positions are remapped through document changes via `u.changes.mapPos()`.
 - `currentView` module-level ref is set after editor creation so `FoldToggle.toDOM()` can dispatch effects.
+- **Note**: `HyperMD-header-N` line classes are added in `livePreviewPlugin`, NOT here. Adding both a widget and a line decoration at the same position (`h.lineFrom`) in one plugin causes CM6 `RangeSetBuilder` ordering issues where the line decoration is silently dropped.
 
 ### `linkClickHandler`
 
