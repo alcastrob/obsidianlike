@@ -42,6 +42,21 @@ function getAttachmentRoots(docUri: vscode.Uri): vscode.Uri[] {
   return [...new Set(roots)].map(r => vscode.Uri.file(r));
 }
 
+function getImageMap(webview: vscode.Webview, docUri: vscode.Uri): Record<string, string> {
+  const map: Record<string, string> = {};
+  const imgExts = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
+  for (const rootUri of getAttachmentRoots(docUri)) {
+    try {
+      for (const file of fs.readdirSync(rootUri.fsPath)) {
+        if (imgExts.test(file)) {
+          map[file] = webview.asWebviewUri(vscode.Uri.joinPath(rootUri, file)).toString();
+        }
+      }
+    } catch { /* directory may not exist */ }
+  }
+  return map;
+}
+
 function getThemeCss(): string {
   const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!vaultRoot) { return ''; }
@@ -102,13 +117,15 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       if (i !== -1) { activePanels.splice(i, 1); }
     });
 
+    const imgMap = getImageMap(webviewPanel.webview, document.uri);
     webviewPanel.webview.html = this.buildHtml(
       document.getText(),
       getFont(),
       getFontSize(),
       webviewPanel.webview.cspSource,
       scriptUri.toString(),
-      path.basename(document.uri.fsPath, '.md')
+      path.basename(document.uri.fsPath, '.md'),
+      imgMap
     );
 
     setTimeout(() => {
@@ -229,6 +246,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             }
           );
 
+        } else if (msg.type === 'open-url') {
+          const url = (msg.url as string || '').trim();
+          if (url) { vscode.env.openExternal(vscode.Uri.parse(url)); }
+
         } else if (msg.type === 'paste-image') {
           try {
             const base64  = (msg.data as string).replace(/^data:image\/[a-z]+;base64,/, '');
@@ -239,7 +260,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             const saveDir = getSaveDir(document.uri.fsPath);
             if (!fs.existsSync(saveDir)) { fs.mkdirSync(saveDir, { recursive: true }); }
             fs.writeFileSync(path.join(saveDir, filename), buffer);
-            webviewPanel.webview.postMessage({ type: 'image-pasted', filename });
+            const fileUri = vscode.Uri.file(path.join(saveDir, filename));
+            const webviewUri = webviewPanel.webview.asWebviewUri(fileUri).toString();
+            webviewPanel.webview.postMessage({ type: 'image-pasted', filename, uri: webviewUri });
           } catch (err) {
             vscode.window.showErrorMessage(`Error al guardar imagen pegada: ${err}`);
           }
@@ -252,9 +275,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
   private buildHtml(
     content: string, font: string, fontSize: number,
-    cspSource: string, scriptUri: string, title: string
+    cspSource: string, scriptUri: string, title: string,
+    imageMap: Record<string, string> = {}
   ): string {
-    const init = JSON.stringify({ content, font, fontSize, noteIndex, title });
+    const init = JSON.stringify({ content, font, fontSize, noteIndex, title, imageMap });
     return `<!DOCTYPE html>
 <html lang="es">
 <head>

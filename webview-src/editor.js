@@ -3,7 +3,7 @@
 
 import { EditorState, EditorSelection, RangeSetBuilder, Compartment } from "@codemirror/state";
 import {
-  EditorView, ViewPlugin, Decoration, keymap, drawSelection
+  EditorView, ViewPlugin, Decoration, WidgetType, keymap, drawSelection
 } from "@codemirror/view";
 import {
   defaultKeymap, history, historyKeymap, indentWithTab
@@ -17,6 +17,7 @@ import { tags } from "@lezer/highlight";
 const vscode = acquireVsCodeApi();
 const init   = window.__vaultInitial || {};
 let noteIndex = init.noteIndex || [];
+let imageMap  = init.imageMap  || {};
 let syncTimer = null;
 
 // ── Theme (CSS variables from VS Code) ────────────────────────────────────────
@@ -44,10 +45,39 @@ const vsTheme = EditorView.theme({
   '.cm-line': { padding: '0' },
   // Wiki-link display style
   '.cm-wiki-link': {
-    color: 'var(--vscode-textLink-foreground, #4ec9b0)',
+    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
     textDecoration: 'underline',
     textUnderlineOffset: '2px',
     cursor: 'pointer',
+  },
+  // Hyperlink style (markdown links and bare URLs on non-active lines)
+  '.cm-md-link': {
+    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
+    textDecoration: 'underline',
+    textUnderlineOffset: '2px',
+    cursor: 'pointer',
+  },
+  // Table styles
+  '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
+  '.cm-md-table': {
+    borderCollapse: 'collapse',
+    width: '100%',
+    fontSize: 'inherit',
+    fontFamily: 'inherit',
+  },
+  '.cm-md-table th, .cm-md-table td': {
+    border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
+    padding: '6px 12px',
+    lineHeight: '1.5',
+    verticalAlign: 'top',
+  },
+  '.cm-md-table th': {
+    fontWeight: '600',
+    background: 'var(--table-header-background, rgba(128,128,128,0.1))',
+    color: 'var(--table-header-color, inherit)',
+  },
+  '.cm-md-table tr:nth-child(even) td': {
+    background: 'var(--table-row-alt-background, rgba(128,128,128,0.04))',
   },
   // Autocomplete tooltip
   '.cm-tooltip': {
@@ -72,8 +102,7 @@ const vsTheme = EditorView.theme({
 });
 
 // ── Syntax highlight style ────────────────────────────────────────────────────
-// Uses Obsidian CSS variables (--bold-color, --h1-color, etc.) with VS Code fallbacks,
-// so the loaded theme.css is respected for colors.
+// Uses Obsidian CSS variables (--bold-color, --h1-color, etc.) with VS Code fallbacks.
 const mdHighlight = HighlightStyle.define([
   { tag: tags.heading1,
     fontSize: 'var(--h1-size, 1.75em)', fontWeight: '700', lineHeight: '1.3',
@@ -128,7 +157,74 @@ function getActiveLines(state) {
   return set;
 }
 
-// ── Live-preview plugin ───────────────────────────────────────────────────────
+// ── Table widget ──────────────────────────────────────────────────────────────
+class TableWidget extends WidgetType {
+  constructor(src) { super(); this.src = src; }
+  eq(other) { return this.src === other.src; }
+  toDOM() {
+    const wrap  = document.createElement('div');
+    wrap.className = 'cm-md-table-wrap';
+    const table = document.createElement('table');
+    table.className = 'cm-md-table';
+
+    const lines = this.src.split('\n').filter(l => l.trim() && l.includes('|'));
+    if (lines.length < 2) { wrap.textContent = this.src; return wrap; }
+
+    const parseRow = line =>
+      line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+
+    const headers = parseRow(lines[0]);
+    const aligns  = parseRow(lines[1]).map(s => {
+      const t = s.trim();
+      if (t.startsWith(':') && t.endsWith(':')) return 'center';
+      if (t.endsWith(':')) return 'right';
+      return 'left';
+    });
+
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    headers.forEach((h, i) => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      th.style.textAlign = aligns[i] || 'left';
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    lines.slice(2).forEach(line => {
+      const tr = document.createElement('tr');
+      parseRow(line).forEach((cell, i) => {
+        const td = document.createElement('td');
+        td.textContent = cell;
+        td.style.textAlign = aligns[i] || 'left';
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
+  }
+  ignoreEvent() { return false; }
+}
+
+// ── Image widget ──────────────────────────────────────────────────────────────
+class ImageWidget extends WidgetType {
+  constructor(src, alt) { super(); this.src = src; this.alt = alt; }
+  eq(other) { return this.src === other.src; }
+  toDOM() {
+    const img = document.createElement('img');
+    img.src = this.src;
+    img.alt = this.alt;
+    img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:4px;';
+    return img;
+  }
+  ignoreEvent() { return false; }
+}
+
+// ── Live-preview plugin (headings, emphasis marks, tables) ────────────────────
 const livePreviewPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
@@ -139,42 +235,66 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
   _build(view) {
     const { state } = view;
     const active = getActiveLines(state);
-    const ranges = [];
+    const decs = []; // { from, to, dec }
 
     syntaxTree(state).iterate({
       from: view.viewport.from,
       to:   view.viewport.to,
       enter(node) {
+        const n = node.name;
+
+        // ── Tables: replace whole block with rendered widget ──
+        if (n === 'Table') {
+          const firstLine = state.doc.lineAt(node.from);
+          // node.to may point past the last \n — resolve safely
+          const lastPos = node.to > node.from ? node.to - 1 : node.from;
+          const lastLine = state.doc.lineAt(lastPos);
+          let isActive = false;
+          for (let i = firstLine.number; i <= lastLine.number; i++) {
+            if (active.has(i)) { isActive = true; break; }
+          }
+          if (!isActive) {
+            const src = state.doc.sliceString(firstLine.from, lastLine.to);
+            decs.push({
+              from: firstLine.from,
+              to:   lastLine.to,
+              dec:  Decoration.replace({ widget: new TableWidget(src), block: true }),
+            });
+          }
+          return false; // don't descend into table children
+        }
+
+        // For all other nodes, only process non-active lines
         const ln = state.doc.lineAt(node.from).number;
         if (active.has(ln)) return;
-        const n = node.name;
+
         if (n === 'HeaderMark') {
           let end = node.to;
           if (state.doc.sliceString(end, end + 1) === ' ') end++;
-          ranges.push({ from: node.from, to: end });
+          decs.push({ from: node.from, to: end, dec: Decoration.replace({}) });
           return false;
         }
         if (n === 'EmphasisMark' || n === 'CodeMark' || n === 'StrikethroughMark') {
-          ranges.push({ from: node.from, to: node.to });
+          decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
           return false;
         }
         if (n === 'LinkMark') {
-          ranges.push({ from: node.from, to: node.to });
+          decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
           return false;
         }
         if (n === 'URL') {
-          ranges.push({ from: node.from, to: node.to });
+          decs.push({ from: node.from, to: node.to, dec: Decoration.replace({}) });
           return false;
         }
       }
     });
 
-    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    decs.sort((a, b) => a.from - b.from || a.to - b.to);
     const builder = new RangeSetBuilder();
     let lastTo = -1;
-    for (const { from, to } of ranges) {
+    for (const { from, to, dec } of decs) {
       if (from < lastTo) continue;
-      try { builder.add(from, to, Decoration.replace({})); } catch (_) {}
+      try { builder.add(from, to, dec); } catch (_) {}
       lastTo = to;
     }
     return builder.finish();
@@ -204,15 +324,15 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
       if (active.has(ln)) continue;
       const name  = m[1];
       const alias = m[2];
-      all.push({ from: mFrom,     to: mFrom + 2,              dec: Decoration.replace({}) });
+      all.push({ from: mFrom,     to: mFrom + 2, dec: Decoration.replace({}) });
       if (alias !== undefined) {
         all.push({ from: mFrom + 2, to: mFrom + 2 + name.length + 1, dec: Decoration.replace({}) });
         const aFrom = mFrom + 2 + name.length + 1;
-        all.push({ from: aFrom,  to: aFrom + alias.length,    dec: Decoration.mark({ class: 'cm-wiki-link' }) });
+        all.push({ from: aFrom, to: aFrom + alias.length, dec: Decoration.mark({ class: 'cm-wiki-link' }) });
       } else {
         all.push({ from: mFrom + 2, to: mFrom + 2 + name.length, dec: Decoration.mark({ class: 'cm-wiki-link' }) });
       }
-      all.push({ from: mTo - 2, to: mTo,                      dec: Decoration.replace({}) });
+      all.push({ from: mTo - 2, to: mTo, dec: Decoration.replace({}) });
     }
     all.sort((a, b) => a.from - b.from || a.to - b.to);
     const builder = new RangeSetBuilder();
@@ -220,6 +340,51 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
     for (const { from, to, dec } of all) {
       if (from < lastTo) continue;
       try { builder.add(from, to, dec); lastTo = Math.max(lastTo, to); } catch (_) {}
+    }
+    return builder.finish();
+  }
+}, { decorations: v => v.decorations });
+
+// ── Image plugin (![[filename.ext]] → <img>) ──────────────────────────────────
+const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
+const imgPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this._build(view); }
+  update(u) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged) {
+      this.decorations = this._build(u.view);
+    }
+  }
+  _build(view) {
+    const { state } = view;
+    const active = getActiveLines(state);
+    const { from: vf, to: vt } = view.viewport;
+    const str = state.doc.sliceString(vf, vt);
+    const re = /!\[\[([^\]]+)\]\]/g;
+    const all = [];
+    let m;
+    while ((m = re.exec(str)) !== null) {
+      const filename = m[1].trim();
+      if (!IMG_EXT.test(filename)) continue;
+      const mFrom = vf + m.index;
+      const mTo   = mFrom + m[0].length;
+      const ln = state.doc.lineAt(mFrom).number;
+      if (active.has(ln)) continue;
+      // Lookup webview URI — try full name, then basename
+      const basename = filename.split('/').pop();
+      const src = imageMap[filename] || imageMap[basename] || '';
+      if (!src) continue;
+      all.push({
+        from: mFrom, to: mTo,
+        dec: Decoration.replace({ widget: new ImageWidget(src, filename) }),
+      });
+    }
+    all.sort((a, b) => a.from - b.from);
+    const builder = new RangeSetBuilder();
+    let lastTo = -1;
+    for (const { from, to, dec } of all) {
+      if (from < lastTo) continue;
+      try { builder.add(from, to, dec); } catch (_) {}
+      lastTo = to;
     }
     return builder.finish();
   }
@@ -267,6 +432,65 @@ function toggleWrap(view, marker) {
   return true;
 }
 
+// ── Click handler: open links ─────────────────────────────────────────────────
+// On non-active lines, clicking a URL or markdown link opens it in the browser.
+const linkClickHandler = EditorView.domEventHandlers({
+  click(e, view) {
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos == null) return false;
+    const line = view.state.doc.lineAt(pos);
+    if (getActiveLines(view.state).has(line.number)) return false;
+
+    // Walk syntax tree to find URL node at click position
+    let url = null;
+    const tree = syntaxTree(view.state);
+    let cur = tree.resolve(pos, 1);
+    while (cur) {
+      if (cur.name === 'URL') {
+        let raw = view.state.doc.sliceString(cur.from, cur.to);
+        if (raw.startsWith('<') && raw.endsWith('>')) raw = raw.slice(1, -1);
+        url = raw;
+        break;
+      }
+      if (cur.name === 'Link') {
+        // Find first URL child
+        let child = cur.firstChild;
+        while (child) {
+          if (child.name === 'URL') {
+            let raw = view.state.doc.sliceString(child.from, child.to);
+            if (raw.startsWith('<') && raw.endsWith('>')) raw = raw.slice(1, -1);
+            url = raw;
+            break;
+          }
+          child = child.nextSibling;
+        }
+        break;
+      }
+      cur = cur.parent;
+    }
+
+    // Regex fallback for bare https?:// URLs not captured by the syntax tree
+    if (!url) {
+      const colOffset = pos - line.from;
+      const re = /https?:\/\/[^\s)"'\]>]+/g;
+      let m;
+      while ((m = re.exec(line.text)) !== null) {
+        if (m.index <= colOffset && colOffset <= m.index + m[0].length) {
+          url = m[0];
+          break;
+        }
+      }
+    }
+
+    if (url && /^https?:\/\//.test(url)) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'open-url', url });
+      return true;
+    }
+    return false;
+  },
+});
+
 // ── Source mode (Compartment) ─────────────────────────────────────────────────
 const previewCompartment = new Compartment();
 let sourceMode = false;
@@ -281,7 +505,8 @@ function createEditor(parent, content) {
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
-      previewCompartment.of([livePreviewPlugin, wikiLinkPlugin]),
+      previewCompartment.of([livePreviewPlugin, wikiLinkPlugin, imgPlugin]),
+      linkClickHandler,
       autocompletion({ override: [wikiComplete], closeOnBlur: true }),
       keymap.of([
         { key: 'Mod-b', run: v => toggleWrap(v, '**') },
@@ -322,7 +547,6 @@ titleEl.addEventListener('input', () => {
     const newName = titleEl.textContent.trim();
     if (newName && newName !== currentTitle) {
       currentTitle = newName;
-      // Sync content first so el host guarda antes de renombrar
       vscode.postMessage({ type: 'sync', content: view.state.doc.toString() });
       vscode.postMessage({ type: 'rename', newName });
     }
@@ -330,14 +554,8 @@ titleEl.addEventListener('input', () => {
 });
 
 titleEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    view.focus();
-  }
-  if (e.key === 'Escape') {
-    titleEl.textContent = currentTitle;
-    view.focus();
-  }
+  if (e.key === 'Enter') { e.preventDefault(); view.focus(); }
+  if (e.key === 'Escape') { titleEl.textContent = currentTitle; view.focus(); }
 });
 
 // ── Editor ────────────────────────────────────────────────────────────────────
@@ -350,7 +568,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin]
+      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin, imgPlugin]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);
@@ -362,6 +580,11 @@ window.addEventListener('message', ev => {
   switch (msg.type) {
     case 'note-index':
       noteIndex = msg.notes || [];
+      break;
+    case 'image-map':
+      imageMap = msg.map || {};
+      // Force imgPlugin to redraw
+      view.dispatch({});
       break;
     case 'title-revert':
       currentTitle = msg.name || '';
@@ -384,6 +607,8 @@ window.addEventListener('message', ev => {
       vscode.postMessage({ type: 'sync', content: view.state.doc.toString() });
       break;
     case 'image-pasted': {
+      // Add new image to map so it renders immediately
+      if (msg.filename && msg.uri) imageMap[msg.filename] = msg.uri;
       const embed = `![[${msg.filename}]]`;
       const pos   = view.state.selection.main.head;
       view.dispatch({
