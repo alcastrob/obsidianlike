@@ -962,6 +962,44 @@ h4.raw-mode, h5.raw-mode, h6.raw-mode {
     if (mod && e.key === 'b') { e.preventDefault(); fmt('bold'); }
     if (mod && e.key === 'i') { e.preventDefault(); fmt('italic'); }
     if (mod && e.key === 'k') { e.preventDefault(); fmtLink(); }
+
+    // Enter en cabecera: crear párrafo debajo en lugar de dejar que Chromium
+    // cree otro <hN> (que dispararía enterRawMode y saltaría el cursor).
+    if (e.key === 'Enter' && !mod && !e.shiftKey) {
+      var hSel = window.getSelection();
+      if (hSel && hSel.rangeCount) {
+        var hBlock = getTopLevelBlock(hSel.anchorNode);
+        if (hBlock && isHeading(hBlock)) {
+          e.preventDefault();
+          // Si la cabecera está en raw mode, salir antes de crear el párrafo
+          if (currentRawBlock === hBlock) {
+            exitRawMode(hBlock);
+            currentRawBlock = null;
+            currentBlock = hBlock; // hBlock ahora está renderizado
+          }
+          // Insertar <p> vacío debajo de la cabecera
+          var hNewP = document.createElement('p');
+          hNewP.innerHTML = '<br>';
+          var hAfter = hBlock.nextSibling;
+          hBlock.parentNode.insertBefore(hNewP, hAfter);
+          // Mover cursor al nuevo párrafo
+          rawModeChanging = true;
+          try {
+            var hRange = document.createRange();
+            hRange.setStart(hNewP, 0);
+            hRange.collapse(true);
+            hSel.removeAllRanges();
+            hSel.addRange(hRange);
+          } catch (_) {}
+          rawModeChanging = false;
+          dirty = true;
+          clearTimeout(syncTimer);
+          syncTimer = setTimeout(function () {
+            vscode.postMessage({ type: 'sync', content: domToMarkdown(editor) });
+          }, 400);
+        }
+      }
+    }
   });
 
   /* ── Restaurar cursor ── */
