@@ -98,7 +98,8 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       getFont(),
       getFontSize(),
       webviewPanel.webview.cspSource,
-      scriptUri.toString()
+      scriptUri.toString(),
+      path.basename(document.uri.fsPath, '.md')
     );
 
     setTimeout(() => {
@@ -185,6 +186,24 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         } else if (msg.type === 'sync') {
           applySync(msg.content as string);
 
+        } else if (msg.type === 'rename') {
+          const newName = (msg.newName as string || '').trim();
+          const oldName = path.basename(document.uri.fsPath, '.md');
+          if (!newName || newName === oldName) { return; }
+          if (/[\\/:*?"<>|]/.test(newName)) {
+            webviewPanel.webview.postMessage({ type: 'title-revert', name: oldName });
+            vscode.window.showErrorMessage('Nombre no válido: contiene caracteres no permitidos.');
+            return;
+          }
+          const newUri = vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), newName + '.md'));
+          vscode.workspace.fs.rename(document.uri, newUri, { overwrite: false }).then(
+            () => { /* VS Code actualiza el panel automáticamente */ },
+            err => {
+              webviewPanel.webview.postMessage({ type: 'title-revert', name: oldName });
+              vscode.window.showErrorMessage(`No se pudo renombrar a "${newName}": ${err}`);
+            }
+          );
+
         } else if (msg.type === 'paste-image') {
           try {
             const base64  = (msg.data as string).replace(/^data:image\/[a-z]+;base64,/, '');
@@ -208,9 +227,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
   private buildHtml(
     content: string, font: string, fontSize: number,
-    cspSource: string, scriptUri: string
+    cspSource: string, scriptUri: string, title: string
   ): string {
-    const init = JSON.stringify({ content, font, fontSize, noteIndex });
+    const init = JSON.stringify({ content, font, fontSize, noteIndex, title });
     return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -218,13 +237,42 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; img-src ${cspSource} data: blob:; script-src ${cspSource} 'unsafe-inline'; style-src 'unsafe-inline';">
   <style>
-    html, body { height: 100%; margin: 0; overflow: hidden;
+    html, body {
+      height: 100%; margin: 0; overflow: hidden;
       background: var(--vscode-editor-background, #1e1e1e);
-      color: var(--vscode-editor-foreground, #d4d4d4); }
-    #editor { height: 100%; }
+      color: var(--vscode-editor-foreground, #d4d4d4);
+      display: flex; flex-direction: column;
+    }
+    #doc-header {
+      flex-shrink: 0;
+      max-width: 780px; width: 100%;
+      margin: 0 auto; padding: 40px 28px 0; box-sizing: border-box;
+    }
+    #doc-title {
+      font-size: 2em; font-weight: 700; line-height: 1.3;
+      outline: none; background: transparent;
+      color: var(--vscode-editor-foreground, #d4d4d4);
+      font-family: var(--md-font, var(--vscode-editor-font-family, inherit));
+      white-space: pre-wrap; word-break: break-word;
+      margin-bottom: 14px; min-height: 1.2em;
+      caret-color: var(--vscode-editorCursor-foreground, #aeafad);
+    }
+    #doc-title:empty::before {
+      content: 'Sin título'; opacity: 0.3; pointer-events: none;
+    }
+    #doc-divider {
+      border: none;
+      border-top: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.25));
+      margin: 0;
+    }
+    #editor { flex: 1; min-height: 0; overflow: hidden; }
   </style>
 </head>
 <body>
+  <div id="doc-header">
+    <div id="doc-title" contenteditable="plaintext-only" spellcheck="false"></div>
+    <hr id="doc-divider">
+  </div>
   <div id="editor"></div>
   <script>window.__vaultInitial = ${init.replace(/<\/script>/gi, '<\\/script>')};</script>
   <script src="${scriptUri}"></script>

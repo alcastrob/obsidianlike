@@ -21,12 +21,12 @@ let syncTimer = null;
 
 // ── Theme (CSS variables from VS Code) ────────────────────────────────────────
 const vsTheme = EditorView.theme({
-  '&': { height: '100vh', background: 'transparent' },
+  '&': { height: '100%', background: 'transparent' },
   '.cm-scroller': { overflow: 'auto', height: '100%' },
   '.cm-content': {
     maxWidth: '780px',
     margin: '0 auto',
-    padding: '40px 28px 120px',
+    padding: '16px 28px 120px',
     lineHeight: '1.75',
     fontFamily: 'var(--md-font, var(--vscode-editor-font-family, inherit))',
     fontSize: 'var(--md-font-size, 14px)',
@@ -301,6 +301,36 @@ const root = document.documentElement;
 root.style.setProperty('--md-font', init.font || '');
 root.style.setProperty('--md-font-size', (init.fontSize || 14) + 'px');
 
+// ── Document title ────────────────────────────────────────────────────────────
+const titleEl  = document.getElementById('doc-title');
+let currentTitle = init.title || '';
+titleEl.textContent = currentTitle;
+
+let renameTimer = null;
+
+titleEl.addEventListener('input', () => {
+  clearTimeout(renameTimer);
+  renameTimer = setTimeout(() => {
+    const newName = titleEl.textContent.trim();
+    if (newName && newName !== currentTitle) {
+      currentTitle = newName; // optimistic update; revertido con title-revert si falla
+      vscode.postMessage({ type: 'rename', newName });
+    }
+  }, 800);
+});
+
+titleEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    view.focus();
+  }
+  if (e.key === 'Escape') {
+    titleEl.textContent = currentTitle;
+    view.focus();
+  }
+});
+
+// ── Editor ────────────────────────────────────────────────────────────────────
 const container = document.getElementById('editor');
 const view = createEditor(container, init.content || '');
 view.focus();
@@ -311,6 +341,10 @@ window.addEventListener('message', ev => {
   switch (msg.type) {
     case 'note-index':
       noteIndex = msg.notes || [];
+      break;
+    case 'title-revert':
+      currentTitle = msg.name || '';
+      titleEl.textContent = currentTitle;
       break;
     case 'external-update': {
       const cur = view.state.doc.toString();
