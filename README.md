@@ -1,72 +1,7 @@
 # Vault Tool — extensión local de VS Code / Windsurf
 
-Extensión mínima de prueba para validar que puedes desarrollar, compilar y
-**instalar localmente** (sin marketplace) una extensión que lea tu vault.
-
-Incluye dos comandos:
-- `Vault Tool: Listar notas del vault` — recorre la carpeta abierta buscando `.md`
-- `Vault Tool: Abrir Kanban del vault` — abre un webview placeholder (aquí
-  enchufarás tu lógica real de Kanban/Eisenhower más adelante)
-
-## 1. Instalar dependencias
-
-Dentro de la carpeta `vault-tool/`:
-
-```bash
-npm install -g @vscode/vsce
-npm install
-```
-
-## 2. Probar en caliente (sin instalar nada todavía)
-
-1. Abre la carpeta `vault-tool/` en VS Code o Windsurf.
-2. Pulsa **F5** (o "Run > Start Debugging").
-3. Se abrirá una segunda ventana ("Extension Development Host").
-4. En esa segunda ventana, abre tu vault real (Archivo > Abrir carpeta...).
-5. Abre la paleta de comandos (`Cmd+Shift+P`) y ejecuta:
-   - `Vault Tool: Listar notas del vault`
-   - `Vault Tool: Abrir Kanban del vault`
-
-Si ves la lista de notas en el panel "Output" y el webview se abre, todo
-funciona correctamente a nivel de código.
-
-## 3. Compilar
-
-```bash
-npm run compile
-```
-
-Esto genera la carpeta `out/` con el JS compilado (necesario antes de empaquetar).
-
-## 4. Empaquetar como .vsix
-
-```bash
-vsce package
-```
-
-Esto genera `vault-tool-0.0.1.vsix` en la carpeta. Si `vsce` se queja de
-campos faltantes (repository, license, icon), puedes ignorar los avisos
-para uso puramente local, o añadirlos si quieres limpiar el output.
-
-## 5. Instalar el .vsix localmente
-
-Opción A — desde terminal:
-```bash
-code --install-extension vault-tool-0.0.1.vsix
-```
-(o el comando equivalente de Windsurf, normalmente el mismo binario `code`
-si Windsurf está basado en VS Code OSS — comprueba con `which code`)
-
-Opción B — desde la interfaz:
-1. Panel de Extensiones (icono lateral)
-2. Menú "..." (arriba a la derecha del panel)
-3. "Install from VSIX..."
-4. Selecciona el fichero `.vsix` generado
-
-A partir de aquí la extensión queda instalada permanentemente, igual que
-cualquier otra del marketplace, pero **nunca ha salido de tu máquina ni ha
-pasado por servidores externos** — esto es lo que conviene tener claro si
-hay que justificarlo ante el equipo de seguridad de tu empresa.
+Extensión de VS Code / Windsurf que actúa como vault local tipo Obsidian.
+Se instala localmente desde un `.vsix`, sin marketplace ni servidores externos.
 
 ## Siguientes pasos sugeridos
 
@@ -78,3 +13,44 @@ hay que justificarlo ante el equipo de seguridad de tu empresa.
   placeholder actual.
 - Añadir un motor de queries tipo Dataview que recorra el vault y genere
   tablas/listas a partir del frontmatter.
+
+## Tareas pendientes
+
+- [ ] Escribir un wikilink `[[` con sugerencias — al escribir `[[` en el
+  editor, mostrar un desplegable con los nombres de las notas del vault para
+  autocompletar el enlace.
+- [ ] Wikilinks que apuntan a páginas inexistentes — distinguir visualmente
+  un `[[enlace]]` roto (la nota destino no existe aún) de uno válido.
+- [ ] Color diferente y navegación según estado del wikilink — los enlaces
+  válidos se muestran en un color y al pulsarlos abren la nota destino; los
+  enlaces rotos se muestran en otro color (p. ej. rojo o gris).
+- [ ] Negritas y cursivas — renderizado y edición inline de `**negrita**` e
+  `*cursiva*`.
+- [ ] Listas numeradas y viñetas — soporte de `1.` y `-`/`*` con indentación
+  anidada.
+- [ ] Cabeceras — renderizado de `#`, `##`, `###`, etc. con tamaños distintos.
+- [ ] Frontmatter — parsear el bloque YAML entre `---` al inicio de cada nota
+  y exponerlo para queries y vistas.
+- [ ] Calendario — vista de calendario que muestra notas por fecha (usando
+  campo de frontmatter, p. ej. `date:`).
+- [ ] Bases de datos — vista tabular tipo Dataview que agrupa y filtra notas
+  por campos de frontmatter.
+- [ ] Templates — sistema de plantillas para crear notas nuevas a partir de
+  un fichero base predefinido.
+- [ ] Mover ficheros `.md` actualiza los enlaces — al renombrar o mover una
+  nota, buscar y actualizar automáticamente todos los `[[wikilinks]]` que
+  apuntaban a su ruta anterior en el resto del vault.
+- [ ] Renombrar ficheros `.md` actualiza los enlaces — igual que mover, al
+  renombrar una nota desde el explorador de VS Code, reescribir los
+  `[[wikilinks]]` que la referenciaban en el resto del vault.
+- [ ] Tablas — soporte de tablas Markdown (`| col | col |`) con renderizado
+  visual y edición inline.
+- [ ] Conmutar entre vista WYSIWYG y fuente — botón o atajo de teclado para
+  alternar entre el editor de fuente Markdown y la vista renderizada (live
+  preview).
+- [ ] Transclusiones — soporte de `![[nota]]` para incrustar el contenido de
+  otra nota (o un bloque concreto) dentro de la nota actual.
+- [ ] Título editable como nombre de fichero — mostrar el nombre del fichero
+  `.md` como título en la parte superior del área de texto; al editarlo
+  directamente, renombrar el fichero en disco (y disparar la actualización
+  de enlaces del resto del vault).
