@@ -3,6 +3,31 @@
 Extensión de VS Code / Windsurf que actúa como vault local tipo Obsidian.
 Se instala localmente desde un `.vsix`, sin marketplace ni servidores externos.
 
+## Resolución de imágenes (`![[archivo.png]]`)
+
+1. Se busca primero en la carpeta de adjuntos configurada (`vaultTool.attachmentsLocation` /
+   `vaultTool.attachmentsFolder`).
+2. Si no está ahí, se busca recursivamente en toda la bóveda (primer archivo con ese
+   nombre encontrado, asumiendo nombres únicos).
+3. Si no se encuentra en ningún sitio, se muestra el texto del enlace tal cual, sin
+   convertirlo en imagen.
+
+La búsqueda recursiva usa `fs.statSync` como respaldo cuando el tipo de entrada de
+directorio es ambiguo, porque las carpetas "solo en la nube" de Dropbox Smart Sync u
+OneDrive Files On-Demand usan reparse points de NTFS que Node puede no reportar
+correctamente como directorio en Windows.
+
+## Resolución y creación de wikilinks (`[[Nota]]`)
+
+- Sin ruta de desambiguación (`[[Nota]]`): se prioriza una nota con ese nombre en el
+  mismo directorio que la nota que contiene el enlace; si no existe, se busca en toda
+  la bóveda.
+- Con ruta de desambiguación (`[[carpeta/Nota]]`): se busca `Nota.md` cuyo directorio
+  padre inmediato se llame `carpeta` (no hace falta que sea la ruta completa).
+- Si no se encuentra en ningún caso, se crea la nota en blanco: dentro del directorio
+  `carpeta` (creándolo si no existe) dentro del directorio actual, o directamente en
+  el directorio actual si no había ruta de desambiguación.
+
 ## Siguientes pasos sugeridos
 
 - Sustituir el listado simple de notas por lectura real de frontmatter

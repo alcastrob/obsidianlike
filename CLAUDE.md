@@ -37,8 +37,9 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 
 ### Helpers
 
-- `getAttachmentRoots(docUri)` — returns `vscode.Uri[]` for image lookup dirs (vault root, doc dir, configured subfolder)
-- `getImageMap(webview, docUri)` — scans attachment roots, returns `{ filename → webviewUri }` map passed to webview
+- `getAttachmentRoots(docUri)` — returns `vscode.Uri[]` for `localResourceRoots` (vault root, doc dir, configured subfolder). Vault root is always included, so any nested path under it is webview-accessible.
+- `findImageFiles(dir)` — recursive image-file walker (extensions: png/jpg/jpeg/gif/svg/webp/bmp), skipping dotfiles and `node_modules`. Falls back to `fs.statSync` when `Dirent.isDirectory()/isFile()` are both false, because cloud-sync placeholder folders (Dropbox Smart Sync, OneDrive Files On-Demand) use NTFS reparse points that Node's `readdirSync` dirent type can misreport on Windows.
+- `getImageMap(webview, docUri)` — returns `{ filename → webviewUri }` map. Resolution order: (1) the configured attachments dir (`getSaveDir`) — priority location; (2) a recursive `findImageFiles` scan of the whole vault root for any filename not already found. First match wins per basename. If a `![[file]]` reference isn't in the map at all, `imgPlugin` leaves the raw markdown text untouched instead of rendering a broken image.
 - `getThemeCss()` — reads `.obsidian/themes/{name}/theme.css` from vault root (config: `vaultTool.obsidianTheme`)
 - `escapeRegex(s)` — escapes special regex chars
 - `updateWikiLinks(oldName, newName)` — scans all vault `.md` files, replaces `[[OldName]]` and `[[OldName|alias]]` with new name via `WorkspaceEdit`
@@ -68,10 +69,18 @@ Obsidian themes (e.g. Border) embed SVG data URLs in CSS properties like `-webki
 | `sync` | Apply `content` to VS Code document via `applyEdit` (debounced autosave path) |
 | `content-for-save` | Resolves the pending `onWillSave` promise |
 | `rename` | Validates new name, calls `WorkspaceEdit.renameFile()`, then `updateWikiLinks(oldName, newName)` |
-| `open-note` | Finds or creates the `.md` file, opens it with `vscode.openWith` in same column |
+| `open-note` | Resolves the wiki-link target and opens it with `vscode.openWith` in the same column (see below for resolution/creation rules) |
 | `open-url` | `vscode.env.openExternal(vscode.Uri.parse(url))` |
 | `reveal-path` | `vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(fsPath))` |
 | `paste-image` | Saves base64 buffer as `Pasted image YYYYMMDDHHMMSS.png` to configured attachments dir, sends back `image-pasted` with webview URI |
+
+### `open-note` resolution rules
+
+A wiki-link target may optionally carry one directory segment to disambiguate same-named notes, e.g. `[[folder/Note]]`. Only the immediate parent directory name is used as a hint — the rest of any longer path is ignored.
+
+- **No directory hint** (`[[Note]]`): prefer a `Note.md` in the same directory as the note containing the link; if absent, fall back to a vault-wide `findFiles` search (first match wins).
+- **Directory hint** (`[[folder/Note]]`): vault-wide search for `Note.md`, filtered to results whose immediate parent directory is named `folder` (case-insensitive).
+- **Not found anywhere**: create it. Target directory is the hinted subfolder inside the *current* note's directory (created if missing), or the current note's directory itself if no hint was given. The new file is written empty.
 
 ### `buildHtml(content, font, fontSize, noteIndex, cspSource, scriptUri, title, imageMap, breadcrumb)`
 
@@ -145,6 +154,8 @@ Regex-based `ViewPlugin` for standard markdown links `[text](url)`. More reliabl
 ### `wikiLinkPlugin`
 
 Regex `/(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g` over viewport text. For non-active lines, hides `[[`, `]]`, and (when alias) the `target|` part, leaving only the display text with class `cm-wiki-link`.
+
+The `cm-wiki-link` mark always carries `attributes: { 'data-target': name }` with the raw target (including any disambiguation path), even when an alias is displayed — the visible text alone isn't enough to resolve the link once an alias hides the real target. `linkClickHandler` reads `dataset.target` (falling back to `textContent` for safety) and sends that as `open-note`'s `name`, so the host receives the full target string to resolve.
 
 ### `imgPlugin`
 

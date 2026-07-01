@@ -512,9 +512,11 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
       if (alias !== undefined) {
         all.push({ from: mFrom + 2, to: mFrom + 2 + name.length + 1, dec: Decoration.replace({}) });
         const aFrom = mFrom + 2 + name.length + 1;
-        all.push({ from: aFrom, to: aFrom + alias.length, dec: Decoration.mark({ class: 'cm-wiki-link' }) });
+        all.push({ from: aFrom, to: aFrom + alias.length,
+          dec: Decoration.mark({ class: 'cm-wiki-link', attributes: { 'data-target': name } }) });
       } else {
-        all.push({ from: mFrom + 2, to: mFrom + 2 + name.length, dec: Decoration.mark({ class: 'cm-wiki-link' }) });
+        all.push({ from: mFrom + 2, to: mFrom + 2 + name.length,
+          dec: Decoration.mark({ class: 'cm-wiki-link', attributes: { 'data-target': name } }) });
       }
       all.push({ from: mTo - 2, to: mTo, dec: Decoration.replace({}) });
     }
@@ -693,7 +695,8 @@ const linkClickHandler = EditorView.domEventHandlers({
     const wikiEl = isWikiLinkEl(e.target, view.dom);
     if (wikiEl) {
       e.preventDefault();
-      vscode.postMessage({ type: 'open-note', name: wikiEl.textContent.trim() });
+      const target = wikiEl.dataset.target || wikiEl.textContent.trim();
+      vscode.postMessage({ type: 'open-note', name: target });
       return true;
     }
     const tableWiki = e.target.closest('[data-wiki]');

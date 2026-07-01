@@ -15,6 +15,31 @@ function findMarkdownFiles(dir: string, fileList: string[] = []): string[] {
   return fileList;
 }
 
+const IMAGE_EXT_RE = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
+
+function findImageFiles(dir: string, fileList: string[] = []): string[] {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return fileList; }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') { continue; }
+    const fullPath = path.join(dir, entry.name);
+    let isDir = entry.isDirectory();
+    let isFile = entry.isFile();
+    if (!isDir && !isFile) {
+      // Reparse points (Dropbox Smart Sync / OneDrive Files On-Demand placeholder
+      // folders) can be misreported by Dirent on Windows; fall back to a real stat.
+      try {
+        const st = fs.statSync(fullPath);
+        isDir = st.isDirectory();
+        isFile = st.isFile();
+      } catch { continue; }
+    }
+    if (isDir) { findImageFiles(fullPath, fileList); }
+    else if (isFile && IMAGE_EXT_RE.test(entry.name)) { fileList.push(fullPath); }
+  }
+  return fileList;
+}
+
 function getSaveDir(docFsPath: string): string {
   const cfg = vscode.workspace.getConfiguration('vaultTool');
   const location = cfg.get<string>('attachmentsLocation', 'vault');
@@ -44,16 +69,21 @@ function getAttachmentRoots(docUri: vscode.Uri): vscode.Uri[] {
 
 function getImageMap(webview: vscode.Webview, docUri: vscode.Uri): Record<string, string> {
   const map: Record<string, string> = {};
-  const imgExts = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
-  for (const rootUri of getAttachmentRoots(docUri)) {
-    try {
-      for (const file of fs.readdirSync(rootUri.fsPath)) {
-        if (imgExts.test(file)) {
-          map[file] = webview.asWebviewUri(vscode.Uri.joinPath(rootUri, file)).toString();
-        }
-      }
-    } catch { /* directory may not exist */ }
-  }
+  const addFile = (fullPath: string) => {
+    const name = path.basename(fullPath);
+    if (!(name in map)) {
+      map[name] = webview.asWebviewUri(vscode.Uri.file(fullPath)).toString();
+    }
+  };
+
+  // 1) The configured attachments location takes priority.
+  const configuredDir = getSaveDir(docUri.fsPath);
+  for (const fullPath of findImageFiles(configuredDir)) { addFile(fullPath); }
+
+  // 2) Fall back to a recursive search of the whole vault for anything not found above.
+  const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? path.dirname(docUri.fsPath);
+  for (const fullPath of findImageFiles(vaultRoot)) { addFile(fullPath); }
+
   return map;
 }
 
@@ -290,19 +320,48 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           );
 
         } else if (msg.type === 'open-note') {
-          const noteName = (msg.name as string || '').trim();
-          if (!noteName) { return; }
-          vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**', 1).then(found => {
-            const targetUri = found.length > 0
-              ? found[0]
-              : vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), noteName + '.md'));
-            if (found.length === 0) {
+          const raw = (msg.name as string || '').trim();
+          if (!raw) { return; }
+          // A wiki-link may carry a directory hint to disambiguate same-named notes,
+          // e.g. [[folder/Note]]. Only the immediate parent directory name is used.
+          const normalized = raw.replace(/\\/g, '/');
+          const segments   = normalized.split('/').filter(Boolean);
+          const noteName   = segments.pop() || normalized;
+          const dirHint    = segments.length > 0 ? segments[segments.length - 1] : null;
+          const currentDir = path.dirname(document.uri.fsPath);
+
+          (async () => {
+            let targetUri: vscode.Uri | undefined;
+
+            if (!dirHint) {
+              // No disambiguation: prefer a note in the same directory as the link.
+              const sameDirCandidate = path.join(currentDir, noteName + '.md');
+              if (fs.existsSync(sameDirCandidate)) {
+                targetUri = vscode.Uri.file(sameDirCandidate);
+              } else {
+                const found = await vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**');
+                if (found.length > 0) { targetUri = found[0]; }
+              }
+            } else {
+              // Disambiguation path given: match by the target's parent directory name.
+              const found = await vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**');
+              const hinted = found.find(u => path.basename(path.dirname(u.fsPath)).toLowerCase() === dirHint.toLowerCase());
+              if (hinted) { targetUri = hinted; }
+            }
+
+            if (!targetUri) {
+              // Not found anywhere: create it next to the note containing the link
+              // (inside the hinted subdirectory, if one was given).
+              const targetDir = dirHint ? path.join(currentDir, dirHint) : currentDir;
+              if (!fs.existsSync(targetDir)) { fs.mkdirSync(targetDir, { recursive: true }); }
+              targetUri = vscode.Uri.file(path.join(targetDir, noteName + '.md'));
               fs.writeFileSync(targetUri.fsPath, '', 'utf-8');
             }
+
             const col = webviewPanel.viewColumn ?? vscode.ViewColumn.Active;
-            vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col)
-              .then(() => { setTimeout(() => { try { webviewPanel.dispose(); } catch {} }, 150); });
-          });
+            await vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col);
+            setTimeout(() => { try { webviewPanel.dispose(); } catch {} }, 150);
+          })();
 
         } else if (msg.type === 'open-url') {
           const url = (msg.url as string || '').trim();
