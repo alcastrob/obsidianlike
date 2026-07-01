@@ -1457,12 +1457,17 @@ window.addEventListener('message', ev => {
       view.dispatch({ effects: tasksRebuildEffect.of(null) });
       break;
     case 'tasks-changed':
-      // Some task, anywhere in the vault, changed (possibly from another file
-      // or another editor entirely) — every visible ```tasks``` block's data
-      // may now be stale, so drop it all and let them re-request on next build.
-      tasksQueryCache.clear();
-      tasksQueryPending.clear();
-      view.dispatch({ effects: tasksRebuildEffect.of(null) });
+      // Some task, anywhere in the vault, changed (possibly from another file or another
+      // editor entirely) — every visible ```tasks``` block's data may now be stale. Re-request
+      // each one currently on screen, but deliberately do NOT clear tasksQueryCache first (and
+      // don't dispatch a rebuild here): the widget keeps rendering the last-known-good result
+      // until the fresh one actually arrives via tasks-query-result, which is what triggers the
+      // rebuild. Clearing eagerly used to make every visible block flash to its "loading"
+      // placeholder and back on every single edit, even though the data was still fine to look
+      // at for the fraction of a second it took to refetch.
+      for (const query of tasksQueryCache.keys()) {
+        requestTasksQuery(query);
+      }
       break;
   }
 });
