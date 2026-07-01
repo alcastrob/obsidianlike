@@ -28,6 +28,19 @@ correctamente como directorio en Windows.
   `carpeta` (creándolo si no existe) dentro del directorio actual, o directamente en
   el directorio actual si no había ruta de desambiguación.
 
+## Tareas (`- [ ] ...`) — integración con "Obsidian-Like Tasks"
+
+Las líneas de checkbox se reconocen y renderizan como en Obsidian: checkbox real (clicable),
+tachado al completar, fecha vencida en rojo. Los bloques ` ```tasks ` (con la misma sintaxis
+de consulta que el plugin Tasks de Obsidian — `not done`, `group by`, filtros con expresiones
+JS, etc.) se renderizan como una lista de tareas real dentro del propio editor.
+
+Esto funciona como **dependencia opcional** de la extensión hermana `angelCastro.obsidian-like-tasks`
+(repo `vscode-tasks`): si no está instalada, los checkboxes siguen funcionando con un toggle
+simple `[ ]`↔`[x]` sin recurrencia, y los bloques `tasks` no se renderizan. Si está instalada,
+toda la lógica de parseo/recurrencia/queries vive ahí — Vault Tool solo pinta el resultado y
+reenvía los clics. Detalle técnico completo en `CLAUDE.md`.
+
 ## Siguientes pasos sugeridos
 
 - Sustituir el listado simple de notas por lectura real de frontmatter
@@ -36,8 +49,9 @@ correctamente como directorio en Windows.
 - Portar la lógica de tu sistema Kanban/Eisenhower (HTML/JS/CSS que ya
   tienes) dentro de `getHtmlContent()` del webview, sustituyendo el
   placeholder actual.
-- Añadir un motor de queries tipo Dataview que recorra el vault y genere
-  tablas/listas a partir del frontmatter.
+- Motor de queries tipo Dataview sobre frontmatter: ya existe un motor de queries real para
+  **tareas** (vía la integración de arriba), pero no para notas/frontmatter en general —
+  seguiría siendo una pieza nueva y separada.
 
 ## Tareas pendientes
 
