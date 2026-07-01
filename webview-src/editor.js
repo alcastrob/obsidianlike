@@ -60,6 +60,17 @@ const vsTheme = EditorView.theme({
     height: '0 !important', lineHeight: '0 !important',
     overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
   },
+  // List item lines — indentation per nesting depth + spacing before the first item.
+  '.cm-list-line': { paddingLeft: '0' },
+  '.cm-list-depth-1': { paddingLeft: '1.5em' },
+  '.cm-list-depth-2': { paddingLeft: '3em' },
+  '.cm-list-depth-3': { paddingLeft: '4.5em' },
+  '.cm-list-depth-4': { paddingLeft: '6em' },
+  '.cm-list-first': { marginTop: '0.5em' },
+  '.cm-list-bullet': {
+    display: 'inline-block', width: '1.2em',
+    color: 'var(--text-muted, inherit)',
+  },
   // Folded heading content
   '.cm-fold-hidden': {
     height: '0 !important', lineHeight: '0 !important',
@@ -320,6 +331,18 @@ class ImageWidget extends WidgetType {
   ignoreEvent() { return false; }
 }
 
+// ── List bullet widget ────────────────────────────────────────────────────────
+class BulletWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = 'cm-list-bullet';
+    span.textContent = '•';
+    return span;
+  }
+  ignoreEvent() { return false; }
+}
+
 // ── Live-preview plugin ───────────────────────────────────────────────────────
 const livePreviewPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
@@ -337,12 +360,33 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
       // Line decorations must be added to the builder as (line.from, line.from, dec).
       const decs     = [];  // { from, to, dec }
       const lineDecs = [];  // { from, dec }   — line.from only, to=from
+      let listDepth = 0;
+      let awaitingFirstItem = false;
 
       syntaxTree(state).iterate({
         from: view.viewport.from,
         to:   view.viewport.to,
+        leave(node) {
+          if (node.name === 'BulletList' || node.name === 'OrderedList') { listDepth--; }
+        },
         enter(node) {
           const n = node.name;
+
+          // ── Lists — indentation + spacing from the preceding block ────────
+          if (n === 'BulletList' || n === 'OrderedList') {
+            if (listDepth === 0) { awaitingFirstItem = true; }
+            listDepth++;
+            return; // descend into ListItem children
+          }
+          if (n === 'ListItem') {
+            const lineStart = state.doc.lineAt(node.from).from;
+            const depthClass = `cm-list-depth-${Math.min(listDepth, 4)}`;
+            const firstClass = awaitingFirstItem ? ' cm-list-first' : '';
+            lineDecs.push({ from: lineStart,
+              dec: Decoration.line({ class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass}` }) });
+            awaitingFirstItem = false;
+            // Don't return false — ListMark/Paragraph/nested lists still need processing
+          }
 
           // ── Tables ────────────────────────────────────────────────────────
           // Strategy (no block:true → no CM6 measurement crash):
@@ -395,6 +439,15 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             let end = node.to;
             if (state.doc.sliceString(end, end + 1) === ' ') end++;
             decs.push({ from: node.from, to: end, dec: Decoration.replace({}) });
+            return false;
+          }
+          if (n === 'ListMark') {
+            const markText = state.doc.sliceString(node.from, node.to);
+            if (/^[-*+]$/.test(markText)) {
+              let end = node.to;
+              if (state.doc.sliceString(end, end + 1) === ' ') end++;
+              decs.push({ from: node.from, to: end, dec: Decoration.replace({ widget: new BulletWidget() }) });
+            }
             return false;
           }
           if (n === 'EmphasisMark' || n === 'CodeMark' || n === 'StrikethroughMark') {
