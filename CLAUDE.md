@@ -73,6 +73,27 @@ Obsidian themes (e.g. Border) embed SVG data URLs in CSS properties like `-webki
 | `open-url` | `vscode.env.openExternal(vscode.Uri.parse(url))` |
 | `reveal-path` | `vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(fsPath))` |
 | `paste-image` | Saves base64 buffer as `Pasted image YYYYMMDDHHMMSS.png` to configured attachments dir, sends back `image-pasted` with webview URI |
+| `toggle-task` | Toggles the task checkbox line at `msg.line` (0-based). See "Task checkboxes" below. |
+
+### Task checkboxes — soft dependency on `angelCastro.obsidian-like-tasks`
+
+Clicking a `.cm-task-checkbox` widget in the CM6 editor (see `TaskCheckboxWidget` below) posts `{ type: 'toggle-task', line }` (0-based doc line number). The handler in `resolveCustomTextEditor`'s `onDidReceiveMessage`:
+
+1. Reads the current line text with `document.lineAt(line).text`.
+2. Calls `getTasksApi()`, which lazily does `vscode.extensions.getExtension('angelCastro.obsidian-like-tasks')?.activate()` and caches the resulting promise in the module-level `tasksApiPromise` (activated at most once per host session). Extension id note: the "Obsidian-Like Tasks" extension's `package.json` `name` is `obsidian-like-tasks` (not the repo folder name `vscode-tasks`) — if that ever changes again, update this id here too.
+3. If the Tasks extension is installed and its API exposes `toggleTaskLine`, calls `tasksApi.toggleTaskLine(lineText)` — this is the "Obsidian-Like Tasks" extension's own recurrence-aware state machine (`src/api/TasksApi.ts` in that repo), returning either `[toggledLine]` or, for a just-completed recurring task, `[nextOccurrenceLine, toggledLine]`.
+4. Otherwise falls back to `naiveToggleTaskLine(lineText)` — a local helper that does a plain `[ ]` ↔ `[x]`/`[X]` regex flip with no recurrence handling.
+5. Applies the result via a `WorkspaceEdit` that replaces only `document.lineAt(line).range` (not the whole document — unlike `applySync`), joining multiple returned lines with the document's actual EOL (`document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n'`).
+
+This is a **soft dependency**: `package.json` has no `extensionDependencies` entry, so Vault Tool works standalone without the Tasks extension installed — `getTasksApi()` resolves to `undefined` (via `getExtension()` returning `undefined`, or a rejected `activate()` caught internally) and the naive fallback runs instead. Two extensions' webviews cannot call into each other directly, which is why this call happens host-to-host (Vault Tool's `extension.ts` calling into the Tasks extension's exported API), not webview-to-webview.
+
+The `TasksExtensionApi` shape Vault Tool expects (declared locally in `src/extension.ts`, not imported from the other repo):
+```ts
+interface TasksExtensionApi {
+  isTaskLine(lineText: string): boolean;      // not currently called from Vault Tool
+  toggleTaskLine(lineText: string): string[]; // returns replacement line(s), no trailing newline
+}
+```
 
 ### `open-note` resolution rules
 
@@ -166,6 +187,30 @@ Regex `/!\[\[([^\]]+)\]\]/g` over viewport. Parses optional `|` parameter:
 For non-active lines with known filename in `imageMap`, replaces with `ImageWidget`.
 
 `ImageWidget(src, alt, width, caption)` — renders `<img>` optionally wrapped in `<figure>` + `<figcaption>`.
+
+### Task checkbox lines (in `livePreviewPlugin`, `ListItem` handling)
+
+Handled entirely by plain-text regex against `state.doc.lineAt(node.from).text` inside the existing `ListItem` branch of `livePreviewPlugin`'s tree walk — **not** via a Lezer AST node, even though `markdown({ base: markdownLanguage })`'s default config was empirically verified (via a throwaway script iterating the syntax tree over `"- [ ] test"`) to already produce GFM `Task`/`TaskMarker` nodes. Regex was used anyway because it's simpler to keep in one place alongside the due-date/priority/recurrence text-scanning, which has no AST representation regardless.
+
+- `TASK_LINE_RE = /^([\s\t>]*)([-*+]|[0-9]+[.)]) +\[(.)\] *(.*)$/` — detects the line and captures the status char (group 3). Matches `TaskRegularExpressions.taskRegex` in the sibling `angelCastro.obsidian-like-tasks` extension.
+- `TASK_CHECKBOX_RE = /^([\s\t>]*)([-*+]|[0-9]+[.)]) +(\[.\])/` — narrower match used only to locate the exact `<indent><marker> [<char>]` span for the widget replacement (consumes the marker + checkbox, then at most one extra trailing space is swallowed — mirrors the existing `ListMark` → `BulletWidget` replacement).
+- Status char one of `xX-` (done/cancelled) → line gets `cm-task-line cm-task-done` (line-level, via `Decoration.line`); any other char → just `cm-task-line`. Line numbers recognised as tasks are tracked in a per-build `taskLines: Set<number>` so the plain `ListMark` handler (further down in the same tree walk) can skip adding its `BulletWidget` for that line — otherwise the two replacement decorations would overlap.
+- The `<marker> [<char>] ` span is replaced with `TaskCheckboxWidget(checked, line0based)` — a `WidgetType` rendering a real `<input type="checkbox">` with class `cm-task-checkbox` and `data-line` set to the 0-based doc line number. **Unlike `BulletWidget`, this is rendered on the active/cursor line too** (the task-line branch runs before the `active.has(ln)` gate that hides other inline markers on the cursor's line), so the checkbox stays clickable while editing that line's text.
+- For non-done tasks, the remaining text after the checkbox is scanned (still plain regex, not AST) for `TASK_DUE_RE` (`📅`/`📆`/`🗓` + `YYYY-MM-DD`), `TASK_PRIORITY_RE` (`🔺⏫🔼🔽⏬`), and `TASK_RECURRENCE_RE` (`🔁` + rule text). Only the due date gets a visual treatment: if it parses to a calendar date strictly before today, that substring gets `Decoration.mark({ class: 'cm-task-overdue' })` (red/bold, mirrors `TaskDecorations.ts`'s `overdueDecoration` in the sibling Tasks extension). Priority/recurrence are parsed for parity with that extension's signifiers but currently have no dedicated styling.
+- Clicking `.cm-task-checkbox` is wired into the existing `linkClickHandler` (`mousedown` prevents default / `click` fires the action, same pattern as wiki-links and `cm-md-link`): sends `vscode.postMessage({ type: 'toggle-task', line: Number(el.dataset.line) })`. The extension host applies the actual toggle (see "Task checkboxes" under extension-host message handlers above) and the resulting document change flows back through the normal `external-update` path, so the widget re-renders with the new checked state once applied — there is no local optimistic DOM update.
+
+### ```tasks``` query blocks (also in `livePreviewPlugin`)
+
+Unlike single-checkbox lines, a ```tasks``` query needs data from the *entire vault* (the sibling extension's in-memory task index), which the webview cannot compute from the current document's AST alone. Rendering is therefore an async round-trip: webview → this extension's host (`postMessage`) → `angelCastro.obsidian-like-tasks`'s exported API → back to the webview → render. Since `_build()` runs synchronously, results can't be awaited inline — see the cache/effect mechanism below.
+
+- Detected via the `FencedCode` node in the same tree walk as `Table` (empirically verified: `markdown({ base: markdownLanguage })`'s default GFM setup produces `FencedCode` → `CodeMark`, `CodeInfo` (the info string), `CodeText` (the full query text as one node, even when multi-line), `CodeMark`). Only blocks whose `CodeInfo` is exactly `tasks` are touched; everything else falls through to the unmodified default `FencedCode`/`CodeMark`/`CodeText` handling.
+- Rendering follows the exact same non-block strategy as `Table` (`block: true` decorations are banned — see the comment above `livePreviewPlugin`): the opening ` ```tasks ` fence line becomes a single-line `Decoration.replace({ widget: TasksQueryWidget })`; every remaining line (query text + closing fence) is collapsed via an empty `Decoration.replace({})` + `Decoration.line({ class: 'cm-table-row-hidden' })`, reusing that class rather than adding a redundant one. Also mirrors `Table`'s active-line fallback: if the cursor is on any line inside the block, the raw ` ```tasks `/query text/`` ` `` is left untouched and editable.
+- `tasksQueryCache: Map<string, TasksQueryResultDTO>` (keyed by trimmed query text) and `tasksQueryPending: Set<string>` (dedupes in-flight requests) are module-level. `requestTasksQuery(query)` posts `{ type: 'run-tasks-query', query }` if that text isn't already pending. `tasksRebuildEffect: StateEffect` is a no-op effect dispatched purely to force a `livePreviewPlugin` rebuild once data arrives or is invalidated — the same trick `foldEffect` uses for fold toggles; `livePreviewPlugin.update()` checks for it alongside `docChanged`/`selectionSet`/`viewportChanged`.
+- `TasksQueryWidget(query, result)` — `result` is whatever `tasksQueryCache.get(query)` held at `_build()` time: `undefined` while in flight (renders a "Cargando…" placeholder) or the resolved `TasksQueryResultDTO` once available. Passing `result` into the constructor (rather than reading the cache from inside `toDOM()`) makes `eq()` correctly report "not equal" once data arrives, so CM6 actually replaces the placeholder DOM instead of reusing it.
+- `renderTasksQueryResult(container, result)` builds real DOM (`textContent`, not `innerHTML` — task descriptions are never interpreted as HTML) via `renderTaskRow`/`renderTaskList`: one `<div class="cm-tasks-query-item">` per task, containing a checkbox (class `cm-task-checkbox cm-task-query-checkbox` — **both** classes, so it still picks up `vsTheme`'s checkbox styling) plus priority/due-date/recurrence badges (`cm-tasks-query-badge`, overdue ones also get `cm-task-overdue`). `result.groups` (when the query has `group by`) renders a `cm-tasks-query-group-title` heading per non-empty group instead of one flat list. `result.unrecognizedLines` (query lines the engine didn't understand) are surfaced as a visible `cm-tasks-query-warning`, never silently dropped.
+- A tasks-query checkbox carries `data-path` **and** `data-line` (a result can come from any file in the vault, not just the open one), so `linkClickHandler` checks `.cm-task-query-checkbox` *before* the plain `.cm-task-checkbox` branch (the query checkbox matches both selectors) and sends `{ type: 'toggle-task-at-location', path, line }` instead of the single-file `{ type: 'toggle-task', line }`.
+- Host side (`onDidReceiveMessage`): `run-tasks-query` calls `(await getTasksApi())?.renderTasksQuery(query)` (empty `{ items: [], groups: null, unrecognizedLines: [] }` if the API/extension is unavailable, so the webview's placeholder doesn't hang forever) and replies with `{ type: 'tasks-query-result', query, result }`. `toggle-task-at-location` calls `toggleTaskAtLocation(path, line)`, which — unlike `toggleTaskLine` — may open and edit a document that isn't the one currently shown in this panel.
+- `ensureSubscribedToTasksChanges()` (module scope, single-flight via `subscribedToTasksChanges`, called once from the top of `resolveCustomTextEditor`) subscribes to the Tasks extension's `onDidChangeTasks` event and, on every fire, broadcasts `{ type: 'tasks-changed' }` to every panel in `activePanels`. The webview's handler for it clears `tasksQueryCache`/`tasksQueryPending` entirely and dispatches `tasksRebuildEffect`, so every visible ```tasks``` block re-requests fresh data — this is what makes toggling a task in one file (or from another query block entirely) refresh every other open query view.
 
 ### `foldPlugin`
 

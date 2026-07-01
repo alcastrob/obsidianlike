@@ -71,6 +71,69 @@ const vsTheme = EditorView.theme({
     display: 'inline-block', width: '1.2em',
     color: 'var(--text-muted, inherit)',
   },
+  // Task checkbox lines (- [ ] / - [x] ...), rendered by TaskCheckboxWidget.
+  '.cm-task-line': { paddingLeft: '0' },
+  '.cm-task-done': {
+    color: 'var(--text-muted, inherit)',
+    textDecoration: 'line-through',
+  },
+  '.cm-task-checkbox': {
+    display: 'inline-block',
+    width: '1em', height: '1em',
+    margin: '0 0.4em 0 0',
+    verticalAlign: 'middle',
+    cursor: 'pointer',
+    position: 'relative', top: '-1px',
+  },
+  '.cm-task-overdue': {
+    color: 'var(--text-error, #e06c75)',
+    fontWeight: 'bold',
+  },
+  // ```tasks``` query block rendering (see TasksQueryWidget).
+  '.cm-tasks-query': {
+    display: 'block',
+    margin: '4px 0 10px',
+    padding: '2px 0',
+  },
+  '.cm-tasks-query-loading, .cm-tasks-query-empty': {
+    opacity: '0.55',
+    fontStyle: 'italic',
+    fontSize: '0.9em',
+    padding: '2px 0',
+  },
+  '.cm-tasks-query-warning': {
+    color: 'var(--text-error, #e06c75)',
+    fontSize: '0.85em',
+    marginTop: '4px',
+    opacity: '0.85',
+  },
+  '.cm-tasks-query-group-title': {
+    fontWeight: '600',
+    opacity: '0.75',
+    fontSize: '0.95em',
+    margin: '10px 0 4px',
+  },
+  '.cm-tasks-query-list': {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+  },
+  '.cm-tasks-query-item': {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '0.3em',
+    lineHeight: '1.5',
+  },
+  '.cm-tasks-query-item.cm-task-done .cm-tasks-query-desc': {
+    color: 'var(--text-muted, inherit)',
+    textDecoration: 'line-through',
+  },
+  '.cm-tasks-query-desc': { flex: '1 1 auto' },
+  '.cm-tasks-query-badge': {
+    opacity: '0.75',
+    fontSize: '0.9em',
+    whiteSpace: 'nowrap',
+  },
   // Folded heading content
   '.cm-fold-hidden': {
     height: '0 !important', lineHeight: '0 !important',
@@ -199,6 +262,32 @@ const mdHighlight = HighlightStyle.define([
   { tag: tags.meta,
     color: 'var(--text-faint, var(--vscode-editorLineNumber-foreground, rgba(128,128,128,0.5)))' },
 ]);
+
+// ── Task checkbox line detection (Obsidian "Tasks" plugin style signifiers) ──────
+// Full-line match used to detect a task and pull out the status char, mirroring
+// TaskRegularExpressions.taskRegex in the sibling "Tasks" extension
+// (angelCastro.vscode-tasks, src/core/Task/TaskRegularExpressions.ts).
+const TASK_LINE_RE = /^([\s\t>]*)([-*+]|[0-9]+[.)]) +\[(.)\] *(.*)$/;
+// Narrower match used only to find the exact "<indent><marker> [<char>]" span so the
+// checkbox widget replacement mirrors the ListMark→BulletWidget replacement below
+// (consume the marker + checkbox, then at most one trailing space).
+const TASK_CHECKBOX_RE = /^([\s\t>]*)([-*+]|[0-9]+[.)]) +(\[.\])/;
+// Signifiers within the task text (after the checkbox) — same emoji as Obsidian Tasks.
+const TASK_DUE_RE        = /(?:📅|📆|🗓)\uFE0F? *(\d{4}-\d{2}-\d{2})/u;
+const TASK_PRIORITY_RE   = /(🔺|⏫|🔼|🔽|⏬)/u;
+const TASK_RECURRENCE_RE = /🔁\uFE0F? *([a-zA-Z0-9, !]+)/u;
+
+function todayDateOnly() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+function isOverdueDate(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!m) return false;
+  const due = new Date(+m[1], +m[2] - 1, +m[3]);
+  return due.getTime() < todayDateOnly().getTime();
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getActiveLines(state) {
@@ -343,12 +432,180 @@ class BulletWidget extends WidgetType {
   ignoreEvent() { return false; }
 }
 
+// ── Task checkbox widget ──────────────────────────────────────────────────────
+// Renders a real <input type="checkbox">. Unlike BulletWidget, this is rendered on
+// the active/cursor line too (not gated behind `active.has(ln)`) so it stays
+// clickable while editing the task text. `line` is the 0-based doc line number,
+// read back by the click handler and sent to the extension host as `toggle-task`.
+class TaskCheckboxWidget extends WidgetType {
+  constructor(checked, line) { super(); this.checked = checked; this.line = line; }
+  eq(other) { return this.checked === other.checked && this.line === other.line; }
+  toDOM() {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.className = 'cm-task-checkbox';
+    input.checked = this.checked;
+    input.dataset.line = String(this.line);
+    return input;
+  }
+  ignoreEvent() { return false; }
+}
+
+// ── Tasks query (```tasks``` fenced code blocks) ──────────────────────────────
+// Soft dependency on the sibling "angelCastro.obsidian-like-tasks" extension: a
+// `tasks` query needs data from the *entire vault* (that extension's in-memory
+// index), which the webview can't compute locally from the current document's
+// AST. So rendering requires an async round-trip: webview → this extension's
+// host (postMessage) → Tasks extension's API → back to the webview → render.
+//
+// `_build()` (in livePreviewPlugin, below) runs synchronously, so results can't
+// be awaited inline. Instead:
+//   - `tasksQueryCache`   caches results by exact (trimmed) query text.
+//   - `tasksQueryPending` avoids firing duplicate requests for the same text
+//     while a response is in flight.
+//   - `tasksRebuildEffect` is a no-op StateEffect dispatched purely to force a
+//     livePreviewPlugin rebuild once a response/invalidation arrives — the same
+//     trick `foldEffect` uses further down in this file for fold toggles.
+const tasksQueryCache   = new Map();   // trimmed query text -> TasksQueryResultDTO
+const tasksQueryPending = new Set();   // trimmed query text currently awaiting a response
+const tasksRebuildEffect = StateEffect.define();
+
+function requestTasksQuery(query) {
+  if (tasksQueryPending.has(query)) return;
+  tasksQueryPending.add(query);
+  vscode.postMessage({ type: 'run-tasks-query', query });
+}
+
+const TASK_PRIORITY_ICON = {
+  Highest: '🔺', High: '⏫', Medium: '🔼', Low: '🔽', Lowest: '⏬',
+};
+
+// Renders a single TaskDTO as a checklist row. Mirrors TaskCheckboxWidget's DOM
+// shape (a real <input type="checkbox">, cm-task-checkbox class) but carries
+// both `data-path` and `data-line` since results can come from any file in the
+// vault, not just the currently open document — the click handler below reads
+// both and sends `toggle-task-at-location` instead of `toggle-task`.
+function renderTaskRow(t) {
+  const row = document.createElement('div');
+  row.className = 'cm-tasks-query-item' + (t.isDone ? ' cm-task-done' : '');
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.className = 'cm-task-checkbox cm-task-query-checkbox';
+  cb.checked = !!t.isDone;
+  cb.dataset.path = t.path;
+  cb.dataset.line = String(t.line);
+  row.appendChild(cb);
+
+  const desc = document.createElement('span');
+  desc.className = 'cm-tasks-query-desc' + (t.isOverdue ? ' cm-task-overdue' : '');
+  desc.textContent = t.description || '';
+  row.appendChild(desc);
+
+  const icon = TASK_PRIORITY_ICON[t.priority];
+  if (icon) {
+    const p = document.createElement('span');
+    p.className = 'cm-tasks-query-badge';
+    p.textContent = icon;
+    row.appendChild(p);
+  }
+  if (t.dueDate) {
+    const d = document.createElement('span');
+    d.className = 'cm-tasks-query-badge' + (t.isOverdue ? ' cm-task-overdue' : '');
+    d.textContent = '📅 ' + t.dueDate;
+    row.appendChild(d);
+  }
+  if (t.isRecurring && t.recurrenceRule) {
+    const r = document.createElement('span');
+    r.className = 'cm-tasks-query-badge';
+    r.textContent = '🔁 ' + t.recurrenceRule;
+    row.appendChild(r);
+  }
+  return row;
+}
+
+function renderTaskList(items) {
+  const list = document.createElement('div');
+  list.className = 'cm-tasks-query-list';
+  items.forEach(t => list.appendChild(renderTaskRow(t)));
+  return list;
+}
+
+function renderEmptyNotice(container) {
+  const empty = document.createElement('div');
+  empty.className = 'cm-tasks-query-empty';
+  empty.textContent = 'No hay tareas que coincidan.';
+  container.appendChild(empty);
+}
+
+// Renders a TasksQueryResultDTO into `container` (a freshly-created wrapper div).
+function renderTasksQueryResult(container, result) {
+  const groups = result && result.groups;
+  const items  = (result && result.items) || [];
+
+  if (groups) {
+    const nonEmpty = groups.filter(g => g.items && g.items.length > 0);
+    if (nonEmpty.length === 0) {
+      renderEmptyNotice(container);
+    } else {
+      nonEmpty.forEach(g => {
+        const h = document.createElement('div');
+        h.className = 'cm-tasks-query-group-title';
+        h.textContent = g.name;
+        container.appendChild(h);
+        container.appendChild(renderTaskList(g.items));
+      });
+    }
+  } else if (items.length > 0) {
+    container.appendChild(renderTaskList(items));
+  } else {
+    renderEmptyNotice(container);
+  }
+
+  const unrecognized = (result && result.unrecognizedLines) || [];
+  if (unrecognized.length > 0) {
+    const warn = document.createElement('div');
+    warn.className = 'cm-tasks-query-warning';
+    warn.textContent = '⚠ Líneas no reconocidas: ' + unrecognized.join(' | ');
+    container.appendChild(warn);
+  }
+}
+
+// Single-line replacement widget for the opening ```tasks fence (mirrors
+// TableWidget's "replace only the first line" pattern — block:true decorations
+// are banned, see the comment above livePreviewPlugin). `result` is whatever was
+// in `tasksQueryCache` for this query at the time `_build()` ran: `undefined`
+// while the request is still in flight, or the resolved TasksQueryResultDTO once
+// the host has responded. Passing it into the constructor (rather than reading
+// the cache from inside toDOM) means `eq()` correctly reports "not equal" once
+// data arrives, so CM6 knows to re-render instead of reusing the old "loading"
+// DOM node.
+class TasksQueryWidget extends WidgetType {
+  constructor(query, result) { super(); this.query = query; this.result = result; }
+  eq(other) { return this.query === other.query && this.result === other.result; }
+  toDOM() {
+    const wrap = document.createElement('div');
+    wrap.className = 'cm-tasks-query';
+    if (this.result) {
+      renderTasksQueryResult(wrap, this.result);
+    } else {
+      const loading = document.createElement('div');
+      loading.className = 'cm-tasks-query-loading';
+      loading.textContent = 'Cargando consulta de tareas…';
+      wrap.appendChild(loading);
+    }
+    return wrap;
+  }
+  ignoreEvent() { return false; }
+}
+
 // ── Live-preview plugin ───────────────────────────────────────────────────────
 const livePreviewPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
     if (u.docChanged || u.selectionSet || u.viewportChanged ||
-        syntaxTree(u.startState) !== syntaxTree(u.state)) {
+        syntaxTree(u.startState) !== syntaxTree(u.state) ||
+        u.transactions.some(t => t.effects.some(e => e.is(tasksRebuildEffect)))) {
       this.decorations = this._build(u.view);
     }
   }
@@ -362,6 +619,9 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
       const lineDecs = [];  // { from, dec }   — line.from only, to=from
       let listDepth = 0;
       let awaitingFirstItem = false;
+      // Line numbers recognised as task-checkbox lines, so the plain ListMark→BulletWidget
+      // replacement below can skip them (the task checkbox widget already covers that span).
+      const taskLines = new Set();
 
       syntaxTree(state).iterate({
         from: view.viewport.from,
@@ -379,11 +639,53 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             return; // descend into ListItem children
           }
           if (n === 'ListItem') {
-            const lineStart = state.doc.lineAt(node.from).from;
+            const line = state.doc.lineAt(node.from);
+            const lineStart = line.from;
             const depthClass = `cm-list-depth-${Math.min(listDepth, 4)}`;
             const firstClass = awaitingFirstItem ? ' cm-list-first' : '';
-            lineDecs.push({ from: lineStart,
-              dec: Decoration.line({ class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass}` }) });
+
+            // ── Task checkbox lines ──────────────────────────────────────────
+            // Detected via plain-text regex (not AST) per the line text, so this
+            // works regardless of whether lezer-markdown's GFM Task/TaskMarker nodes
+            // are present. Rendered on active AND inactive lines (unlike the plain
+            // bullet below) so the checkbox stays clickable while editing.
+            const taskM = TASK_LINE_RE.exec(line.text);
+            if (taskM) {
+              taskLines.add(line.number);
+              const statusChar = taskM[3];
+              const isDone = /[xX-]/.test(statusChar);
+              lineDecs.push({ from: lineStart,
+                dec: Decoration.line({
+                  class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass} cm-task-line${isDone ? ' cm-task-done' : ''}`
+                }) });
+
+              const cbM = TASK_CHECKBOX_RE.exec(line.text);
+              if (cbM) {
+                const markStart = lineStart + cbM[1].length;
+                let end = lineStart + cbM[0].length;
+                if (state.doc.sliceString(end, end + 1) === ' ') end++;
+                decs.push({ from: markStart, to: end,
+                  dec: Decoration.replace({ widget: new TaskCheckboxWidget(isDone, line.number - 1) }) });
+
+                if (!isDone) {
+                  // Signifiers live in the remaining task text. Only the overdue due-date
+                  // gets a visual treatment; priority/recurrence are parsed for parity with
+                  // the sibling "Tasks" extension's signifiers but aren't styled here.
+                  const rest = state.doc.sliceString(end, line.to);
+                  const dueM = TASK_DUE_RE.exec(rest);
+                  if (dueM && isOverdueDate(dueM[1])) {
+                    const dueFrom = end + dueM.index;
+                    decs.push({ from: dueFrom, to: dueFrom + dueM[0].length,
+                      dec: Decoration.mark({ class: 'cm-task-overdue' }) });
+                  }
+                  TASK_PRIORITY_RE.exec(rest);
+                  TASK_RECURRENCE_RE.exec(rest);
+                }
+              }
+            } else {
+              lineDecs.push({ from: lineStart,
+                dec: Decoration.line({ class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass}` }) });
+            }
             awaitingFirstItem = false;
             // Don't return false — ListMark/Paragraph/nested lists still need processing
           }
@@ -423,6 +725,56 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             return false;
           }
 
+          // ── ```tasks``` query blocks ─────────────────────────────────────
+          // Same non-block strategy as Table above: first line (the ```tasks
+          // fence) becomes a single-line widget replacement; every remaining
+          // line (query text + closing fence) is collapsed via an empty replace
+          // + a height:0 line decoration. Verified empirically (throwaway script
+          // iterating the syntax tree over a ```tasks fenced block) that
+          // markdown({ base: markdownLanguage })'s default GFM setup produces
+          // FencedCode > CodeMark, CodeInfo, CodeText, CodeMark — matching the
+          // structure assumed here; CodeText spans the full (possibly
+          // multi-line) query text as a single node.
+          if (n === 'FencedCode') {
+            const infoNode = node.node.getChild('CodeInfo');
+            const info = infoNode ? state.doc.sliceString(infoNode.from, infoNode.to).trim() : '';
+            if (info === 'tasks') {
+              try {
+                const fromLine = state.doc.lineAt(node.from);
+                const endPos   = Math.max(node.from,
+                  Math.min(node.to, state.doc.length) - 1);
+                const toLine   = state.doc.lineAt(endPos);
+
+                let isActive = false;
+                for (let i = fromLine.number; i <= toLine.number; i++) {
+                  if (active.has(i)) { isActive = true; break; }
+                }
+                if (!isActive) {
+                  const codeTextNode = node.node.getChild('CodeText');
+                  const queryText = codeTextNode
+                    ? state.doc.sliceString(codeTextNode.from, codeTextNode.to).trim()
+                    : '';
+
+                  const cached = tasksQueryCache.get(queryText);
+                  if (!cached) { requestTasksQuery(queryText); }
+
+                  decs.push({ from: fromLine.from, to: fromLine.to,
+                    dec: Decoration.replace({ widget: new TasksQueryWidget(queryText, cached) }) });
+                  for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
+                    const line = state.doc.line(ln);
+                    decs.push({ from: line.from, to: line.to,
+                      dec: Decoration.replace({}) });
+                    lineDecs.push({ from: line.from,
+                      dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+                  }
+                }
+              } catch (_) {}
+              return false;
+            }
+            // Not a tasks block — fall through so normal FencedCode/CodeMark/
+            // CodeText handling (unchanged) still applies.
+          }
+
           // ── Headings — line class for Obsidian theme (active + inactive) ──
           const headingM = /^ATXHeading([1-6])$/.exec(n);
           if (headingM) {
@@ -442,6 +794,10 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             return false;
           }
           if (n === 'ListMark') {
+            // Task-checkbox lines are already fully replaced by TaskCheckboxWidget
+            // (added while processing the enclosing ListItem, above) — skip the plain
+            // bullet replacement so the two decorations don't overlap.
+            if (taskLines.has(state.doc.lineAt(node.from).number)) { return false; }
             const markText = state.doc.sliceString(node.from, node.to);
             if (/^[-*+]$/.test(markText)) {
               let end = node.to;
@@ -737,6 +1093,8 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (tableWiki) { e.preventDefault(); return true; }
     const mdLink = e.target.closest('.cm-md-link');
     if (mdLink) { e.preventDefault(); return true; }
+    const taskCb = e.target.closest('.cm-task-checkbox');
+    if (taskCb) { e.preventDefault(); return true; }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
@@ -762,6 +1120,26 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (mdLink) {
       e.preventDefault();
       vscode.postMessage({ type: 'open-url', url: mdLink.dataset.url });
+      return true;
+    }
+    // Checked before the generic .cm-task-checkbox below: a tasks-query result
+    // checkbox carries BOTH classes (so it still gets vsTheme's checkbox
+    // styling), but it needs `data-path` + `data-line` (the task may live in
+    // any file in the vault) rather than the plain `toggle-task` line-only message.
+    const taskQueryCb = e.target.closest('.cm-task-query-checkbox');
+    if (taskQueryCb) {
+      e.preventDefault();
+      vscode.postMessage({
+        type: 'toggle-task-at-location',
+        path: taskQueryCb.dataset.path,
+        line: Number(taskQueryCb.dataset.line),
+      });
+      return true;
+    }
+    const taskCb = e.target.closest('.cm-task-checkbox');
+    if (taskCb) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'toggle-task', line: Number(taskCb.dataset.line) });
       return true;
     }
 
@@ -1072,6 +1450,19 @@ window.addEventListener('message', ev => {
     }
     case 'toggle-source-mode':
       toggleSourceMode();
+      break;
+    case 'tasks-query-result':
+      tasksQueryCache.set(msg.query, msg.result);
+      tasksQueryPending.delete(msg.query);
+      view.dispatch({ effects: tasksRebuildEffect.of(null) });
+      break;
+    case 'tasks-changed':
+      // Some task, anywhere in the vault, changed (possibly from another file
+      // or another editor entirely) — every visible ```tasks``` block's data
+      // may now be stale, so drop it all and let them re-request on next build.
+      tasksQueryCache.clear();
+      tasksQueryPending.clear();
+      view.dispatch({ effects: tasksRebuildEffect.of(null) });
       break;
   }
 });

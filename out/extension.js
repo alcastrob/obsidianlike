@@ -155,6 +155,75 @@ function computeBreadcrumb(docUri) {
         fsPath: path.join(root, ...parts.slice(0, i + 1)),
     }));
 }
+let tasksApiPromise;
+// Once successfully resolved, the API is cached forever (an activated extension stays active
+// for the rest of the session). But if resolution *fails* — the extension isn't found yet, or
+// its `activate()` throws — the failure is NOT cached: `tasksApiPromise` is reset to `undefined`
+// so the next call retries from scratch, instead of being stuck with a permanently-failed
+// lookup for the rest of the session. This matters because `getExtension()` can return
+// `undefined` in a narrow window at VS Code startup if this extension's own activation hasn't
+// been registered yet relative to ours — a real, if uncommon, race.
+function getTasksApi() {
+    if (!tasksApiPromise) {
+        tasksApiPromise = (async () => {
+            const ext = vscode.extensions.getExtension('angelCastro.obsidian-like-tasks');
+            if (!ext) {
+                tasksApiPromise = undefined;
+                return undefined;
+            }
+            try {
+                return (await ext.activate());
+            }
+            catch {
+                tasksApiPromise = undefined;
+                return undefined;
+            }
+        })();
+    }
+    return tasksApiPromise;
+}
+// Broadcasts `tasks-changed` to every open panel whenever any task anywhere in
+// the workspace changes (e.g. toggled from a different file, or from a tasks-
+// query checklist in a different editor entirely), so each panel's ```tasks```
+// query cache gets invalidated and re-requests fresh data. Subscribed once at
+// module scope (not per-panel) — `activePanels` is what makes it possible to
+// fan the single event out to every currently-open webview.
+let subscribedToTasksChanges = false;
+// Retried a handful of times (a few seconds total) rather than just once: this is called from
+// the top of `resolveCustomTextEditor`, so a single long-lived panel that was opened during the
+// narrow cold-start race window described above would otherwise never get another chance to
+// subscribe — there's no *new* panel-open event to retry from if the user doesn't close and
+// reopen it (which is exactly the workaround this is meant to make unnecessary).
+async function ensureSubscribedToTasksChanges(retriesLeft = 5) {
+    if (subscribedToTasksChanges) {
+        return;
+    }
+    const api = await getTasksApi();
+    if (!api?.onDidChangeTasks) {
+        if (retriesLeft > 0) {
+            setTimeout(() => { void ensureSubscribedToTasksChanges(retriesLeft - 1); }, 1500);
+        }
+        return;
+    }
+    subscribedToTasksChanges = true;
+    api.onDidChangeTasks(() => {
+        activePanels.forEach(p => { try {
+            p.webview.postMessage({ type: 'tasks-changed' });
+        }
+        catch { } });
+    });
+}
+// Fallback used when the Tasks extension isn't installed/active: a plain [ ]/[x]
+// flip with no recurrence handling.
+function naiveToggleTaskLine(lineText) {
+    if (/\[ \]/.test(lineText)) {
+        return [lineText.replace('[ ]', '[x]')];
+    }
+    if (/\[[xX]\]/.test(lineText)) {
+        return [lineText.replace(/\[[xX]\]/, '[ ]')];
+    }
+    return [lineText];
+}
 // ── Shared state ──────────────────────────────────────────────────────────────
 let extensionUri;
 let noteIndex = [];
@@ -177,6 +246,7 @@ async function buildNoteIndex() {
 // ── Custom editor provider ────────────────────────────────────────────────────
 class MarkdownDocumentProvider {
     resolveCustomTextEditor(document, webviewPanel, _token) {
+        void ensureSubscribedToTasksChanges();
         const getFont = () => vscode.workspace.getConfiguration('vaultTool').get('markdownFont', '').trim() ||
             'var(--vscode-editor-font-family)';
         const getFontSize = () => vscode.workspace.getConfiguration('editor').get('fontSize', 14);
@@ -377,6 +447,45 @@ class MarkdownDocumentProvider {
                     if (fsPath) {
                         vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(fsPath));
                     }
+                }
+                else if (msg.type === 'toggle-task') {
+                    (async () => {
+                        try {
+                            const line = msg.line;
+                            const lineText = document.lineAt(line).text;
+                            const tasksApi = await getTasksApi();
+                            const replacementLines = tasksApi?.toggleTaskLine
+                                ? tasksApi.toggleTaskLine(lineText)
+                                : naiveToggleTaskLine(lineText);
+                            const eol = document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+                            const edit = new vscode.WorkspaceEdit();
+                            edit.replace(document.uri, document.lineAt(line).range, replacementLines.join(eol));
+                            await vscode.workspace.applyEdit(edit);
+                        }
+                        catch (err) {
+                            vscode.window.showErrorMessage(`No se pudo alternar la tarea: ${err}`);
+                        }
+                    })();
+                }
+                else if (msg.type === 'run-tasks-query') {
+                    (async () => {
+                        const tasksApi = await getTasksApi();
+                        const result = tasksApi?.renderTasksQuery
+                            ? tasksApi.renderTasksQuery(msg.query)
+                            : { items: [], groups: null, unrecognizedLines: [] };
+                        webviewPanel.webview.postMessage({ type: 'tasks-query-result', query: msg.query, result });
+                    })();
+                }
+                else if (msg.type === 'toggle-task-at-location') {
+                    (async () => {
+                        try {
+                            const tasksApi = await getTasksApi();
+                            await tasksApi?.toggleTaskAtLocation?.(msg.path, msg.line);
+                        }
+                        catch (err) {
+                            vscode.window.showErrorMessage(`No se pudo alternar la tarea: ${err}`);
+                        }
+                    })();
                 }
                 else if (msg.type === 'paste-image') {
                     try {

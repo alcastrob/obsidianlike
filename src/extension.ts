@@ -130,6 +130,104 @@ function computeBreadcrumb(docUri: vscode.Uri): Array<{ name: string; fsPath: st
   }));
 }
 
+// ── Optional soft dependency: angelCastro.obsidian-like-tasks ─────────────────
+//
+// Two extensions' webviews can't call into each other (full isolation), so when the
+// user clicks a task checkbox in the CM6 webview, the *extension host* here (not the
+// webview) computes the replacement line(s) by delegating to the Tasks extension's
+// exported API, instead of reimplementing its toggle/recurrence state machine.
+//
+// This is a soft dependency: no `extensionDependencies` entry in package.json, so
+// Vault Tool keeps working standalone if the Tasks extension isn't installed —
+// `getTasksApi()` resolves to `undefined` and the `toggle-task` handler falls back
+// to `naiveToggleTaskLine()`.
+interface TaskDTO {
+  path: string;
+  line: number;
+  description: string;
+  tags: string[];
+  isDone: boolean;
+  isOverdue: boolean;
+  priority: string;
+  dueDate: string | null;
+  scheduledDate: string | null;
+  startDate: string | null;
+  isRecurring: boolean;
+  recurrenceRule: string | null;
+  heading: string | null;
+}
+interface TasksQueryResultDTO {
+  items: TaskDTO[];
+  groups: Array<{ name: string; items: TaskDTO[] }> | null;
+  unrecognizedLines: string[];
+}
+interface TasksExtensionApi {
+  isTaskLine(lineText: string): boolean;
+  toggleTaskLine(lineText: string): string[];
+  // Added alongside ```tasks``` query-block rendering. Declared optional so this
+  // still degrades gracefully against an older build of the Tasks extension that
+  // only exposes the single-checkbox API above.
+  renderTasksQuery?(queryText: string): TasksQueryResultDTO;
+  toggleTaskAtLocation?(path: string, line: number): Promise<void>;
+  onDidChangeTasks?: vscode.Event<void>;
+}
+
+let tasksApiPromise: Promise<TasksExtensionApi | undefined> | undefined;
+
+// Once successfully resolved, the API is cached forever (an activated extension stays active
+// for the rest of the session). But if resolution *fails* — the extension isn't found yet, or
+// its `activate()` throws — the failure is NOT cached: `tasksApiPromise` is reset to `undefined`
+// so the next call retries from scratch, instead of being stuck with a permanently-failed
+// lookup for the rest of the session. This matters because `getExtension()` can return
+// `undefined` in a narrow window at VS Code startup if this extension's own activation hasn't
+// been registered yet relative to ours — a real, if uncommon, race.
+function getTasksApi(): Promise<TasksExtensionApi | undefined> {
+  if (!tasksApiPromise) {
+    tasksApiPromise = (async () => {
+      const ext = vscode.extensions.getExtension('angelCastro.obsidian-like-tasks');
+      if (!ext) { tasksApiPromise = undefined; return undefined; }
+      try { return (await ext.activate()) as TasksExtensionApi; }
+      catch { tasksApiPromise = undefined; return undefined; }
+    })();
+  }
+  return tasksApiPromise;
+}
+
+// Broadcasts `tasks-changed` to every open panel whenever any task anywhere in
+// the workspace changes (e.g. toggled from a different file, or from a tasks-
+// query checklist in a different editor entirely), so each panel's ```tasks```
+// query cache gets invalidated and re-requests fresh data. Subscribed once at
+// module scope (not per-panel) — `activePanels` is what makes it possible to
+// fan the single event out to every currently-open webview.
+let subscribedToTasksChanges = false;
+// Retried a handful of times (a few seconds total) rather than just once: this is called from
+// the top of `resolveCustomTextEditor`, so a single long-lived panel that was opened during the
+// narrow cold-start race window described above would otherwise never get another chance to
+// subscribe — there's no *new* panel-open event to retry from if the user doesn't close and
+// reopen it (which is exactly the workaround this is meant to make unnecessary).
+async function ensureSubscribedToTasksChanges(retriesLeft = 5): Promise<void> {
+  if (subscribedToTasksChanges) { return; }
+  const api = await getTasksApi();
+  if (!api?.onDidChangeTasks) {
+    if (retriesLeft > 0) {
+      setTimeout(() => { void ensureSubscribedToTasksChanges(retriesLeft - 1); }, 1500);
+    }
+    return;
+  }
+  subscribedToTasksChanges = true;
+  api.onDidChangeTasks(() => {
+    activePanels.forEach(p => { try { p.webview.postMessage({ type: 'tasks-changed' }); } catch {} });
+  });
+}
+
+// Fallback used when the Tasks extension isn't installed/active: a plain [ ]/[x]
+// flip with no recurrence handling.
+function naiveToggleTaskLine(lineText: string): string[] {
+  if (/\[ \]/.test(lineText))    { return [lineText.replace('[ ]', '[x]')]; }
+  if (/\[[xX]\]/.test(lineText)) { return [lineText.replace(/\[[xX]\]/, '[ ]')]; }
+  return [lineText];
+}
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 let extensionUri: vscode.Uri;
@@ -156,6 +254,8 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken
   ): void {
+    void ensureSubscribedToTasksChanges();
+
     const getFont = (): string =>
       vscode.workspace.getConfiguration('vaultTool').get<string>('markdownFont', '').trim() ||
       'var(--vscode-editor-font-family)';
@@ -370,6 +470,43 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         } else if (msg.type === 'reveal-path') {
           const fsPath = (msg.fsPath as string || '').trim();
           if (fsPath) { vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(fsPath)); }
+
+        } else if (msg.type === 'toggle-task') {
+          (async () => {
+            try {
+              const line = msg.line as number;
+              const lineText = document.lineAt(line).text;
+              const tasksApi = await getTasksApi();
+              const replacementLines = tasksApi?.toggleTaskLine
+                ? tasksApi.toggleTaskLine(lineText)
+                : naiveToggleTaskLine(lineText);
+              const eol = document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+              const edit = new vscode.WorkspaceEdit();
+              edit.replace(document.uri, document.lineAt(line).range, replacementLines.join(eol));
+              await vscode.workspace.applyEdit(edit);
+            } catch (err) {
+              vscode.window.showErrorMessage(`No se pudo alternar la tarea: ${err}`);
+            }
+          })();
+
+        } else if (msg.type === 'run-tasks-query') {
+          (async () => {
+            const tasksApi = await getTasksApi();
+            const result: TasksQueryResultDTO = tasksApi?.renderTasksQuery
+              ? tasksApi.renderTasksQuery(msg.query as string)
+              : { items: [], groups: null, unrecognizedLines: [] };
+            webviewPanel.webview.postMessage({ type: 'tasks-query-result', query: msg.query, result });
+          })();
+
+        } else if (msg.type === 'toggle-task-at-location') {
+          (async () => {
+            try {
+              const tasksApi = await getTasksApi();
+              await tasksApi?.toggleTaskAtLocation?.(msg.path as string, msg.line as number);
+            } catch (err) {
+              vscode.window.showErrorMessage(`No se pudo alternar la tarea: ${err}`);
+            }
+          })();
 
         } else if (msg.type === 'paste-image') {
           try {
