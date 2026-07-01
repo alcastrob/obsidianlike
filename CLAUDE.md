@@ -12,7 +12,7 @@ The core feature is a `CustomTextEditorProvider` that opens `.md` files in a web
 
 ```bash
 npm run package
-code --profile "Obsidian like" --uninstall-extension angel-local.vault-tool
+code --profile "Obsidian like" --uninstall-extension angelCastro.vault-tool
 code --profile "Obsidian like" --install-extension vault-tool-0.0.1.vsix
 ```
 
@@ -31,7 +31,7 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 | `webview-src/editor.js` | Webview CM6 editor: ~1000 lines. All editor logic. |
 | `out/extension.js` | Compiled host (committed, required for packaging). |
 | `out/editor.bundle.js` | esbuild bundle of webview (committed, required for packaging). |
-| `package.json` | Publisher must be `angel-local` (vsce 3.x validates this). |
+| `package.json` | Publisher is `angelCastro` — the installed extension ID is `angelCastro.vault-tool`. |
 
 ## Architecture: extension host (`src/extension.ts`)
 

@@ -3,7 +3,7 @@
   "displayName": "Vault Tool",
   "description": "Herramienta local para gestionar el vault de notas (sustituto de Obsidian)",
   "version": "0.0.1",
-  "publisher": "angel-local",
+  "publisher": "angelCastro",
   "engines": {
     "vscode": "^1.85.0"
   },
