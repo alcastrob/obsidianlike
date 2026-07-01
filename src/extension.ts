@@ -2,6 +2,16 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
+// `console.log` from a normally-installed (non-debug) extension isn't surfaced anywhere the
+// user can see it — only extensions running under the Extension Development Host get their
+// console output piped to an Output panel channel. A real `vscode.OutputChannel` is the only
+// reliable way to show diagnostics from a production-installed extension.
+let debugChannel: vscode.OutputChannel | undefined;
+function log(message: string): void {
+  if (!debugChannel) { debugChannel = vscode.window.createOutputChannel('Vault Tool'); }
+  debugChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function findMarkdownFiles(dir: string, fileList: string[] = []): string[] {
@@ -185,9 +195,13 @@ function getTasksApi(): Promise<TasksExtensionApi | undefined> {
   if (!tasksApiPromise) {
     tasksApiPromise = (async () => {
       const ext = vscode.extensions.getExtension('angelCastro.obsidian-like-tasks');
-      if (!ext) { tasksApiPromise = undefined; return undefined; }
-      try { return (await ext.activate()) as TasksExtensionApi; }
-      catch { tasksApiPromise = undefined; return undefined; }
+      if (!ext) { log('getTasksApi: extension not found'); tasksApiPromise = undefined; return undefined; }
+      try {
+        const api = (await ext.activate()) as TasksExtensionApi;
+        log(`getTasksApi: resolved, has onDidChangeTasks = ${!!api?.onDidChangeTasks}, has renderTasksQuery = ${!!api?.renderTasksQuery}`);
+        return api;
+      }
+      catch (err) { log(`getTasksApi: activate() threw ${err}`); tasksApiPromise = undefined; return undefined; }
     })();
   }
   return tasksApiPromise;
@@ -209,13 +223,16 @@ async function ensureSubscribedToTasksChanges(retriesLeft = 5): Promise<void> {
   if (subscribedToTasksChanges) { return; }
   const api = await getTasksApi();
   if (!api?.onDidChangeTasks) {
+    log(`ensureSubscribedToTasksChanges: no API/onDidChangeTasks yet, ${retriesLeft} retries left`);
     if (retriesLeft > 0) {
       setTimeout(() => { void ensureSubscribedToTasksChanges(retriesLeft - 1); }, 1500);
     }
     return;
   }
   subscribedToTasksChanges = true;
+  log('ensureSubscribedToTasksChanges: subscribed successfully');
   api.onDidChangeTasks(() => {
+    log(`onDidChangeTasks fired — broadcasting tasks-changed to ${activePanels.length} panel(s)`);
     activePanels.forEach(p => { try { p.webview.postMessage({ type: 'tasks-changed' }); } catch {} });
   });
 }
@@ -387,6 +404,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           pendingSaveResolve?.(msg.content as string);
 
         } else if (msg.type === 'sync') {
+          log(`sync received for ${document.uri.fsPath}, ${(msg.content as string).length} chars`);
           applySync(msg.content as string);
 
         } else if (msg.type === 'rename') {
@@ -495,6 +513,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             const result: TasksQueryResultDTO = tasksApi?.renderTasksQuery
               ? tasksApi.renderTasksQuery(msg.query as string)
               : { items: [], groups: null, unrecognizedLines: [] };
+            log(`run-tasks-query(${JSON.stringify(msg.query)}) -> ${result.items.length} items, groups=${result.groups ? result.groups.length : 'null'}`);
             webviewPanel.webview.postMessage({ type: 'tasks-query-result', query: msg.query, result });
           })();
 
