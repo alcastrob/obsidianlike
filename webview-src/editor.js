@@ -245,14 +245,24 @@ const vsTheme = EditorView.theme({
   // a multi-line highlighted range always gets fragmented into one <span> per
   // line — with the chip's own background+padding+radius, that looked like a
   // stack of disconnected pills rather than one block).
+  // !important on the box-defining properties here (background/border/padding/
+  // radius/margin), same defensive pattern already used by .cm-code-fence-hidden
+  // /.cm-table-row-hidden/.cm-fold-hidden below: an Obsidian theme's own CSS
+  // loads *after* this (via the theme-css postMessage, into a separate later
+  // <style> tag — see "Why theme CSS is sent via postMessage" elsewhere in the
+  // docs), and many themes reset baseline background/border on generic editor
+  // line selectors (`.cm-line { background: transparent; }` and similar) that
+  // would otherwise silently win the cascade over this on source-order alone,
+  // even though `.cm-code-block` itself is a more specific selector — normal
+  // specificity doesn't help against a theme rule using its own !important.
   '.cm-code-block': {
     fontFamily: 'var(--code-font, var(--font-monospace, var(--vscode-editor-font-family, monospace)))',
     fontSize: '0.88em',
-    background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)))',
+    background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15))) !important',
     color: 'var(--code-normal, inherit)',
-    borderLeft: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
-    borderRight: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
-    padding: '0 14px',
+    borderLeft: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
+    borderRight: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
+    padding: '0 14px !important',
   },
   // The ```/``` fence lines themselves: collapsed to zero height (not just
   // text-hidden) when not the active line, so — matching Obsidian — they don't
@@ -263,23 +273,23 @@ const vsTheme = EditorView.theme({
     overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
   },
   '.cm-code-block-first': {
-    borderTop: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
-    borderRadius: '6px 6px 0 0',
-    paddingTop: '8px', marginTop: '6px',
+    borderTop: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
+    borderRadius: '6px 6px 0 0 !important',
+    paddingTop: '8px !important', marginTop: '6px !important',
   },
   '.cm-code-block-last': {
-    borderBottom: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
-    borderRadius: '0 0 6px 6px',
-    paddingBottom: '8px', marginBottom: '10px',
+    borderBottom: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
+    borderRadius: '0 0 6px 6px !important',
+    paddingBottom: '8px !important', marginBottom: '10px !important',
   },
   '.cm-code-block-solo': {
-    border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
-    borderRadius: '6px',
-    paddingTop: '8px', paddingBottom: '8px', marginTop: '6px', marginBottom: '10px',
+    border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
+    borderRadius: '6px !important',
+    paddingTop: '8px !important', paddingBottom: '8px !important', marginTop: '6px !important', marginBottom: '10px !important',
   },
   // Cancels the standalone inline-code chip look for CodeText found inside a
   // fenced block's own box (see the comment on .cm-inline-code / mdHighlight above).
-  '.cm-code-block .cm-inline-code': { background: 'none', padding: '0', borderRadius: '0' },
+  '.cm-code-block .cm-inline-code': { background: 'none !important', padding: '0 !important', borderRadius: '0 !important' },
   '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
   '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
