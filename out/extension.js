@@ -108,6 +108,16 @@ function getImageMap(webview, docUri) {
     }
     return map;
 }
+// Resolves the theme name case-insensitively before giving up: an exact-case
+// lookup only works by accident on case-insensitive filesystems (default NTFS on
+// Windows). On a case-sensitive one (common for a vault synced onto macOS via
+// iCloud/Dropbox/git, or an explicitly case-sensitive APFS volume), a casing
+// mismatch between the `vaultTool.obsidianTheme` setting and the theme's actual
+// on-disk folder name makes the exact-case path silently miss, and the previous
+// bare `catch { return ''; }` swallowed that with no feedback — every heading/etc.
+// CSS var the theme defines (--h1-size, --h1-color, ...) then just never reaches
+// the webview, so headings fall back to vsTheme's hardcoded defaults instead of
+// the theme's actual styling (looks "off", not obviously broken).
 function getThemeCss() {
     const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!vaultRoot) {
@@ -117,33 +127,133 @@ function getThemeCss() {
     if (!themeName) {
         return '';
     }
-    const cssPath = path.join(vaultRoot, '.obsidian', 'themes', themeName, 'theme.css');
+    const themesDir = path.join(vaultRoot, '.obsidian', 'themes');
+    const exactPath = path.join(themesDir, themeName, 'theme.css');
     try {
-        return fs.readFileSync(cssPath, 'utf-8');
+        return fs.readFileSync(exactPath, 'utf-8');
     }
-    catch {
-        return '';
+    catch { /* fall through to case-insensitive lookup */ }
+    try {
+        const entries = fs.readdirSync(themesDir, { withFileTypes: true });
+        const match = entries.find(e => e.isDirectory() && e.name.toLowerCase() === themeName.toLowerCase());
+        if (match) {
+            return fs.readFileSync(path.join(themesDir, match.name, 'theme.css'), 'utf-8');
+        }
     }
+    catch { /* .obsidian/themes itself missing or unreadable */ }
+    vscode.window.showWarningMessage(`Vault Tool: no se encontró el tema "${themeName}" en .obsidian/themes — revisa mayúsculas/minúsculas del nombre.`);
+    return '';
 }
-function escapeRegex(s) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// ── Fixing up wiki-links after a note is renamed or moved ─────────────────────
+// Covers both: (1) the in-app title-edit rename (webview `rename` message, which
+// itself calls `WorkspaceEdit.renameFile()`) and (2) any rename/move done in VS
+// Code's own file explorer (drag, cut/paste, F2, moving a whole folder) — both
+// paths go through `vscode.workspace.applyEdit`/the real filesystem, which is
+// exactly what fires `vscode.workspace.onDidRenameFiles` (wired in `activate()`
+// below). So this is the *only* place link-fixup logic lives; the webview's
+// `rename` handler no longer does it separately.
+//
+// Unlike a name-only replace, a move can also change which directory a link
+// needs to disambiguate against, so a link's target must actually be resolved
+// (using the *pre-move* vault state) before deciding whether it points at the
+// file that moved:
+//   - Not every `[[Note]]`/`[[folder/Note]]` naming the moved file's old name
+//     necessarily resolved to *this* file — another note could share that name
+//     elsewhere in the vault. `resolvesToOldTarget` replays `resolveNoteUri`'s
+//     exact same-directory-first / directory-hint resolution rules against a
+//     snapshot of the vault from just before the move (the current file list
+//     with the moved file's new path swapped back to its old one) to check.
+//   - Once a link is confirmed to target the moved file, its notePart is
+//     rewritten using the *new* location: no directory hint if the linking note
+//     and the moved note now share a directory, otherwise the moved note's new
+//     immediate parent folder name — mirroring `splitDirHint`'s "only the
+//     immediate parent segment is ever used as a hint" rule, so the rewritten
+//     link stays resolvable through the exact same lookup path as any other.
+// `#section`/`|alias` suffixes are left untouched; only the note/dir part changes.
+function resolvesToOldTarget(notePart, linkingDir, oldFileList, oldFsPath) {
+    const { noteName, dirHint } = splitDirHint(notePart);
+    if (path.basename(oldFsPath, '.md').toLowerCase() !== noteName.toLowerCase()) {
+        return false;
+    }
+    if (!dirHint) {
+        const sameDirCandidate = path.join(linkingDir, noteName + '.md');
+        if (oldFileList.some(f => f.toLowerCase() === sameDirCandidate.toLowerCase())) {
+            return sameDirCandidate.toLowerCase() === oldFsPath.toLowerCase();
+        }
+        const candidates = oldFileList
+            .filter(f => path.basename(f, '.md').toLowerCase() === noteName.toLowerCase())
+            .sort();
+        return candidates.length > 0 && candidates[0].toLowerCase() === oldFsPath.toLowerCase();
+    }
+    const candidates = oldFileList.filter(f => path.basename(f, '.md').toLowerCase() === noteName.toLowerCase() &&
+        path.basename(path.dirname(f)).toLowerCase() === dirHint.toLowerCase());
+    return candidates.some(f => f.toLowerCase() === oldFsPath.toLowerCase());
 }
-async function updateWikiLinks(oldName, newName) {
-    const files = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
+const WIKI_TARGET_RE = /(!?)\[\[([^\]]+)\]\]/g;
+async function fixUpLinksForMovedNote(oldUri, newUri) {
+    const oldName = path.basename(oldUri.fsPath, '.md');
+    const newName = path.basename(newUri.fsPath, '.md');
+    const newDir = path.dirname(newUri.fsPath);
+    if (oldUri.fsPath === newUri.fsPath) {
+        return;
+    }
+    const allMd = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
+    // The vault as it was just before the move: same file list, with the moved
+    // file's new path swapped back to its old one (every other file's location is
+    // unaffected by this single move).
+    const oldFileList = allMd.map(u => u.fsPath === newUri.fsPath ? oldUri.fsPath : u.fsPath);
     const edit = new vscode.WorkspaceEdit();
-    for (const uri of files) {
-        const doc = await vscode.workspace.openTextDocument(uri);
+    for (const docUri of allMd) {
+        if (docUri.fsPath === newUri.fsPath) {
+            continue;
+        } // only incoming links from other notes are in scope
+        const doc = await vscode.workspace.openTextDocument(docUri);
         const text = doc.getText();
-        // Matches [[OldName]] and [[OldName|alias]]
-        const re = new RegExp(`\\[\\[${escapeRegex(oldName)}(\\|[^\\]]*)?\\]\\]`, 'g');
+        const linkingDir = path.dirname(docUri.fsPath);
+        WIKI_TARGET_RE.lastIndex = 0;
         let m;
-        while ((m = re.exec(text)) !== null) {
-            const alias = m[1] ?? '';
-            edit.replace(uri, new vscode.Range(doc.positionAt(m.index), doc.positionAt(m.index + m[0].length)), `[[${newName}${alias}]]`);
+        while ((m = WIKI_TARGET_RE.exec(text)) !== null) {
+            const bang = m[1];
+            const inner = m[2];
+            const pipeIdx = inner.indexOf('|');
+            const targetRaw = pipeIdx >= 0 ? inner.slice(0, pipeIdx) : inner;
+            const aliasSuffix = pipeIdx >= 0 ? inner.slice(pipeIdx) : '';
+            const hashIdx = targetRaw.indexOf('#');
+            const notePart = hashIdx >= 0 ? targetRaw.slice(0, hashIdx) : targetRaw;
+            const sectionSuffix = hashIdx >= 0 ? targetRaw.slice(hashIdx) : '';
+            if (!resolvesToOldTarget(notePart, linkingDir, oldFileList, oldUri.fsPath)) {
+                continue;
+            }
+            const newNotePart = newDir === linkingDir ? newName : `${path.basename(newDir)}/${newName}`;
+            edit.replace(docUri, new vscode.Range(doc.positionAt(m.index), doc.positionAt(m.index + m[0].length)), `${bang}[[${newNotePart}${sectionSuffix}${aliasSuffix}]]`);
         }
     }
     if (edit.size > 0) {
         await vscode.workspace.applyEdit(edit);
+    }
+}
+// `onDidRenameFiles` fires for both files and folders — a folder move/rename gives
+// only the folder's own old/new URI, not each markdown file inside it, so those
+// need to be discovered under the *new* location and individually rebased onto
+// their corresponding pre-move path before `fixUpLinksForMovedNote` can process them.
+async function handleWorkspaceRename(files) {
+    for (const { oldUri, newUri } of files) {
+        let isDirectory = false;
+        try {
+            isDirectory = fs.statSync(newUri.fsPath).isDirectory();
+        }
+        catch {
+            continue;
+        } // moved again/deleted since; skip
+        if (isDirectory) {
+            for (const newFilePath of findMarkdownFiles(newUri.fsPath)) {
+                const rel = path.relative(newUri.fsPath, newFilePath);
+                await fixUpLinksForMovedNote(vscode.Uri.file(path.join(oldUri.fsPath, rel)), vscode.Uri.file(newFilePath));
+            }
+        }
+        else if (path.extname(newUri.fsPath).toLowerCase() === '.md') {
+            await fixUpLinksForMovedNote(oldUri, newUri);
+        }
     }
 }
 function computeBreadcrumb(docUri) {
@@ -154,6 +264,112 @@ function computeBreadcrumb(docUri) {
         name: i === parts.length - 1 ? path.basename(part, '.md') : part,
         fsPath: path.join(root, ...parts.slice(0, i + 1)),
     }));
+}
+// ── Wiki-link / transclusion target resolution ────────────────────────────────
+// Shared by `open-note`, `open-transclusion`, `get-transclusion` and `get-headings`.
+// A target may carry an optional "#section" suffix (heading text, any level — the
+// notation doesn't imply level 1) and an optional directory hint segment
+// (`folder/Note`) to disambiguate same-named notes elsewhere in the vault.
+function splitTarget(raw) {
+    const idx = raw.indexOf('#');
+    if (idx === -1) {
+        return { notePart: raw, section: null };
+    }
+    return { notePart: raw.slice(0, idx), section: raw.slice(idx + 1).trim() || null };
+}
+function splitDirHint(notePart) {
+    const normalized = notePart.replace(/\\/g, '/');
+    const segments = normalized.split('/').filter(Boolean);
+    const noteName = segments.pop() || normalized;
+    const dirHint = segments.length > 0 ? segments[segments.length - 1] : null;
+    return { noteName, dirHint };
+}
+async function resolveNoteUri(notePart, currentDir) {
+    const { noteName, dirHint } = splitDirHint(notePart);
+    if (!dirHint) {
+        // No disambiguation: prefer a note in the same directory as the link.
+        const sameDirCandidate = path.join(currentDir, noteName + '.md');
+        if (fs.existsSync(sameDirCandidate)) {
+            return vscode.Uri.file(sameDirCandidate);
+        }
+        const found = await vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**');
+        return found[0];
+    }
+    // Disambiguation path given: match by the target's parent directory name.
+    const found = await vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**');
+    return found.find(u => path.basename(path.dirname(u.fsPath)).toLowerCase() === dirHint.toLowerCase());
+}
+// ATX headings only (# .. ######), skipping fenced code blocks so a "#" inside a
+// code sample isn't mistaken for a heading. `line` is the 0-based document line
+// number, directly usable with `TextDocument.lineAt()` / the webview's scroll-to-line.
+function parseHeadings(text) {
+    const lines = text.split(/\r\n|\n/);
+    const headings = [];
+    let inFence = false;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (/^\s*(```|~~~)/.test(line)) {
+            inFence = !inFence;
+            continue;
+        }
+        if (inFence) {
+            continue;
+        }
+        const m = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+        if (m) {
+            headings.push({ level: m[1].length, text: m[2].trim(), line: i });
+        }
+    }
+    return headings;
+}
+// Resolves a wiki-link/transclusion target, opens it in the same column (creating
+// an empty note when missing, mirroring the pre-existing open-note behavior — but
+// only when `createIfMissing`, since a transclusion pointing nowhere should just
+// report "not found" rather than silently creating a blank note), and — when the
+// target carries a "#section" — scrolls the target panel to that heading's line.
+async function navigateToTarget(raw, currentDocUri, sourcePanel, createIfMissing) {
+    const { notePart, section } = splitTarget(raw);
+    const currentDir = path.dirname(currentDocUri.fsPath);
+    let targetUri = await resolveNoteUri(notePart, currentDir);
+    if (!targetUri) {
+        if (!createIfMissing) {
+            vscode.window.showWarningMessage(`No se encontró la nota "${notePart}".`);
+            return;
+        }
+        const { noteName, dirHint } = splitDirHint(notePart);
+        const targetDir = dirHint ? path.join(currentDir, dirHint) : currentDir;
+        if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+        }
+        targetUri = vscode.Uri.file(path.join(targetDir, noteName + '.md'));
+        fs.writeFileSync(targetUri.fsPath, '', 'utf-8');
+    }
+    let scrollLine;
+    if (section) {
+        try {
+            const text = (await vscode.workspace.openTextDocument(targetUri)).getText();
+            const match = parseHeadings(text).find(h => h.text.toLowerCase() === section.toLowerCase());
+            if (match) {
+                scrollLine = match.line;
+            }
+        }
+        catch { /* target unreadable — just skip the scroll */ }
+    }
+    const col = sourcePanel.viewColumn ?? vscode.ViewColumn.Active;
+    await vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col);
+    if (scrollLine != null) {
+        const targetPanel = panelsByPath.get(targetUri.fsPath);
+        if (targetPanel) {
+            setTimeout(() => { try {
+                targetPanel.webview.postMessage({ type: 'scroll-to-line', line: scrollLine });
+            }
+            catch { } }, 350);
+        }
+    }
+    setTimeout(() => { try {
+        sourcePanel.dispose();
+    }
+    catch { } }, 150);
 }
 let tasksApiPromise;
 // Once successfully resolved, the API is cached forever (an activated extension stays active
@@ -228,6 +444,9 @@ function naiveToggleTaskLine(lineText) {
 let extensionUri;
 let noteIndex = [];
 const activePanels = [];
+// Tracks the panel currently showing each document path, so navigateToTarget can
+// find a just-opened (or already-open) target panel to send `scroll-to-line` to.
+const panelsByPath = new Map();
 async function buildNoteIndex() {
     try {
         const files = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
@@ -259,10 +478,14 @@ class MarkdownDocumentProvider {
             ],
         };
         activePanels.push(webviewPanel);
+        panelsByPath.set(document.uri.fsPath, webviewPanel);
         webviewPanel.onDidDispose(() => {
             const i = activePanels.indexOf(webviewPanel);
             if (i !== -1) {
                 activePanels.splice(i, 1);
+            }
+            if (panelsByPath.get(document.uri.fsPath) === webviewPanel) {
+                panelsByPath.delete(document.uri.fsPath);
             }
         });
         const imgMap = getImageMap(webviewPanel.webview, document.uri);
@@ -376,8 +599,9 @@ class MarkdownDocumentProvider {
                             vscode.window.showErrorMessage(`No se pudo renombrar a "${newName}".`);
                             return;
                         }
-                        // Update [[OldName]] links across all vault files
-                        updateWikiLinks(oldName, newName);
+                        // [[OldName]] links across the vault are fixed up by the
+                        // onDidRenameFiles listener registered in activate() — renameFile()
+                        // above fires that event, so there's nothing else to do here.
                     }, err => {
                         webviewPanel.webview.postMessage({ type: 'title-revert', name: oldName });
                         vscode.window.showErrorMessage(`No se pudo renombrar a "${newName}": ${err}`);
@@ -385,55 +609,77 @@ class MarkdownDocumentProvider {
                 }
                 else if (msg.type === 'open-note') {
                     const raw = (msg.name || '').trim();
-                    if (!raw) {
-                        return;
+                    if (raw) {
+                        void navigateToTarget(raw, document.uri, webviewPanel, true);
                     }
-                    // A wiki-link may carry a directory hint to disambiguate same-named notes,
-                    // e.g. [[folder/Note]]. Only the immediate parent directory name is used.
-                    const normalized = raw.replace(/\\/g, '/');
-                    const segments = normalized.split('/').filter(Boolean);
-                    const noteName = segments.pop() || normalized;
-                    const dirHint = segments.length > 0 ? segments[segments.length - 1] : null;
-                    const currentDir = path.dirname(document.uri.fsPath);
+                }
+                else if (msg.type === 'open-transclusion') {
+                    // Same navigation as open-note, except a transclusion pointing at a note
+                    // that doesn't exist should report "not found" rather than create a blank one.
+                    const raw = (msg.target || '').trim();
+                    if (raw) {
+                        void navigateToTarget(raw, document.uri, webviewPanel, false);
+                    }
+                }
+                else if (msg.type === 'get-transclusion') {
                     (async () => {
-                        let targetUri;
-                        if (!dirHint) {
-                            // No disambiguation: prefer a note in the same directory as the link.
-                            const sameDirCandidate = path.join(currentDir, noteName + '.md');
-                            if (fs.existsSync(sameDirCandidate)) {
-                                targetUri = vscode.Uri.file(sameDirCandidate);
+                        const id = msg.id;
+                        const raw = (msg.target || '').trim();
+                        const { notePart, section } = splitTarget(raw);
+                        const currentDir = path.dirname(document.uri.fsPath);
+                        try {
+                            const targetUri = await resolveNoteUri(notePart, currentDir);
+                            if (!targetUri) {
+                                webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: 'not-found' });
+                                return;
                             }
-                            else {
-                                const found = await vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**');
-                                if (found.length > 0) {
-                                    targetUri = found[0];
+                            const title = path.basename(targetUri.fsPath, '.md');
+                            const fullText = (await vscode.workspace.openTextDocument(targetUri)).getText();
+                            if (!section) {
+                                webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: null, content: fullText, title, line: 0 });
+                                return;
+                            }
+                            const headings = parseHeadings(fullText);
+                            const idx = headings.findIndex(h => h.text.toLowerCase() === section.toLowerCase());
+                            if (idx === -1) {
+                                webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: 'section-not-found', title });
+                                return;
+                            }
+                            const lines = fullText.split(/\r\n|\n/);
+                            const startLine = headings[idx].line;
+                            let endLine = lines.length;
+                            for (let j = idx + 1; j < headings.length; j++) {
+                                if (headings[j].level <= headings[idx].level) {
+                                    endLine = headings[j].line;
+                                    break;
                                 }
                             }
+                            const sectionText = lines.slice(startLine, endLine).join('\n');
+                            webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: null, content: sectionText, title, line: startLine });
                         }
-                        else {
-                            // Disambiguation path given: match by the target's parent directory name.
-                            const found = await vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**');
-                            const hinted = found.find(u => path.basename(path.dirname(u.fsPath)).toLowerCase() === dirHint.toLowerCase());
-                            if (hinted) {
-                                targetUri = hinted;
+                        catch {
+                            webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: 'error' });
+                        }
+                    })();
+                }
+                else if (msg.type === 'get-headings') {
+                    (async () => {
+                        const id = msg.id;
+                        const raw = (msg.note || '').trim();
+                        const currentDir = path.dirname(document.uri.fsPath);
+                        try {
+                            const targetUri = await resolveNoteUri(raw, currentDir);
+                            if (!targetUri) {
+                                webviewPanel.webview.postMessage({ type: 'headings-result', id, headings: [] });
+                                return;
                             }
+                            const text = (await vscode.workspace.openTextDocument(targetUri)).getText();
+                            const headings = parseHeadings(text).map(h => ({ level: h.level, text: h.text }));
+                            webviewPanel.webview.postMessage({ type: 'headings-result', id, headings });
                         }
-                        if (!targetUri) {
-                            // Not found anywhere: create it next to the note containing the link
-                            // (inside the hinted subdirectory, if one was given).
-                            const targetDir = dirHint ? path.join(currentDir, dirHint) : currentDir;
-                            if (!fs.existsSync(targetDir)) {
-                                fs.mkdirSync(targetDir, { recursive: true });
-                            }
-                            targetUri = vscode.Uri.file(path.join(targetDir, noteName + '.md'));
-                            fs.writeFileSync(targetUri.fsPath, '', 'utf-8');
+                        catch {
+                            webviewPanel.webview.postMessage({ type: 'headings-result', id, headings: [] });
                         }
-                        const col = webviewPanel.viewColumn ?? vscode.ViewColumn.Active;
-                        await vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col);
-                        setTimeout(() => { try {
-                            webviewPanel.dispose();
-                        }
-                        catch { } }, 150);
                     })();
                 }
                 else if (msg.type === 'open-url') {
@@ -506,6 +752,41 @@ class MarkdownDocumentProvider {
                     catch (err) {
                         vscode.window.showErrorMessage(`Error al guardar imagen pegada: ${err}`);
                     }
+                }
+                else if (msg.type === 'drop-files') {
+                    // A file dragged from the OS (or from VS Code's own Explorer) onto the
+                    // webview's content, intercepted client-side before VS Code's own
+                    // "open the dropped file as a new editor" default gets a chance to run
+                    // (see the `dragover`/`drop` handlers in editor.js). Unlike paste-image
+                    // (clipboard image data has no real filename), a dropped file's original
+                    // name is known and worth keeping — only disambiguated on an actual
+                    // collision with something already in the attachments dir.
+                    (async () => {
+                        const saveDir = getSaveDir(document.uri.fsPath);
+                        if (!fs.existsSync(saveDir)) {
+                            fs.mkdirSync(saveDir, { recursive: true });
+                        }
+                        const results = [];
+                        for (const f of msg.files) {
+                            try {
+                                const base64 = f.data.replace(/^data:[^;]*;base64,/, '');
+                                const buffer = Buffer.from(base64, 'base64');
+                                const ext = path.extname(f.name);
+                                const base = path.basename(f.name, ext);
+                                let filename = f.name;
+                                for (let n = 1; fs.existsSync(path.join(saveDir, filename)); n++) {
+                                    filename = `${base} ${n}${ext}`;
+                                }
+                                fs.writeFileSync(path.join(saveDir, filename), buffer);
+                                const uri = webviewPanel.webview.asWebviewUri(vscode.Uri.file(path.join(saveDir, filename))).toString();
+                                results.push({ filename, uri });
+                            }
+                            catch (err) {
+                                vscode.window.showErrorMessage(`No se pudo guardar el archivo arrastrado "${f.name}": ${err}`);
+                            }
+                        }
+                        webviewPanel.webview.postMessage({ type: 'files-dropped', files: results });
+                    })();
                 }
             }),
         ];
@@ -608,6 +889,10 @@ function activate(context) {
     mdWatcher.onDidCreate(() => buildNoteIndex());
     mdWatcher.onDidDelete(() => buildNoteIndex());
     context.subscriptions.push(mdWatcher);
+    // Fires for explorer drag/cut-paste/F2 renames and moves (including whole
+    // folders), and also for the in-app title-edit rename (which itself applies via
+    // WorkspaceEdit.renameFile()) — see the comment above fixUpLinksForMovedNote.
+    context.subscriptions.push(vscode.workspace.onDidRenameFiles(e => { void handleWorkspaceRename(e.files); }));
     context.subscriptions.push(vscode.window.registerCustomEditorProvider(MarkdownDocumentProvider.viewType, new MarkdownDocumentProvider(), { webviewOptions: { retainContextWhenHidden: true }, supportsMultipleEditorsPerDocument: false }));
     const listNotesCmd = vscode.commands.registerCommand('vaultTool.listNotes', () => {
         const folders = vscode.workspace.workspaceFolders;

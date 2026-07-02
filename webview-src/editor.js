@@ -185,6 +185,45 @@ const vsTheme = EditorView.theme({
     lineHeight: 'var(--h6-line-height, 1.4)', color: 'var(--h6-color, inherit)',
     fontStyle: 'var(--h6-style, normal)', fontFamily: 'var(--h6-font, inherit)',
   },
+  // Note transclusions (![[note]], ![[dir/note]], ![[note#section]]).
+  '.cm-transclusion': {
+    display: 'block',
+    position: 'relative',
+    border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
+    borderRadius: '6px',
+    background: 'var(--table-row-alt-background, rgba(128,128,128,0.04))',
+    margin: '6px 0 10px',
+    padding: '10px 34px 10px 14px',
+  },
+  '.cm-transclusion-open': {
+    position: 'absolute',
+    top: '6px', right: '6px',
+    width: '22px', height: '22px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    border: 'none', borderRadius: '4px',
+    background: 'transparent',
+    color: 'var(--text-muted, inherit)',
+    cursor: 'pointer',
+    fontSize: '13px',
+    lineHeight: '1',
+    opacity: '0.6',
+    padding: '0',
+  },
+  '.cm-transclusion-open:hover': { opacity: '1', background: 'rgba(128,128,128,0.18)' },
+  '.cm-transclusion-title': {
+    fontWeight: '600',
+    fontSize: '0.82em',
+    opacity: '0.6',
+    marginBottom: '4px',
+  },
+  '.cm-transclusion-body > :first-child': { marginTop: '0' },
+  '.cm-transclusion-body > :last-child': { marginBottom: '0' },
+  '.cm-transclusion-loading, .cm-transclusion-error': {
+    opacity: '0.6',
+    fontStyle: 'italic',
+    fontSize: '0.9em',
+  },
+  '.cm-transclusion-error': { color: 'var(--text-error, #e06c75)' },
   '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
   '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
@@ -991,17 +1030,236 @@ const imgPlugin = ViewPlugin.fromClass(class {
   }
 }, { decorations: v => v.decorations });
 
-// ── Wiki-link autocomplete ────────────────────────────────────────────────────
-function wikiComplete(ctx) {
+// ── Note transclusions (![[note]], ![[dir/note]], ![[note#section]]) ─────────
+// A transclusion needs the target note's (possibly section-scoped) text, which
+// the webview can't read itself — same async round-trip pattern as the ```tasks```
+// query blocks above: webview → host (postMessage) → host reads/parses the file →
+// back to the webview → render. `_build()` runs synchronously, so results are
+// cached by the raw target string (`transclusionCache`) and re-requested only
+// once per target (`transclusionPending`); `transclusionRebuildEffect` forces a
+// plugin rebuild once a response arrives, mirroring `tasksRebuildEffect`.
+const transclusionCache   = new Map(); // raw target string -> { content, title, line, error }
+const transclusionPending = new Set();
+const transclusionRebuildEffect = StateEffect.define();
+
+function requestTransclusion(target) {
+  if (transclusionPending.has(target)) return;
+  transclusionPending.add(target);
+  vscode.postMessage({ type: 'get-transclusion', id: target, target });
+}
+
+// Minimal block-level markdown renderer for transcluded content: headings, fenced
+// code, blockquotes, bullet lists and paragraphs. Inline formatting (bold, italic,
+// code, wiki-links) is delegated to `renderCell`, which already HTML-escapes its
+// input, so this stays safe against transcluded content containing HTML-like text.
+function renderMarkdownBlock(text) {
+  const frag = document.createDocumentFragment();
+  const lines = (text || '').split(/\r\n|\n/);
+  let i = 0;
+  let para = [];
+  const flushPara = () => {
+    if (!para.length) return;
+    const p = document.createElement('p');
+    p.style.margin = '0.4em 0';
+    p.innerHTML = renderCell(para.join(' '));
+    frag.appendChild(p);
+    para = [];
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      flushPara();
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { codeLines.push(lines[i]); i++; }
+      i++; // skip closing fence (if any)
+      const pre = document.createElement('pre');
+      pre.style.cssText = 'background:rgba(128,128,128,0.15);padding:8px 10px;border-radius:4px;overflow-x:auto;margin:0.4em 0;';
+      const code = document.createElement('code');
+      code.style.fontFamily = 'var(--font-monospace, monospace)';
+      code.textContent = codeLines.join('\n');
+      pre.appendChild(code);
+      frag.appendChild(pre);
+      continue;
+    }
+    const headingM = /^ {0,3}(#{1,6})\s+(.*)$/.exec(line);
+    if (headingM) {
+      flushPara();
+      const level = headingM[1].length;
+      const h = document.createElement('div');
+      h.className = `cm-header cm-header-${level}`;
+      h.style.margin = '0.3em 0';
+      h.innerHTML = renderCell(headingM[2].trim());
+      frag.appendChild(h);
+      i++;
+      continue;
+    }
+    const quoteM = /^\s*>\s?(.*)$/.exec(line);
+    if (quoteM) {
+      flushPara();
+      const bq = document.createElement('blockquote');
+      bq.style.cssText = 'border-left:3px solid rgba(128,128,128,0.4);margin:0.3em 0;padding-left:10px;opacity:0.85;';
+      bq.innerHTML = renderCell(quoteM[1]);
+      frag.appendChild(bq);
+      i++;
+      continue;
+    }
+    if (/^\s*[-*+]\s+/.test(line)) {
+      flushPara();
+      const ul = document.createElement('ul');
+      ul.style.cssText = 'margin:0.3em 0;padding-left:1.4em;';
+      while (i < lines.length) {
+        const lm = /^\s*[-*+]\s+(.*)$/.exec(lines[i]);
+        if (!lm) break;
+        const li = document.createElement('li');
+        li.innerHTML = renderCell(lm[1]);
+        ul.appendChild(li);
+        i++;
+      }
+      frag.appendChild(ul);
+      continue;
+    }
+    if (!line.trim()) { flushPara(); i++; continue; }
+    para.push(line.trim());
+    i++;
+  }
+  flushPara();
+  return frag;
+}
+
+class TransclusionWidget extends WidgetType {
+  constructor(target, data) { super(); this.target = target; this.data = data; }
+  eq(other) { return this.target === other.target && this.data === other.data; }
+  toDOM() {
+    const box = document.createElement('div');
+    box.className = 'cm-transclusion';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cm-transclusion-open';
+    btn.title = 'Abrir nota de origen';
+    btn.dataset.target = this.target;
+    btn.textContent = '↗';
+    box.appendChild(btn);
+
+    const body = document.createElement('div');
+    body.className = 'cm-transclusion-body';
+    if (!this.data) {
+      body.classList.add('cm-transclusion-loading');
+      body.textContent = 'Cargando transclusión…';
+    } else if (this.data.error) {
+      body.classList.add('cm-transclusion-error');
+      body.textContent = this.data.error === 'section-not-found'
+        ? `Sección no encontrada en "${this.data.title || this.target}"`
+        : `No se encontró "${this.target}"`;
+    } else {
+      if (this.data.title) {
+        const titleEl = document.createElement('div');
+        titleEl.className = 'cm-transclusion-title';
+        titleEl.textContent = this.data.title;
+        body.appendChild(titleEl);
+      }
+      body.appendChild(renderMarkdownBlock(this.data.content));
+    }
+    box.appendChild(body);
+    return box;
+  }
+  ignoreEvent() { return false; }
+}
+
+const transclusionPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this._build(view); }
+  update(u) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged ||
+        syntaxTree(u.startState) !== syntaxTree(u.state) ||
+        u.transactions.some(t => t.effects.some(e => e.is(transclusionRebuildEffect)))) {
+      this.decorations = this._build(u.view);
+    }
+  }
+  _build(view) {
+    const { state } = view;
+    const active = getActiveLines(state);
+    const { from: vf, to: vt } = view.viewport;
+    const str = state.doc.sliceString(vf, vt);
+    const re = /!\[\[([^\]]+)\]\]/g;
+    const all = [];
+    let m;
+    while ((m = re.exec(str)) !== null) {
+      const raw = m[1].trim();
+      // Images are rendered by imgPlugin — skip here regardless of any #section-
+      // or |param-like suffix a filename might coincidentally contain.
+      const filenameGuess = raw.split('#')[0].split('|')[0].trim();
+      if (IMG_EXT.test(filenameGuess)) continue;
+      const mFrom = vf + m.index;
+      const mTo   = mFrom + m[0].length;
+      const ln = state.doc.lineAt(mFrom).number;
+      if (active.has(ln)) continue;
+      const cached = transclusionCache.get(raw);
+      if (cached === undefined) requestTransclusion(raw);
+      all.push({ from: mFrom, to: mTo,
+        dec: Decoration.replace({ widget: new TransclusionWidget(raw, cached) }) });
+    }
+    all.sort((a, b) => a.from - b.from);
+    const builder = new RangeSetBuilder();
+    let lastTo = -1;
+    for (const { from, to, dec } of all) {
+      if (from < lastTo) continue;
+      try { builder.add(from, to, dec); } catch (_) {}
+      lastTo = to;
+    }
+    return builder.finish();
+  }
+}, { decorations: v => v.decorations });
+
+// ── Wiki-link / transclusion autocomplete ─────────────────────────────────────
+// Triggers on both `[[` (links) and `![[` (transclusions) since the match is on
+// `[[` alone (see the regex below) — the leading `!`, if present, is left as-is
+// and only the `[[...]]` span gets replaced by `apply`. Once the typed text
+// contains a `#`, the source switches to querying that note's headings (in
+// document order, i.e. the same hierarchical order they appear in the file)
+// instead of the note index.
+const pendingHeadingRequests = new Map(); // request id -> resolve
+let headingsReqSeq = 0;
+
+function requestHeadings(note) {
+  return new Promise(resolve => {
+    const id = 'h' + (++headingsReqSeq);
+    pendingHeadingRequests.set(id, resolve);
+    vscode.postMessage({ type: 'get-headings', id, note });
+  });
+}
+
+async function wikiComplete(ctx) {
   const word = ctx.matchBefore(/\[\[[^\]]*$/);
   if (!word && !ctx.explicit) return null;
-  const query = word ? word.text.slice(2).toLowerCase() : '';
-  const opts = noteIndex
-    .filter(n => n.toLowerCase().includes(query))
-    .slice(0, 30)
-    .map(name => ({ label: name, type: 'text', apply: `[[${name}]]` }));
+  const inner = word ? word.text.slice(2) : '';
+  const hashIdx = inner.indexOf('#');
+
+  if (hashIdx === -1) {
+    const query = inner.toLowerCase();
+    const opts = noteIndex
+      .filter(n => n.toLowerCase().includes(query))
+      .slice(0, 30)
+      .map(name => ({ label: name, type: 'text', apply: `[[${name}]]` }));
+    if (!opts.length) return null;
+    // Excludes '#' so typing one invalidates this result and forces CM to re-run
+    // wikiComplete, switching to the heading-search branch below.
+    return { from: word ? word.from : ctx.pos, options: opts, validFor: /^\[\[[^\]#]*$/ };
+  }
+
+  const notePart = inner.slice(0, hashIdx);
+  if (!notePart) return null;
+  const sectionQuery = inner.slice(hashIdx + 1).toLowerCase();
+  const headings = await requestHeadings(notePart);
+  const opts = headings
+    .filter(h => h.text.toLowerCase().includes(sectionQuery))
+    .map(h => ({
+      label: '#'.repeat(h.level) + ' ' + h.text,
+      type: 'text',
+      apply: `[[${notePart}#${h.text}]]`,
+    }));
   if (!opts.length) return null;
-  return { from: word ? word.from : ctx.pos, options: opts, validFor: /^\[\[[^\]]*$/ };
+  return { from: word ? word.from : ctx.pos, options: opts, validFor: /^\[\[[^\]#]*#[^\]]*$/ };
 }
 
 // ── Markdown shortcuts ────────────────────────────────────────────────────────
@@ -1093,6 +1351,8 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (tableWiki) { e.preventDefault(); return true; }
     const mdLink = e.target.closest('.cm-md-link');
     if (mdLink) { e.preventDefault(); return true; }
+    const transclOpen = e.target.closest('.cm-transclusion-open');
+    if (transclOpen) { e.preventDefault(); return true; }
     const taskCb = e.target.closest('.cm-task-checkbox');
     if (taskCb) { e.preventDefault(); return true; }
 
@@ -1120,6 +1380,12 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (mdLink) {
       e.preventDefault();
       vscode.postMessage({ type: 'open-url', url: mdLink.dataset.url });
+      return true;
+    }
+    const transclOpen = e.target.closest('.cm-transclusion-open');
+    if (transclOpen) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'open-transclusion', target: transclOpen.dataset.target });
       return true;
     }
     // Checked before the generic .cm-task-checkbox below: a tasks-query result
@@ -1298,7 +1564,7 @@ function createEditor(parent, content) {
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
-      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin]),
+      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]),
       foldPlugin,
       linkClickHandler,
       autocompletion({ override: [wikiComplete], closeOnBlur: true }),
@@ -1383,12 +1649,23 @@ const view = createEditor(container, init.content || '');
 currentView = view;
 view.focus();
 
+// CM6 measures line-height/character metrics once, early, using whatever font is
+// actually resolved at that moment. If the real font (custom `markdownFont`, or
+// one pulled in by the Obsidian theme CSS) finishes loading afterward, that cached
+// geometry goes stale and custom-drawn UI that depends on it — namely
+// drawSelection()'s selection boxes — ends up positioned against the old metrics
+// instead of the real ones. `requestMeasure()` forces CM6 to redo that pass once
+// fonts have actually settled.
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => { try { view.requestMeasure(); } catch (_) {} });
+}
+
 // ── Source mode toggle ────────────────────────────────────────────────────────
 function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin, imgPlugin]
+      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);
@@ -1434,9 +1711,31 @@ window.addEventListener('message', ev => {
       });
       break;
     }
+    case 'files-dropped': {
+      const files = msg.files || [];
+      if (!files.length) break;
+      // imgPlugin already ignores any filename whose extension isn't in IMG_EXT, so
+      // registering non-image drops in imageMap too is harmless — it's just unused.
+      for (const f of files) { if (f.filename && f.uri) imageMap[f.filename] = f.uri; }
+      const embed = files.map(f => `![[${f.filename}]]`).join('\n');
+      const pos = pendingDropPos != null ? pendingDropPos : view.state.selection.main.head;
+      pendingDropPos = null;
+      view.dispatch({
+        changes: { from: pos, insert: embed },
+        selection: { anchor: pos + embed.length },
+        userEvent: 'input',
+      });
+      view.focus();
+      break;
+    }
     case 'font-update':
       if (msg.font)     root.style.setProperty('--md-font', msg.font);
       if (msg.fontSize) root.style.setProperty('--md-font-size', msg.fontSize);
+      // Changing the font can change line-height/character metrics after CM6
+      // already measured layout once — see the comment by the initial
+      // requestMeasure() call above. Re-measure so drawSelection() (and cursor
+      // placement) don't stay pinned to the old, now-stale metrics.
+      view.requestMeasure();
       break;
     case 'theme-css': {
       let st = document.getElementById('__obsidian-theme');
@@ -1446,6 +1745,10 @@ window.addEventListener('message', ev => {
         document.head.appendChild(st);
       }
       st.textContent = msg.css || '';
+      // Same reasoning as font-update: an Obsidian theme can define its own
+      // heading font/line-height vars, and this message lands ~300ms after CM6's
+      // initial layout — force a re-measure so selection/cursor geometry catches up.
+      view.requestMeasure();
       break;
     }
     case 'toggle-source-mode':
@@ -1456,6 +1759,26 @@ window.addEventListener('message', ev => {
       tasksQueryPending.delete(msg.query);
       view.dispatch({ effects: tasksRebuildEffect.of(null) });
       break;
+    case 'transclusion-result':
+      transclusionCache.set(msg.id, { content: msg.content, title: msg.title, line: msg.line, error: msg.error });
+      transclusionPending.delete(msg.id);
+      view.dispatch({ effects: transclusionRebuildEffect.of(null) });
+      break;
+    case 'headings-result': {
+      const resolve = pendingHeadingRequests.get(msg.id);
+      if (resolve) { pendingHeadingRequests.delete(msg.id); resolve(msg.headings || []); }
+      break;
+    }
+    case 'scroll-to-line': {
+      const ln = Math.min(Math.max(1, (msg.line || 0) + 1), view.state.doc.lines);
+      const line = view.state.doc.line(ln);
+      view.dispatch({
+        selection: { anchor: line.from },
+        effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
+      });
+      view.focus();
+      break;
+    }
     case 'tasks-changed':
       // Some task, anywhere in the vault, changed (possibly from another file or another
       // editor entirely) — every visible ```tasks``` block's data may now be stale. Re-request
@@ -1486,4 +1809,42 @@ container.addEventListener('paste', e => {
       return;
     }
   }
+});
+
+// ── Drag & drop files (OS Explorer/Finder, or VS Code's own Explorer) ─────────
+// Without a `dragover` handler that calls preventDefault(), the browser never
+// considers this a valid drop target (per the HTML5 DnD spec, `drop` only fires
+// on an element whose `dragover` default was prevented) — so an OS file drag
+// over this webview used to fall through entirely to VS Code's own default of
+// opening the dropped file as a new editor tab. Claiming both events here lets
+// the webview handle it instead: save the file into the configured attachments
+// dir (host-side, mirroring paste-image but keeping the original filename) and
+// insert `![[filename]]` at the drop position — same embed convention already
+// used for pasted images and note transclusions.
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+let pendingDropPos = null;
+
+container.addEventListener('dragover', e => {
+  if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+
+container.addEventListener('drop', e => {
+  if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const coordPos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+  pendingDropPos = coordPos != null ? coordPos : view.state.selection.main.head;
+  const files = Array.from(e.dataTransfer.files);
+  Promise.all(files.map(f => readFileAsDataUrl(f).then(data => ({ name: f.name, data }))))
+    .then(payload => vscode.postMessage({ type: 'drop-files', files: payload }))
+    .catch(() => { pendingDropPos = null; });
 });

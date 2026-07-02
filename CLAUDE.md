@@ -27,8 +27,8 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 
 | File | Role |
 |---|---|
-| `src/extension.ts` | Extension host: ~430 lines. Provider, message handling, file I/O. |
-| `webview-src/editor.js` | Webview CM6 editor: ~1000 lines. All editor logic. |
+| `src/extension.ts` | Extension host: ~800 lines. Provider, message handling, file I/O. |
+| `webview-src/editor.js` | Webview CM6 editor: ~1800 lines. All editor logic. |
 | `out/extension.js` | Compiled host (committed, required for packaging). |
 | `out/editor.bundle.js` | esbuild bundle of webview (committed, required for packaging). |
 | `package.json` | Publisher is `angelCastro` — the installed extension ID is `angelCastro.vault-tool`. |
@@ -40,15 +40,19 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 - `getAttachmentRoots(docUri)` — returns `vscode.Uri[]` for `localResourceRoots` (vault root, doc dir, configured subfolder). Vault root is always included, so any nested path under it is webview-accessible.
 - `findImageFiles(dir)` — recursive image-file walker (extensions: png/jpg/jpeg/gif/svg/webp/bmp), skipping dotfiles and `node_modules`. Falls back to `fs.statSync` when `Dirent.isDirectory()/isFile()` are both false, because cloud-sync placeholder folders (Dropbox Smart Sync, OneDrive Files On-Demand) use NTFS reparse points that Node's `readdirSync` dirent type can misreport on Windows.
 - `getImageMap(webview, docUri)` — returns `{ filename → webviewUri }` map. Resolution order: (1) the configured attachments dir (`getSaveDir`) — priority location; (2) a recursive `findImageFiles` scan of the whole vault root for any filename not already found. First match wins per basename. If a `![[file]]` reference isn't in the map at all, `imgPlugin` leaves the raw markdown text untouched instead of rendering a broken image.
-- `getThemeCss()` — reads `.obsidian/themes/{name}/theme.css` from vault root (config: `vaultTool.obsidianTheme`)
-- `escapeRegex(s)` — escapes special regex chars
-- `updateWikiLinks(oldName, newName)` — scans all vault `.md` files, replaces `[[OldName]]` and `[[OldName|alias]]` with new name via `WorkspaceEdit`
+- `getThemeCss()` — reads `.obsidian/themes/{name}/theme.css` from vault root (config: `vaultTool.obsidianTheme`). Tries the exact-case path first, then falls back to a case-insensitive scan of `.obsidian/themes/` (a folder-name casing mismatch is silently correct-by-accident on case-insensitive filesystems like default NTFS, but can genuinely miss on a case-sensitive one — e.g. a vault synced onto macOS via iCloud/Dropbox/git, or an explicitly case-sensitive APFS volume — which used to silently return `''` and leave every heading/etc. `--h1-*`-style CSS var the theme defines undefined, falling back to `vsTheme`'s hardcoded defaults with no indication why). Shows a `showWarningMessage` if the theme still isn't found after both attempts.
 - `computeBreadcrumb(docUri)` — returns `[{ name, fsPath }]` array for the clickable path bar
+- `splitTarget(raw)` — splits a wiki-link/transclusion target into `{ notePart, section }` on the first `#`. `section` is a heading's raw text and may be from **any** level (`#`–`######`) — `note#section` does not imply the target heading is `# section`; it's matched against whatever level it's actually written at in the target file (see `parseHeadings`).
+- `splitDirHint(notePart)` — splits `notePart` into `{ noteName, dirHint }` on `/`; only the immediate parent segment is kept as the disambiguation hint (mirrors the wiki-link directory-hint rule below).
+- `resolveNoteUri(notePart, currentDir)` — the shared note-lookup used by `open-note`, `open-transclusion`, `get-transclusion` and `get-headings`. See "`open-note` resolution rules" below — this function *is* those rules, factored out so all four callers agree on where a bare/disambiguated note name resolves to.
+- `parseHeadings(text)` — regex ATX-heading scanner (`# `.. `###### `), returns `[{ level, text, line }]` in document order (`line` is 0-based). Skips lines inside ``` ``` ```/`~~~` fences so a `#` in a code sample isn't mistaken for a heading. Setext headings (`===`/`---` underlines) are **not** recognized — only ATX, matching what `livePreviewPlugin`'s `ATXHeading[1-6]` handling already assumes webview-side.
+- `navigateToTarget(raw, currentDocUri, sourcePanel, createIfMissing)` — resolves `raw` (via `splitTarget` + `resolveNoteUri`), optionally creates the note when missing (`open-note` passes `true`; `open-transclusion` passes `false` — a transclusion pointing nowhere should surface "not found", not silently create a blank note), opens it with `vscode.openWith` in `sourcePanel`'s column, and — if `raw` carried a `#section` that resolves to a real heading in the target — looks up that target's panel in `panelsByPath` and posts `scroll-to-line` to it ~350ms later (giving the freshly-opened webview time to mount). Disposes `sourcePanel` afterward, same as the original `open-note`-only behavior.
 
 ### Module-level state
 
 - `noteIndex: string[]` — all `.md` filenames in vault (no extension). Built at activation, updated by `FileSystemWatcher` on create/delete, broadcast to all open panels.
 - `activePanels: vscode.WebviewPanel[]` — tracks open panels to push `note-index` updates.
+- `panelsByPath: Map<string, vscode.WebviewPanel>` — the panel currently showing each document path (set/cleared alongside `activePanels`, keyed by `document.uri.fsPath`). Exists solely so `navigateToTarget` can find the just-opened (or already-open) target panel to send `scroll-to-line` to — `vscode.openWith` doesn't hand back a panel reference, and `supportsMultipleEditorsPerDocument: false` means there's at most one panel per path to track.
 
 ### `resolveCustomTextEditor`
 
@@ -68,11 +72,15 @@ Obsidian themes (e.g. Border) embed SVG data URLs in CSS properties like `-webki
 |---|---|
 | `sync` | Apply `content` to VS Code document via `applyEdit` (debounced autosave path) |
 | `content-for-save` | Resolves the pending `onWillSave` promise |
-| `rename` | Validates new name, calls `WorkspaceEdit.renameFile()`, then `updateWikiLinks(oldName, newName)` |
-| `open-note` | Resolves the wiki-link target and opens it with `vscode.openWith` in the same column (see below for resolution/creation rules) |
+| `rename` | Validates new name, calls `WorkspaceEdit.renameFile()` — link fixup happens via the `onDidRenameFiles` listener that fires from this, see below, not from this handler directly |
+| `open-note` | `navigateToTarget(name, ..., createIfMissing: true)` — resolves the wiki-link target (optionally `note#section`) and opens it with `vscode.openWith` in the same column, scrolling to the heading if a section was given (see below for resolution/creation rules) |
+| `open-transclusion` | Same as `open-note` but `createIfMissing: false` — clicking a transclusion's "open source" button navigates to it like a link, but a missing target just shows a warning instead of creating an empty note |
+| `get-transclusion` | Resolves `msg.target` (`note`, `dir/note`, or `...#section`), reads the target's text via `vscode.workspace.openTextDocument` (so unsaved edits in another open tab are reflected), slices out the section if one was given, and replies `transclusion-result` — see "Transclusions" below |
+| `get-headings` | Resolves `msg.note`, returns `parseHeadings(text)` (level/text only, no line) as `headings-result` — powers the `#`-section step of `wikiComplete`'s autocomplete |
 | `open-url` | `vscode.env.openExternal(vscode.Uri.parse(url))` |
 | `reveal-path` | `vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(fsPath))` |
 | `paste-image` | Saves base64 buffer as `Pasted image YYYYMMDDHHMMSS.png` to configured attachments dir, sends back `image-pasted` with webview URI |
+| `drop-files` | `{ files: [{ name, data }] }` — one or more OS files dropped onto the webview. Saves each into the configured attachments dir *keeping the original filename* (unlike `paste-image`'s timestamp naming, since a real filename is available here), disambiguating only on an actual collision (`"name N.ext"`), and replies `files-dropped` |
 | `toggle-task` | Toggles the task checkbox line at `msg.line` (0-based). See "Task checkboxes" below. |
 
 ### Task checkboxes — soft dependency on `angelCastro.obsidian-like-tasks`
@@ -95,13 +103,26 @@ interface TasksExtensionApi {
 }
 ```
 
-### `open-note` resolution rules
+### `open-note` / transclusion target resolution rules (`resolveNoteUri`)
 
-A wiki-link target may optionally carry one directory segment to disambiguate same-named notes, e.g. `[[folder/Note]]`. Only the immediate parent directory name is used as a hint — the rest of any longer path is ignored.
+A wiki-link or transclusion target may optionally carry one directory segment to disambiguate same-named notes, e.g. `[[folder/Note]]` or `![[folder/Note]]`. Only the immediate parent directory name is used as a hint — the rest of any longer path is ignored. It may also optionally carry a `#section` suffix (stripped by `splitTarget` before this resolution runs) pointing at an ATX heading of **any** level in the target file.
 
 - **No directory hint** (`[[Note]]`): prefer a `Note.md` in the same directory as the note containing the link; if absent, fall back to a vault-wide `findFiles` search (first match wins).
 - **Directory hint** (`[[folder/Note]]`): vault-wide search for `Note.md`, filtered to results whose immediate parent directory is named `folder` (case-insensitive).
-- **Not found anywhere**: create it. Target directory is the hinted subfolder inside the *current* note's directory (created if missing), or the current note's directory itself if no hint was given. The new file is written empty.
+- **Not found anywhere**: `open-note` creates it — target directory is the hinted subfolder inside the *current* note's directory (created if missing), or the current note's directory itself if no hint was given; the new file is written empty. `open-transclusion`/`get-transclusion`/`get-headings` do **not** create anything — they report "not found" instead, since silently creating a blank note just to embed it makes no sense.
+- **Section resolution**: once the target file is found, `parseHeadings(text)` is scanned for a heading whose `text` matches `section` case-insensitively (exact match, not substring). No match → `open-note`/`open-transclusion` just skip the scroll (link still opens the note); `get-transclusion` replies with `error: 'section-not-found'`.
+
+### Fixing up wiki-links after a note is renamed or moved (`onDidRenameFiles`)
+
+Registered once in `activate()`: `vscode.workspace.onDidRenameFiles(e => { void handleWorkspaceRename(e.files); })`. This single listener covers **both** rename sources — the in-app title-edit (`rename` message handler calls `WorkspaceEdit.renameFile()`) and anything done in VS Code's own file explorer (drag, cut/paste, F2, moving an entire folder) — because both ultimately go through the same real filesystem rename that this event fires for. The webview's `rename` handler no longer fixes up links itself; there's a comment there pointing here instead.
+
+- `handleWorkspaceRename(files)` — `onDidRenameFiles` gives one `{oldUri, newUri}` pair per renamed/moved *item*, which for a folder move is the folder itself, not each file inside it. If `newUri` is now a directory, `findMarkdownFiles(newUri.fsPath)` walks it and each found file's pre-move path is reconstructed by rebasing it onto `oldUri` (`path.relative(newUri.fsPath, newFilePath)` re-joined onto `oldUri.fsPath` — the subtree's internal structure doesn't change in a move, only the path prefix does). Non-`.md` files/folders containing none are skipped entirely — image links resolve by basename only (`getImageMap`), so moving an image never breaks a `![[file.png]]` reference and doesn't need this.
+- `fixUpLinksForMovedNote(oldUri, newUri)` — unlike a blind name replace, a move can also change which directory a link needs to disambiguate against, so this must actually *resolve* each candidate link (against the vault as it was just before the move) rather than pattern-match on the old name alone:
+  - Builds `oldFileList`: the current (post-move) vault-wide `.md` list with `newUri`'s path swapped back to `oldUri`'s — i.e. a snapshot of "the vault one moment before this specific move", since every other file's location is unaffected by it.
+  - For every `[[...]]`/`![[...]]` in every *other* vault note (`WIKI_TARGET_RE = /(!?)\[\[([^\]]+)\]\]/g`), splits out any `|alias`/`#section` suffix (left untouched) and calls `resolvesToOldTarget(notePart, linkingDir, oldFileList, oldUri.fsPath)`, which replays `resolveNoteUri`'s exact same-directory-first / directory-hint rules against `oldFileList` to check whether *this specific* link — not just any link sharing the old name — actually pointed at the file that moved. (Two different notes can share a basename in different folders; only a link that genuinely resolved to the moved file should be touched.)
+  - A confirmed match is rewritten using the *new* location: no directory hint if the linking note and the moved note now share a directory, otherwise `path.basename(newDir)` — consistent with `splitDirHint`'s "only the immediate parent segment is ever used as a hint" rule, so the rewritten link resolves the exact same way any other hinted link would.
+  - Only *incoming* links (from other notes) are fixed up — the moved note's own outgoing links aren't touched, even though its own "prefer a file in the same directory" resolution basis has also shifted. Out of scope for now; not requested.
+- **Known limitation, shared with `open-note`'s existing "first match wins" ambiguity**: when a moved note has no directory hint pointing at it and multiple same-named notes exist elsewhere in the vault, `resolvesToOldTarget`'s "which one does this link actually mean" tie-break (a sorted list, for determinism) isn't guaranteed to match whatever order VS Code's real `findFiles` would have picked at `open-note` resolution time — this only matters when such a naming collision exists at all.
 
 ### `buildHtml(content, font, fontSize, noteIndex, cspSource, scriptUri, title, imageMap, breadcrumb)`
 
@@ -125,7 +146,7 @@ Generates the full webview HTML. Key points:
   EditorView.lineWrapping,
   markdown({ base: markdownLanguage }),
   syntaxHighlighting(mdHighlight),
-  previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin]),
+  previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]),
   foldPlugin,
   linkClickHandler,
   autocompletion({ override: [wikiComplete], closeOnBlur: true }),
@@ -184,9 +205,22 @@ Regex `/!\[\[([^\]]+)\]\]/g` over viewport. Parses optional `|` parameter:
 - `![[file.png|400]]` or `![[file.png|400px]]` → image at 400px wide
 - `![[file.png|Caption text]]` → image with `<figcaption>` below
 
-For non-active lines with known filename in `imageMap`, replaces with `ImageWidget`.
+For non-active lines with known filename in `imageMap`, replaces with `ImageWidget`. If the bracketed name's extension isn't one of `IMG_EXT`, `imgPlugin` leaves it alone — that's the signal `transclusionPlugin` (below) uses to claim it instead, since both plugins run their own regex pass over the exact same `!\[\[...\]\]` syntax.
 
 `ImageWidget(src, alt, width, caption)` — renders `<img>` optionally wrapped in `<figure>` + `<figcaption>`.
+
+### `transclusionPlugin` — note transclusions (`![[note]]`, `![[dir/note]]`, `![[note#section]]`)
+
+Same `!\[\[([^\]]+)\]\]/g` regex pass as `imgPlugin`, but claims the match when the bracketed name (before any `#section` or `|param`) does **not** look like an image filename (`IMG_EXT.test(...)` false) — the two plugins' viewport passes are independent and each only emit decorations for the subset they own, same pattern `mdLinkPlugin`/`wikiLinkPlugin`/`imgPlugin` already use for their respective syntaxes.
+
+A transclusion needs the *target* note's (possibly section-scoped) text, which the webview can't read itself — same async round-trip as `` ```tasks ``` `` query blocks: webview posts `get-transclusion` (host resolves + reads + slices), host replies `transclusion-result`, webview caches and rebuilds.
+
+- `transclusionCache: Map<string, { content, title, line, error }>` keyed by the *raw* bracketed target string (e.g. `"projects/Foo#Status"`), `transclusionPending: Set<string>` dedupes in-flight requests, `transclusionRebuildEffect: StateEffect` forces a rebuild once a reply lands — all three mirror `tasksQueryCache`/`tasksQueryPending`/`tasksRebuildEffect` exactly.
+- Since the source line is always a single line already (unlike a multi-line table), rendering needs no `Table`-style "collapse the remaining lines" trick: the whole `![[target]]` match is one `Decoration.replace` (not `block: true`) whose widget happens to render multi-line content — the same technique `ImageWidget`/`TableWidget`/`TasksQueryWidget` already rely on.
+- `TransclusionWidget(target, data)` — `data` is whatever `transclusionCache.get(target)` held at `_build()` time: `undefined` while in flight (renders a loading placeholder), `{ error }` for `'not-found'` / `'section-not-found'` / `'error'` (renders a one-line message instead of a body), or `{ content, title, line }` on success. Rendered DOM: an outer `div.cm-transclusion` (the bordered rectangle) containing a `button.cm-transclusion-open` (absolutely positioned top-right, `↗` glyph, `data-target` = the raw target string) plus a `div.cm-transclusion-body` (an optional `div.cm-transclusion-title` showing the target's filename, then `renderMarkdownBlock(content)`).
+- `renderMarkdownBlock(text)` — a small line-based block renderer (headings → `div.cm-header-N`, fenced code → `<pre><code>`, `>` blockquotes, `-`/`*`/`+` lists → `<ul>`, blank-line-separated paragraphs) used only for transcluded content; each block/paragraph's inline text goes through the existing `renderCell()` (bold/italic/strikethrough/code/wiki-links), which HTML-escapes first, so transcluded text can't inject markup. Nested `![[...]]` inside transcluded content is **not** re-resolved — it renders as inert escaped text, i.e. transclusions do not recurse.
+- Clicking `.cm-transclusion-open` is wired into `linkClickHandler` exactly like `.cm-md-link`/task checkboxes: sends `{ type: 'open-transclusion', target: btn.dataset.target }`. The host's `navigateToTarget` (`createIfMissing: false`) resolves it, opens the target note in the same column, scrolls to the `#section` heading if one was given, and disposes the current panel — same UX as clicking any other wiki-link in this app's single-pane navigation model.
+- `scroll-to-line` (host → webview): moves the selection to `doc.line(msg.line + 1).from` and dispatches `EditorView.scrollIntoView(pos, { y: 'center' })`. Sent by the host ~350ms after `vscode.openWith` resolves, targeting whichever panel `panelsByPath` says now owns that document path (works whether the target editor was freshly created or was already open).
 
 ### Task checkbox lines (in `livePreviewPlugin`, `ListItem` handling)
 
@@ -214,6 +248,10 @@ Unlike single-checkbox lines, a ```tasks``` query needs data from the *entire va
 - The webview's handler for `tasks-changed` re-requests (`requestTasksQuery`) every query currently in `tasksQueryCache`, but **does not clear the cache first** and does not dispatch a rebuild itself — the stale result stays on screen exactly as-is until the fresh one actually arrives via `tasks-query-result` (which is what triggers the rebuild). An earlier version cleared the cache immediately, which forced every visible ```tasks``` block to flash to its "loading" placeholder and back on every single edit; showing stale-but-correct data for the fraction of a second it takes to refetch reads as instant, not as a flicker.
 - **This whole feature was broken for a while by a subtle bug on the Tasks extension's side, not here**: its `onDidChangeTasks` was a `get onDidChangeTasks()` getter, and its `activate()` built the returned API via `{ ...createTasksApi(...) }` — spreading an object evaluates getters immediately, once, baking in whatever they returned *at that exact moment* as a plain value. Since the spread happened before that extension's own task index existed, the getter always saw `undefined` and returned a throwaway, never-fired `EventEmitter`. `ensureSubscribedToTasksChanges()` here "subscribed successfully" every time, just to the wrong emitter — nothing was ever wrong on this side. See `d:\git\vscode-tasks\CLAUDE.md`'s gotchas for the fix. Diagnosed with a real `vscode.OutputChannel` on both sides (not `console.log`, which isn't visible for a normally-installed, non-debug extension).
 
+### Font/theme metrics and `requestMeasure()`
+
+CM6 measures line-height/character metrics once during its own layout passes, using whatever font is actually resolved by the browser at that moment. Two things in this codebase change those metrics *after* CM6 has already measured and cached them, without going through CM6's own transaction system: the `theme-css` message (an Obsidian theme can define its own heading fonts/line-heights, and — per "Why theme CSS is sent via postMessage" above — it lands ~300ms after the webview's initial paint, well after CM6's first layout) and `font-update` (changes `--md-font`/`--md-font-size`, which `.cm-content` reads directly). If CM6's cached geometry goes stale relative to what's actually painted, anything computed from it — most visibly `drawSelection()`'s custom-drawn selection boxes — ends up positioned against the old metrics instead of the current ones, i.e. offset from the text it's supposed to cover. Because this is a timing race (font resolution / vault file I/O latency), it can look fine on one machine and reproduce reliably on another for identical code — this is what was happening cross-platform (Windows vs. macOS) before both message handlers, and a one-time `document.fonts.ready.then(() => view.requestMeasure())` right after editor creation, were made to call `view.requestMeasure()`.
+
 ### `foldPlugin`
 
 `ViewPlugin` outside `previewCompartment` (works in both live-preview and source mode) that implements collapsible headings.
@@ -238,7 +276,10 @@ Unlike single-checkbox lines, a ```tasks``` query needs data from the *entire va
 
 ### `wikiComplete`
 
-CM6 autocompletion source. Triggered by `\[\[[^\]]*$` before cursor. Returns matching note names from `noteIndex` as `apply: '[[Name]]'` completions.
+CM6 async autocompletion source (returns a `Promise` — CM6's `autocompletion({ override: [...] })` supports async sources natively). Triggered by `\[\[[^\]]*$` before cursor — matches whether preceded by `!` or not, so it fires for both `[[note]]` links and `![[note]]` transclusions; the `!` is left untouched and only the `[[...]]` span is replaced by `apply`.
+
+- **No `#` typed yet**: filters `noteIndex` by substring match, `apply: '[[Name]]'`. `validFor: /^\[\[[^\]#]*$/` deliberately excludes `#` — typing one invalidates the result and forces CM6 to re-run the source rather than just re-filtering the existing (note-name) options against a query that now contains `#`.
+- **`#` typed** (`![[Note#` or `[[Note#`): switches to heading search for the note part before the `#`. `requestHeadings(notePart)` posts `{ type: 'get-headings', id, note: notePart }` and returns a `Promise` resolved by the `headings-result` handler (correlated via a locally-generated `id`, tracked in `pendingHeadingRequests: Map<id, resolve>` — parallel in spirit to how `tasksQueryPending`/`transclusionPending` dedupe host round-trips, but here every request gets its own id since results aren't cached/reused across different queries). Options are the host's `parseHeadings()` order (i.e. **document order**, not alphabetical — satisfies "same hierarchical order as written"), filtered by substring on `text`, labeled `'#'.repeat(level) + ' ' + text` so the `#`/`##`/`###` prefix visually conveys nesting, `apply: '[[notePart#Heading]]'`.
 
 ### Message handlers (host → webview)
 
@@ -251,9 +292,26 @@ CM6 autocompletion source. Triggered by `\[\[[^\]]*$` before cursor. Returns mat
 | `get-content` | Responds with `content-for-save` containing full doc text |
 | `trigger-sync` | Flushes pending sync immediately |
 | `image-pasted` | Updates `imageMap` entry, inserts `![[filename]]` at cursor |
+| `files-dropped` | `{ files: [{ filename, uri }] }` — reply to `drop-files`. Updates `imageMap` for each (harmless no-op for non-images, since `imgPlugin` only ever looks up extensions in `IMG_EXT`) and inserts one `![[filename]]` per file, newline-separated, at `pendingDropPos` (the position under the cursor at drop time — see "Drag & drop files" below) |
 | `font-update` | Updates `--md-font` and `--md-font-size` CSS vars on `<html>` |
-| `theme-css` | Sets `element.textContent = css` on `<style id="__obsidian-theme">` |
+| `theme-css` | Sets `element.textContent = css` on `<style id="__obsidian-theme">`, then calls `view.requestMeasure()` (see "Font/theme metrics and `requestMeasure()`" below) |
 | `toggle-source-mode` | Reconfigures `previewCompartment` to `[]` or back |
+| `transclusion-result` | Caches `{ content, title, line, error }` in `transclusionCache` keyed by `msg.id` (the raw target string), dispatches `transclusionRebuildEffect` |
+| `headings-result` | Resolves the matching `pendingHeadingRequests` entry (by `msg.id`) with `msg.headings` — feeds `wikiComplete`'s section-search branch |
+| `scroll-to-line` | Moves the selection to `doc.line(msg.line + 1)` and scrolls it to the vertical center — sent after navigating to a `#section` target |
+
+### Drag & drop files onto the editor
+
+Without an explicit `dragover` handler that calls `preventDefault()`, the browser never considers the webview a valid drop target — per the HTML5 DnD spec, `drop` only fires on an element whose `dragover` default action was prevented — so an OS file (or a file dragged from VS Code's own Explorer tree) dropped over the editor used to fall through entirely to VS Code's own default of opening it as a new editor tab, since nothing claimed the event first. Two listeners on `#editor` (the CM6 mount point) fix this:
+
+- `dragover` — `e.preventDefault()` whenever `e.dataTransfer.types.includes('Files')`, so the drop target becomes valid (and `dropEffect = 'copy'` for the cursor icon).
+- `drop` — `e.preventDefault()`, computes the insertion position via `view.posAtCoords({x, y})` (falling back to the current selection head if the drop coordinates don't resolve to a doc position — e.g. dropped on the title/breadcrumb area above the editor) and stashes it in the module-level `pendingDropPos`, then reads every `File` in `e.dataTransfer.files` via `readFileAsDataUrl` (a `FileReader.readAsDataURL` wrapped in a `Promise`) and posts one batched `{ type: 'drop-files', files: [{ name, data }] }` once all have resolved.
+
+Host-side `drop-files` handling mirrors `paste-image` (writes into `getSaveDir()`, same base64-decode-and-`fs.writeFileSync` shape) but — unlike pasted clipboard image data, which has no real filename and gets a `Pasted image YYYYMMDDHHMMSS.png` name — a dropped file's original name is already known and kept as-is, only disambiguated (`"name N.ext"`) on an actual collision with something already in the attachments dir. The reply (`files-dropped`) inserts one `![[filename]]` per file at `pendingDropPos`, same embed convention already used for pasted images and note transclusions; `imgPlugin` renders it if the extension is a known image type and otherwise leaves it as an inert (but valid) embed reference, exactly like any other unrecognized `![[...]]` target.
+
+No special-casing for a dropped `.md` file (it just gets copied into the attachments dir and embedded like anything else, rather than turned into a note link/transclusion) — out of scope for what was asked, and an unusual thing to actually drag in practice.
+
+**If VS Code's own file-drop-to-open-tab behavior still wins despite this**: it likely means VS Code renders an overlay *outside* the webview's iframe during an active OS drag (a separate element in the outer workbench, positioned on top for the "drop here to open" UX), which would swallow the drop before it ever reaches `#editor`'s listeners — no in-webview JS could work around that, since it happens in a different browsing context entirely. There's currently no known `vscode.WebviewOptions`/`WebviewPanelOptions` flag to opt out of that overlay for a specific custom editor; unconfirmed whether it actually applies to focused custom-editor webviews (as opposed to just empty editor groups/tab bars) since it hasn't been reported after this fix shipped.
 
 ## Configuration (`package.json` → `contributes.configuration`)
 
