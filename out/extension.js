@@ -1013,11 +1013,24 @@ function activate(context) {
     // "Open note" quick switcher — a floating dialog (search box + list, same
     // widget the Command Palette itself uses) rather than a webview, since
     // webviews in VS Code always occupy a fixed editor tab; there's no API for a
-    // floating/modal webview overlay the way Obsidian's own quick switcher is.
+    // floating/modal webview overlay the way Obsidian's own quick switcher is —
+    // nor any way to move a QuickPick's on-screen position (it's always anchored
+    // near the top, horizontally centered, entirely controlled by VS Code core).
     // Empty search shows recently-opened notes (NOTE_HISTORY_KEY, most-recent
     // first); typing switches to VS Code's own built-in fuzzy filtering over
     // every note in the vault (swapping `qp.items` is enough — QuickPick
-    // refilters automatically against whatever pool is currently assigned).
+    // refilters automatically against whatever pool is currently assigned), plus
+    // an always-visible "create" item once the typed text doesn't match any
+    // existing note's vault-relative path.
+    //
+    // Ctrl+Enter (new tab) / Ctrl+Alt+Enter (split right) can't be handled via
+    // QuickPick's own onDidAccept — it fires identically regardless of modifier
+    // keys, VS Code doesn't expose which were held. Instead, two extra commands
+    // below are bound to those chords with `when: vaultToolQuickPickActive`, a
+    // context flag this command sets for its own lifetime — they read the
+    // currently-active item off `currentQuickPick` directly and hide it
+    // themselves. Scoped to this one custom flag (not the built-in `inQuickOpen`)
+    // so they can't ever fire while some unrelated quick pick is open elsewhere.
     const openNoteQuickPickCmd = vscode.commands.registerCommand('vaultTool.openNoteQuickPick', async () => {
         const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (!vaultRoot) {
@@ -1025,51 +1038,118 @@ function activate(context) {
             return;
         }
         const files = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
+        const relNoExt = (fsPath) => path.relative(vaultRoot, fsPath).replace(/\.md$/i, '').replace(/\\/g, '/');
         const toItem = (fsPath) => {
-            const rel = path.relative(vaultRoot, fsPath);
-            const dir = path.dirname(rel);
+            const dir = path.dirname(relNoExt(fsPath));
             return { label: path.basename(fsPath, '.md'), description: dir === '.' ? undefined : dir, fsPath };
         };
         const allItems = files.map(f => toItem(f.fsPath));
-        const existing = new Set(files.map(f => f.fsPath));
-        const recentItems = getNoteHistory().filter(p => existing.has(p)).map(toItem);
+        const existingPaths = new Set(files.map(f => f.fsPath));
+        const existingRelLower = new Set(files.map(f => relNoExt(f.fsPath).toLowerCase()));
+        const recentItems = getNoteHistory().filter(p => existingPaths.has(p)).map(toItem);
         const qp = vscode.window.createQuickPick();
-        qp.placeholder = 'Buscar una nota…';
+        qp.placeholder = 'Escriba el nombre de la nota para abrir o crear…';
         qp.matchOnDescription = true;
         qp.items = recentItems.length > 0 ? recentItems : allItems;
-        let showingAll = recentItems.length === 0;
+        currentQuickPick = qp;
+        void vscode.commands.executeCommand('setContext', 'vaultToolQuickPickActive', true);
         qp.onDidChangeValue(value => {
-            const wantAll = value.trim().length > 0 || recentItems.length === 0;
-            if (wantAll !== showingAll) {
-                showingAll = wantAll;
-                qp.items = wantAll ? allItems : recentItems;
+            const trimmed = value.trim();
+            if (!trimmed) {
+                qp.items = recentItems.length > 0 ? recentItems : allItems;
+                return;
+            }
+            if (existingRelLower.has(trimmed.toLowerCase())) {
+                qp.items = allItems;
+            }
+            else {
+                const createItem = {
+                    label: `$(new-file) Crear nota "${trimmed}"`,
+                    alwaysShow: true,
+                    fsPath: '',
+                    isCreate: true,
+                    createName: trimmed,
+                };
+                qp.items = [...allItems, createItem];
             }
         });
-        qp.onDidAccept(() => {
-            const sel = qp.activeItems[0];
-            qp.hide();
-            if (sel) {
-                void openNoteFromQuickPick(sel.fsPath);
+        qp.onDidAccept(() => { void acceptQuickPick(vaultRoot, 'replace'); });
+        qp.onDidHide(() => {
+            if (currentQuickPick === qp) {
+                currentQuickPick = undefined;
+                void vscode.commands.executeCommand('setContext', 'vaultToolQuickPickActive', false);
             }
+            qp.dispose();
         });
-        qp.onDidHide(() => qp.dispose());
         qp.show();
     });
-    context.subscriptions.push(listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, openNoteQuickPickCmd);
+    const openNoteQuickPickNewTabCmd = vscode.commands.registerCommand('vaultTool._openNoteQuickPickInNewTab', () => {
+        const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (vaultRoot) {
+            void acceptQuickPick(vaultRoot, 'newtab');
+        }
+    });
+    const openNoteQuickPickSideCmd = vscode.commands.registerCommand('vaultTool._openNoteQuickPickToSide', () => {
+        const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (vaultRoot) {
+            void acceptQuickPick(vaultRoot, 'side');
+        }
+    });
+    context.subscriptions.push(listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, openNoteQuickPickCmd, openNoteQuickPickNewTabCmd, openNoteQuickPickSideCmd);
+}
+// The one currently-shown "open note" QuickPick, if any — lets the modifier-key
+// commands above reach its selection without QuickPick's own accept event
+// telling them which chord fired it. See the comment above openNoteQuickPickCmd.
+let currentQuickPick;
+async function acceptQuickPick(vaultRoot, mode) {
+    const qp = currentQuickPick;
+    if (!qp) {
+        return;
+    }
+    const sel = qp.activeItems[0];
+    qp.hide();
+    if (!sel) {
+        return;
+    }
+    if (sel.isCreate && sel.createName) {
+        await createAndOpenNote(sel.createName, vaultRoot, mode);
+    }
+    else if (sel.fsPath) {
+        await openNoteFromQuickPick(sel.fsPath, mode);
+    }
+}
+async function createAndOpenNote(name, vaultRoot, mode) {
+    const trimmed = name.trim().replace(/\\/g, '/');
+    if (!trimmed) {
+        return;
+    }
+    if (/[:*?"<>|]/.test(trimmed)) {
+        vscode.window.showErrorMessage('Nombre no válido: contiene caracteres no permitidos.');
+        return;
+    }
+    const targetPath = path.join(vaultRoot, ...trimmed.split('/')) + '.md';
+    if (!fs.existsSync(targetPath)) {
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.writeFileSync(targetPath, '', 'utf-8');
+    }
+    await openNoteFromQuickPick(targetPath, mode);
 }
 // Opens the picked note the same way the rest of the app navigates between
-// notes: same column, then dispose whichever vault-tool panel was active
-// before — unless that panel already *is* the picked note, in which case
-// there's nothing to replace.
-async function openNoteFromQuickPick(fsPath) {
+// notes by default (`mode: 'replace'`): same column, then dispose whichever
+// vault-tool panel was active before — unless that panel already *is* the
+// picked note, in which case there's nothing to replace. `'newtab'` opens
+// alongside it in the same column without disposing anything; `'side'` opens
+// in a new split column (`ViewColumn.Beside`) and likewise leaves the
+// original panel untouched.
+async function openNoteFromQuickPick(fsPath, mode = 'replace') {
     const targetUri = vscode.Uri.file(fsPath);
     const sourcePanel = activePanels.find(p => p.active) ?? activePanels.find(p => p.visible);
     const sourcePath = sourcePanel
         ? [...panelsByPath.entries()].find(([, p]) => p === sourcePanel)?.[0]
         : undefined;
-    const col = sourcePanel?.viewColumn ?? vscode.ViewColumn.Active;
+    const col = mode === 'side' ? vscode.ViewColumn.Beside : (sourcePanel?.viewColumn ?? vscode.ViewColumn.Active);
     await vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col);
-    if (sourcePanel && sourcePath !== fsPath) {
+    if (mode === 'replace' && sourcePanel && sourcePath !== fsPath) {
         setTimeout(() => { try {
             sourcePanel.dispose();
         }

@@ -106,6 +106,18 @@
         "key": "ctrl+o",
         "mac": "cmd+o",
         "when": "activeCustomEditorId == 'vaultTool.markdownEditor'"
+      },
+      {
+        "command": "vaultTool._openNoteQuickPickInNewTab",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "vaultToolQuickPickActive"
+      },
+      {
+        "command": "vaultTool._openNoteQuickPickToSide",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "vaultToolQuickPickActive"
       }
     ],
     "configurationDefaults": {
