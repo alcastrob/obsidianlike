@@ -474,6 +474,7 @@ function naiveToggleTaskLine(lineText) {
 }
 // ── Shared state ──────────────────────────────────────────────────────────────
 let extensionUri;
+let extensionContext;
 let noteIndex = [];
 const activePanels = [];
 // Tracks the panel currently showing each document path, so navigateToTarget can
@@ -494,10 +495,26 @@ async function buildNoteIndex() {
         catch { }
     });
 }
+// ── Recently-opened notes history (for the "open note" quick pick) ────────────
+// Persisted in globalState — not tied to a single window/session, and survives
+// VS Code restarts, same as Obsidian's own quick switcher history. Recorded from
+// resolveCustomTextEditor, the single choke point every note passes through
+// regardless of how it was opened (Explorer, wiki-link, quick pick itself, etc).
+const NOTE_HISTORY_KEY = 'vaultTool.noteHistory';
+const NOTE_HISTORY_LIMIT = 50;
+function recordNoteOpened(fsPath) {
+    const history = extensionContext.globalState.get(NOTE_HISTORY_KEY, []);
+    const next = [fsPath, ...history.filter(p => p !== fsPath)].slice(0, NOTE_HISTORY_LIMIT);
+    void extensionContext.globalState.update(NOTE_HISTORY_KEY, next);
+}
+function getNoteHistory() {
+    return extensionContext.globalState.get(NOTE_HISTORY_KEY, []);
+}
 // ── Custom editor provider ────────────────────────────────────────────────────
 class MarkdownDocumentProvider {
     resolveCustomTextEditor(document, webviewPanel, _token) {
         void ensureSubscribedToTasksChanges();
+        recordNoteOpened(document.uri.fsPath);
         const getFont = () => vscode.workspace.getConfiguration('vaultTool').get('markdownFont', '').trim() ||
             'var(--vscode-editor-font-family)';
         const getCodeFont = () => vscode.workspace.getConfiguration('vaultTool').get('codeFont', '').trim();
@@ -913,6 +930,7 @@ MarkdownDocumentProvider.viewType = 'vaultTool.markdownEditor';
 // ── Extension activation ──────────────────────────────────────────────────────
 function activate(context) {
     extensionUri = context.extensionUri;
+    extensionContext = context;
     const outputChannel = vscode.window.createOutputChannel('Vault Tool');
     buildNoteIndex();
     const mdWatcher = vscode.workspace.createFileSystemWatcher('**/*.md');
@@ -992,7 +1010,71 @@ function activate(context) {
             panel.webview.postMessage({ type: 'files-dropped', files: results });
         }
     });
-    context.subscriptions.push(listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd);
+    // "Open note" quick switcher — a floating dialog (search box + list, same
+    // widget the Command Palette itself uses) rather than a webview, since
+    // webviews in VS Code always occupy a fixed editor tab; there's no API for a
+    // floating/modal webview overlay the way Obsidian's own quick switcher is.
+    // Empty search shows recently-opened notes (NOTE_HISTORY_KEY, most-recent
+    // first); typing switches to VS Code's own built-in fuzzy filtering over
+    // every note in the vault (swapping `qp.items` is enough — QuickPick
+    // refilters automatically against whatever pool is currently assigned).
+    const openNoteQuickPickCmd = vscode.commands.registerCommand('vaultTool.openNoteQuickPick', async () => {
+        const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!vaultRoot) {
+            vscode.window.showErrorMessage('Abre primero la carpeta de tu vault en VS Code.');
+            return;
+        }
+        const files = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
+        const toItem = (fsPath) => {
+            const rel = path.relative(vaultRoot, fsPath);
+            const dir = path.dirname(rel);
+            return { label: path.basename(fsPath, '.md'), description: dir === '.' ? undefined : dir, fsPath };
+        };
+        const allItems = files.map(f => toItem(f.fsPath));
+        const existing = new Set(files.map(f => f.fsPath));
+        const recentItems = getNoteHistory().filter(p => existing.has(p)).map(toItem);
+        const qp = vscode.window.createQuickPick();
+        qp.placeholder = 'Buscar una nota…';
+        qp.matchOnDescription = true;
+        qp.items = recentItems.length > 0 ? recentItems : allItems;
+        let showingAll = recentItems.length === 0;
+        qp.onDidChangeValue(value => {
+            const wantAll = value.trim().length > 0 || recentItems.length === 0;
+            if (wantAll !== showingAll) {
+                showingAll = wantAll;
+                qp.items = wantAll ? allItems : recentItems;
+            }
+        });
+        qp.onDidAccept(() => {
+            const sel = qp.activeItems[0];
+            qp.hide();
+            if (sel) {
+                void openNoteFromQuickPick(sel.fsPath);
+            }
+        });
+        qp.onDidHide(() => qp.dispose());
+        qp.show();
+    });
+    context.subscriptions.push(listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, openNoteQuickPickCmd);
+}
+// Opens the picked note the same way the rest of the app navigates between
+// notes: same column, then dispose whichever vault-tool panel was active
+// before — unless that panel already *is* the picked note, in which case
+// there's nothing to replace.
+async function openNoteFromQuickPick(fsPath) {
+    const targetUri = vscode.Uri.file(fsPath);
+    const sourcePanel = activePanels.find(p => p.active) ?? activePanels.find(p => p.visible);
+    const sourcePath = sourcePanel
+        ? [...panelsByPath.entries()].find(([, p]) => p === sourcePanel)?.[0]
+        : undefined;
+    const col = sourcePanel?.viewColumn ?? vscode.ViewColumn.Active;
+    await vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col);
+    if (sourcePanel && sourcePath !== fsPath) {
+        setTimeout(() => { try {
+            sourcePanel.dispose();
+        }
+        catch { } }, 150);
+    }
 }
 function deactivate() { }
 //# sourceMappingURL=extension.js.map

@@ -53,6 +53,7 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 - `noteIndex: string[]` — all `.md` filenames in vault (no extension). Built at activation, updated by `FileSystemWatcher` on create/delete, broadcast to all open panels.
 - `activePanels: vscode.WebviewPanel[]` — tracks open panels to push `note-index` updates.
 - `panelsByPath: Map<string, vscode.WebviewPanel>` — the panel currently showing each document path (set/cleared alongside `activePanels`, keyed by `document.uri.fsPath`). Exists solely so `navigateToTarget` can find the just-opened (or already-open) target panel to send `scroll-to-line` to — `vscode.openWith` doesn't hand back a panel reference, and `supportsMultipleEditorsPerDocument: false` means there's at most one panel per path to track.
+- `extensionContext: vscode.ExtensionContext` — stashed at `activate()` purely to reach `context.globalState` from `recordNoteOpened`/`getNoteHistory` (see "`vaultTool.openNoteQuickPick`" below), which live outside `activate()`'s own closure.
 
 ### `resolveCustomTextEditor`
 
@@ -351,6 +352,15 @@ Explorer-context-menu command (`contributes.menus.explorer/context` in `package.
 3. Copies each selected file into `getSaveDir(docPath)` via `fs.copyFileSync`, name-deduplicated by the same `uniqueAttachmentName` helper `drop-files` uses.
 4. Posts the exact same `files-dropped` message the `drop-files` handler sends — no webview-side changes needed at all. `pendingDropPos` is `null` in this path (no drop occurred), so the webview's existing fallback inserts at the current cursor position instead — which is exactly the right behavior: place the cursor where you want the embed, then run the command.
 
+### `vaultTool.openNoteQuickPick` — the "open note" quick switcher
+
+Deliberately implemented as a `vscode.window.createQuickPick()` rather than a webview: a webview in VS Code always occupies a fixed editor tab (there is no API for a floating/modal webview overlay), so it can't actually reproduce a floating dialog the way Obsidian's own quick switcher looks — `QuickPick` is the widget the Command Palette itself is built on, and already floats centered with a search box on top and a list below, which is what was actually being asked for.
+
+- Bound to `Ctrl+O`/`Cmd+O` (`contributes.keybindings`), but scoped with `"when": "activeCustomEditorId == 'vaultTool.markdownEditor'"` so it only overrides VS Code's native "Open File…" shortcut while a vault-tool note is the focused editor — not globally.
+- `NOTE_HISTORY_KEY` in `context.globalState` (capped at `NOTE_HISTORY_LIMIT` = 50, most-recent-first, deduplicated by moving an existing entry to the front rather than adding a second one) is the "recently opened" history — persisted per VS Code profile, survives restarts, same as Obsidian's own quick switcher history. `recordNoteOpened(fsPath)` is called from `resolveCustomTextEditor` itself, the single choke point every note passes through regardless of *how* it was opened (Explorer double-click, wiki-link click, transclusion's open button, drag-and-drop-created attachment note, or this quick pick's own selection) — so nothing else needs to remember to record anything.
+- On invoke: builds `allItems` from a fresh `findFiles('**/*.md')` (label = basename, description = vault-relative directory, for disambiguating same-named notes in different folders) and `recentItems` by mapping `getNoteHistory()` through the *current* file list (filtering out any history entries whose file no longer exists — deleted/moved notes just silently drop off rather than showing a dead entry).
+- Empty search box shows `recentItems` (falling back to `allItems` if there's no history yet); typing switches `qp.items` to `allItems` and lets QuickPick's own built-in fuzzy filtering (against label/description) take over from there — no custom filtering logic needed, `matchOnDescription: true` is enough to also match on the folder path shown in each item's description.
+- Accepting a selection calls `openNoteFromQuickPick(fsPath)`, which mirrors `navigateToTarget`'s navigation pattern exactly: `vscode.openWith` in the current panel's column, then dispose that panel afterward — except it skips the dispose when the picked note *is* the one already open (nothing to replace).
 ## Configuration (`package.json` → `contributes.configuration`)
 
 | Key | Default | Purpose |
