@@ -27,8 +27,8 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 
 | File | Role |
 |---|---|
-| `src/extension.ts` | Extension host: ~800 lines. Provider, message handling, file I/O. |
-| `webview-src/editor.js` | Webview CM6 editor: ~1800 lines. All editor logic. |
+| `src/extension.ts` | Extension host: ~1200 lines. Provider, message handling, file I/O. |
+| `webview-src/editor.js` | Webview CM6 editor: ~2000 lines. All editor logic. |
 | `out/extension.js` | Compiled host (committed, required for packaging). |
 | `out/editor.bundle.js` | esbuild bundle of webview (committed, required for packaging). |
 | `package.json` | Publisher is `angelCastro` — the installed extension ID is `angelCastro.vault-tool`. |
@@ -380,8 +380,8 @@ QuickPick also has no footer slot the way Obsidian's dialog shows one below the 
 ## Known issues / future work
 
 1. **Image paste** — reported broken, not investigated.
-2. **`[[` wiki link picker** — autocomplete picker may have issues, not investigated.
-3. **Standard markdown images** `![alt](url)` — not handled by imgPlugin (which only handles `![[file]]`). Shows as raw markdown.
+2. **Standard markdown images** `![alt](url)` — not handled by imgPlugin (which only handles `![[file]]`). Shows as raw markdown.
+3. **External file drag-and-drop onto the editor** — implemented (see "Drag & drop files onto the editor" above) but not confirmed reliable; `vaultTool.insertAttachment` (Explorer right-click) is the dependable path in the meantime.
 
 ## Git branch
 

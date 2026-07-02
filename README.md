@@ -24,9 +24,61 @@ correctamente como directorio en Windows.
   la bóveda.
 - Con ruta de desambiguación (`[[carpeta/Nota]]`): se busca `Nota.md` cuyo directorio
   padre inmediato se llame `carpeta` (no hace falta que sea la ruta completa).
+- Con sección (`[[Nota#Encabezado]]`): al hacer clic, abre la nota y hace scroll hasta
+  ese encabezado (de cualquier nivel, no solo `#`).
 - Si no se encuentra en ningún caso, se crea la nota en blanco: dentro del directorio
   `carpeta` (creándolo si no existe) dentro del directorio actual, o directamente en
   el directorio actual si no había ruta de desambiguación.
+- Autocompletado al escribir `[[`: busca notas por nombre; al añadir `#`, cambia a
+  buscar encabezados de esa nota concreta, en el mismo orden en que aparecen en el
+  documento.
+- Al mover o renombrar una nota (desde el explorador de VS Code o el título dentro del
+  editor), todos los `[[wikilinks]]` que apuntaban a ella en el resto de la bóveda se
+  actualizan automáticamente — añadiendo o quitando la carpeta de desambiguación según
+  corresponda a la nueva ubicación.
+
+## Transclusiones (`![[nota]]`, `![[carpeta/nota]]`, `![[nota#sección]]`)
+
+Incrusta el contenido de otra nota (completa o solo una sección) dentro de un
+rectángulo con un botón "↗" para abrir la nota de origen (y hacer scroll a la
+sección, si la hay). Se resuelve de forma asíncrona contra el host, igual que
+los bloques ` ```tasks ` de la integración de Tareas.
+
+## Abrir nota (`Ctrl+O` / `Cmd+O`)
+
+Selector flotante (`QuickPick` nativo de VS Code — un webview no puede flotar
+como diálogo modal, siempre ocupa una pestaña fija) con:
+
+- Buscador arriba; al dejarlo vacío muestra el histórico de notas abiertas
+  recientemente (persistente entre sesiones), y al escribir busca por nombre
+  en toda la bóveda.
+- Si el texto escrito no coincide con ninguna nota, aparece la opción de
+  crearla (soporta subcarpetas escribiendo `carpeta/Nombre`).
+- `Enter` abre sustituyendo la nota actual, `Ctrl+Enter` abre en una pestaña
+  nueva, `Ctrl+Alt+Enter` abre en una columna a la derecha.
+
+La posición del diálogo (anclado arriba, centrado horizontalmente) no es
+configurable — es una limitación de la API de VS Code, no algo pendiente de
+ajustar.
+
+## Adjuntar archivos arrastrando o desde el explorador
+
+Arrastrar un archivo desde el sistema operativo sobre el editor debería
+copiarlo a la carpeta de adjuntos e insertar `![[archivo]]` en el punto donde
+se suelta — igual que en Obsidian — pero VS Code puede interceptar el drop
+antes de que llegue al webview (ver detalle en `CLAUDE.md`, sección "Drag &
+drop"; no confirmado como 100% fiable). El camino garantizado: clic derecho
+sobre uno o varios archivos en el explorador de VS Code → "Vault Tool:
+Insertar como adjunto en la nota activa".
+
+## Código inline y bloques de código
+
+Los backtick `` ` `` de código inline se ocultan salvo en la línea activa o en
+modo fuente, igual que otros marcadores markdown. Los bloques ` ```código``` `
+se renderizan como una caja unificada (no una fila de "píldoras" por línea) y
+las líneas ` ``` ` de apertura/cierre desaparecen del todo mientras no estás
+editando dentro del bloque. La fuente monoespaciada usada en ambos casos es
+configurable por separado de la fuente general (`vaultTool.codeFont`).
 
 ## Tareas (`- [ ] ...`) — integración con "Obsidian-Like Tasks"
 
@@ -40,6 +92,14 @@ Esto funciona como **dependencia opcional** de la extensión hermana `angelCastr
 simple `[ ]`↔`[x]` sin recurrencia, y los bloques `tasks` no se renderizan. Si está instalada,
 toda la lógica de parseo/recurrencia/queries vive ahí — Vault Tool solo pinta el resultado y
 reenvía los clics. Detalle técnico completo en `CLAUDE.md`.
+
+## Compatibilidad multiplataforma (Windows / macOS)
+
+La búsqueda del tema de Obsidian configurado (`vaultTool.obsidianTheme`) es
+insensible a mayúsculas/minúsculas y no depende de que el sistema de ficheros
+reporte correctamente si una entrada es un directorio (falla en vaults
+sincronizados por iCloud/Dropbox/OneDrive) — si aun así no se encuentra,
+se avisa con la ruta exacta comprobada en vez de fallar en silencio.
 
 ## Siguientes pasos sugeridos
 
@@ -55,9 +115,6 @@ reenvía los clics. Detalle técnico completo en `CLAUDE.md`.
 
 ## Tareas pendientes
 
-- [ ] Escribir un wikilink `[[` con sugerencias — al escribir `[[` en el
-  editor, mostrar un desplegable con los nombres de las notas del vault para
-  autocompletar el enlace.
 - [ ] Color diferente y navegación según estado del wikilink — los enlaces
   válidos se muestran en un color y al pulsarlos abren la nota destino; los
   enlaces rotos se muestran en otro color (p. ej. rojo o gris).
@@ -69,12 +126,6 @@ reenvía los clics. Detalle técnico completo en `CLAUDE.md`.
   por campos de frontmatter.
 - [ ] Templates — sistema de plantillas para crear notas nuevas a partir de
   un fichero base predefinido.
-- [ ] Mover ficheros `.md` actualiza los enlaces — al renombrar o mover una
-  nota, buscar y actualizar automáticamente todos los `[[wikilinks]]` que
-  apuntaban a su ruta anterior en el resto del vault.
-- [ ] Transclusiones — soporte de `![[nota]]` para incrustar el contenido de
-  otra nota (o un bloque concreto) dentro de la nota actual.
-- [ ] HTML para los highlights
-- [ ] Bloques, como los de las notas o los códigos fuentes
-- [ ] `términos` y ```bloques```
-- [ ] Abrir archivos con el selector de ficheros (CTRL+O)
+- [ ] Confirmar de forma fiable el drag & drop de archivos externos sobre el
+  editor (ahora mismo el camino garantizado es el comando de menú contextual
+  del explorador, no arrastrar directamente).
