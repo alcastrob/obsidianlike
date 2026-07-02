@@ -500,6 +500,7 @@ class MarkdownDocumentProvider {
         void ensureSubscribedToTasksChanges();
         const getFont = () => vscode.workspace.getConfiguration('vaultTool').get('markdownFont', '').trim() ||
             'var(--vscode-editor-font-family)';
+        const getCodeFont = () => vscode.workspace.getConfiguration('vaultTool').get('codeFont', '').trim();
         const getFontSize = () => vscode.workspace.getConfiguration('editor').get('fontSize', 14);
         const scriptUri = webviewPanel.webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'out', 'editor.bundle.js'));
         webviewPanel.webview.options = {
@@ -523,7 +524,7 @@ class MarkdownDocumentProvider {
         const imgMap = getImageMap(webviewPanel.webview, document.uri);
         const themeCss = getThemeCss();
         const breadcrumb = computeBreadcrumb(document.uri);
-        webviewPanel.webview.html = this.buildHtml(document.getText(), getFont(), getFontSize(), webviewPanel.webview.cspSource, scriptUri.toString(), path.basename(document.uri.fsPath, '.md'), imgMap, breadcrumb);
+        webviewPanel.webview.html = this.buildHtml(document.getText(), getFont(), getCodeFont(), getFontSize(), webviewPanel.webview.cspSource, scriptUri.toString(), path.basename(document.uri.fsPath, '.md'), imgMap, breadcrumb);
         // Send initial data after webview is ready.
         // Theme CSS is sent as a message (not inlined in HTML) to avoid HTML-parser
         // issues with </style> sequences inside SVG data URLs in theme files.
@@ -544,10 +545,12 @@ class MarkdownDocumentProvider {
         const subs = [
             vscode.workspace.onDidChangeConfiguration(e => {
                 if (e.affectsConfiguration('vaultTool.markdownFont') ||
+                    e.affectsConfiguration('vaultTool.codeFont') ||
                     e.affectsConfiguration('editor.fontSize')) {
                     webviewPanel.webview.postMessage({
                         type: 'font-update',
                         font: getFont(),
+                        codeFont: getCodeFont(),
                         fontSize: getFontSize() + 'px',
                     });
                 }
@@ -819,8 +822,8 @@ class MarkdownDocumentProvider {
         ];
         webviewPanel.onDidDispose(() => subs.forEach(s => s.dispose()));
     }
-    buildHtml(content, font, fontSize, cspSource, scriptUri, title, imageMap = {}, breadcrumb = []) {
-        const init = JSON.stringify({ content, font, fontSize, noteIndex, title, imageMap, breadcrumb });
+    buildHtml(content, font, codeFont, fontSize, cspSource, scriptUri, title, imageMap = {}, breadcrumb = []) {
+        const init = JSON.stringify({ content, font, codeFont, fontSize, noteIndex, title, imageMap, breadcrumb });
         return `<!DOCTYPE html>
 <html lang="es">
 <head>

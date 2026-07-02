@@ -227,28 +227,40 @@ const vsTheme = EditorView.theme({
   // Standalone inline code (`text`) — a small chip, same look as before this
   // was split out of mdHighlight's tags.monospace spec into a stable class name.
   '.cm-inline-code': {
-    fontFamily: 'var(--font-monospace, var(--vscode-editor-font-family, monospace))',
+    // --code-font is the user-configurable `vaultTool.codeFont` setting (empty
+    // by default, falling through to the Obsidian theme's --font-monospace var,
+    // then VS Code's editor font, then a generic monospace).
+    fontFamily: 'var(--code-font, var(--font-monospace, var(--vscode-editor-font-family, monospace)))',
     fontSize: '0.88em',
     background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)))',
     color: 'var(--code-normal, inherit)',
     padding: '1px 4px', borderRadius: '3px',
   },
   // Fenced code blocks (```...```) — line classes added in livePreviewPlugin's
-  // FencedCode handling, one per line of the block (fence-open/-close lines
-  // included), so the whole block renders as a single cohesive box instead of
+  // FencedCode handling, one per *content* line (fence-open/-close lines are
+  // collapsed to zero height via .cm-code-fence-hidden instead — see there),
+  // so the whole block renders as a single cohesive box instead of
   // tags.monospace's chip styling being applied per-visual-line (CM6 can't
   // render one Decoration.mark spanning multiple lines as a single element, so
   // a multi-line highlighted range always gets fragmented into one <span> per
   // line — with the chip's own background+padding+radius, that looked like a
   // stack of disconnected pills rather than one block).
   '.cm-code-block': {
-    fontFamily: 'var(--font-monospace, var(--vscode-editor-font-family, monospace))',
+    fontFamily: 'var(--code-font, var(--font-monospace, var(--vscode-editor-font-family, monospace)))',
     fontSize: '0.88em',
     background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)))',
     color: 'var(--code-normal, inherit)',
     borderLeft: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
     borderRight: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
     padding: '0 14px',
+  },
+  // The ```/``` fence lines themselves: collapsed to zero height (not just
+  // text-hidden) when not the active line, so — matching Obsidian — they don't
+  // leave behind an empty, padded line above/below the block. Same technique as
+  // .cm-table-row-hidden/.cm-fold-hidden.
+  '.cm-code-fence-hidden': {
+    height: '0 !important', lineHeight: '0 !important',
+    overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
   },
   '.cm-code-block-first': {
     borderTop: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
@@ -856,26 +868,45 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               } catch (_) {}
               return false;
             }
-            // Not a tasks block: give every line of the block (fence-open,
-            // content, fence-close) a shared box-style line class — see the
-            // .cm-code-block comment in vsTheme for why this is needed instead
-            // of just letting tags.monospace's chip styling apply per line.
-            // Added unconditionally (active or not), same as heading line
-            // classes above, so the box stays visible while editing inside it —
-            // only the ``` fence marks reveal/hide per the active-line check
-            // further down, same as any other syntax marker.
+            // Not a tasks block. Two things, mirroring Obsidian's own live
+            // preview: (1) the ``` fence-open/-close lines collapse to zero
+            // height (not just text-hidden) when not the active line, so they
+            // don't leave behind an empty, padded-looking line above/below the
+            // block; (2) every remaining *content* line gets a shared box-style
+            // line class (.cm-code-block/-first/-last/-solo — see vsTheme) so
+            // the block renders as one cohesive box. The box classes are added
+            // unconditionally (active or not), same as heading line classes
+            // above, so the box stays visible while editing inside it — a fence
+            // line only reverts to plain, uncollapsed raw text while it's
+            // itself the active line.
             try {
               const fromLine = state.doc.lineAt(node.from);
               const endPos   = Math.max(node.from,
                 Math.min(node.to, state.doc.length) - 1);
               const toLine   = state.doc.lineAt(endPos);
-              const solo = fromLine.number === toLine.number;
-              for (let ln = fromLine.number; ln <= toLine.number; ln++) {
+
+              for (const fenceLine of [fromLine, toLine]) {
+                if (!active.has(fenceLine.number)) {
+                  // Explicit full-line replace + height-collapse, same dual
+                  // pattern as Table's collapsed rows and folded headings
+                  // (foldPlugin) elsewhere in this file — the generic CodeMark
+                  // hiding further down would already blank the ``` glyphs, but
+                  // this also clears any leftover CodeInfo language text (e.g.
+                  // "js" from ```js) and is the more robust approach.
+                  decs.push({ from: fenceLine.from, to: fenceLine.to, dec: Decoration.replace({}) });
+                  lineDecs.push({ from: fenceLine.from,
+                    dec: Decoration.line({ class: 'cm-code-fence-hidden' }) });
+                }
+              }
+
+              const contentFromLn = fromLine.number + 1;
+              const contentToLn   = toLine.number - 1;
+              for (let ln = contentFromLn; ln <= contentToLn; ln++) {
                 const line = state.doc.line(ln);
                 let cls = 'cm-code-block';
-                if (solo) cls += ' cm-code-block-solo';
-                else if (ln === fromLine.number) cls += ' cm-code-block-first';
-                else if (ln === toLine.number) cls += ' cm-code-block-last';
+                if (contentFromLn === contentToLn) cls += ' cm-code-block-solo';
+                else if (ln === contentFromLn) cls += ' cm-code-block-first';
+                else if (ln === contentToLn) cls += ' cm-code-block-last';
                 lineDecs.push({ from: line.from, dec: Decoration.line({ class: cls }) });
               }
             } catch (_) {}
@@ -1696,6 +1727,7 @@ function createEditor(parent, content) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 const root = document.documentElement;
 root.style.setProperty('--md-font', init.font || '');
+root.style.setProperty('--code-font', init.codeFont || '');
 root.style.setProperty('--md-font-size', (init.fontSize || 14) + 'px');
 
 // ── Breadcrumb ────────────────────────────────────────────────────────────────
@@ -1833,8 +1865,9 @@ window.addEventListener('message', ev => {
       break;
     }
     case 'font-update':
-      if (msg.font)     root.style.setProperty('--md-font', msg.font);
-      if (msg.fontSize) root.style.setProperty('--md-font-size', msg.fontSize);
+      if (msg.font)      root.style.setProperty('--md-font', msg.font);
+      if (msg.codeFont !== undefined) root.style.setProperty('--code-font', msg.codeFont);
+      if (msg.fontSize)  root.style.setProperty('--md-font-size', msg.fontSize);
       // Changing the font can change line-height/character metrics after CM6
       // already measured layout once — see the comment by the initial
       // requestMeasure() call above. Re-measure so drawSelection() (and cursor

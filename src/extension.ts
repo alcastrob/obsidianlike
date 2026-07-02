@@ -507,6 +507,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       vscode.workspace.getConfiguration('vaultTool').get<string>('markdownFont', '').trim() ||
       'var(--vscode-editor-font-family)';
 
+    const getCodeFont = (): string =>
+      vscode.workspace.getConfiguration('vaultTool').get<string>('codeFont', '').trim();
+
     const getFontSize = (): number =>
       vscode.workspace.getConfiguration('editor').get<number>('fontSize', 14);
 
@@ -537,6 +540,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     webviewPanel.webview.html = this.buildHtml(
       document.getText(),
       getFont(),
+      getCodeFont(),
       getFontSize(),
       webviewPanel.webview.cspSource,
       scriptUri.toString(),
@@ -572,10 +576,12 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     const subs: vscode.Disposable[] = [
       vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('vaultTool.markdownFont') ||
+            e.affectsConfiguration('vaultTool.codeFont') ||
             e.affectsConfiguration('editor.fontSize')) {
           webviewPanel.webview.postMessage({
             type: 'font-update',
             font: getFont(),
+            codeFont: getCodeFont(),
             fontSize: getFontSize() + 'px',
           });
         }
@@ -832,6 +838,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
   private buildHtml(
     content: string,
     font: string,
+    codeFont: string,
     fontSize: number,
     cspSource: string,
     scriptUri: string,
@@ -839,7 +846,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     imageMap:  Record<string, string> = {},
     breadcrumb: Array<{ name: string; fsPath: string }> = []
   ): string {
-    const init = JSON.stringify({ content, font, fontSize, noteIndex, title, imageMap, breadcrumb });
+    const init = JSON.stringify({ content, font, codeFont, fontSize, noteIndex, title, imageMap, breadcrumb });
     return `<!DOCTYPE html>
 <html lang="es">
 <head>
