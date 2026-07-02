@@ -77,8 +77,20 @@
       {
         "command": "vaultTool.toggleSourceMode",
         "title": "Vault Tool: Alternar vista fuente / WYSIWYG"
+      },
+      {
+        "command": "vaultTool.insertAttachment",
+        "title": "Vault Tool: Insertar como adjunto en la nota activa"
       }
     ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "vaultTool.insertAttachment",
+          "group": "6_copypath"
+        }
+      ]
+    },
     "configurationDefaults": {
       "breadcrumbs.enabled": false
     }

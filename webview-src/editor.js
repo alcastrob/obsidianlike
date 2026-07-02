@@ -224,6 +224,50 @@ const vsTheme = EditorView.theme({
     fontSize: '0.9em',
   },
   '.cm-transclusion-error': { color: 'var(--text-error, #e06c75)' },
+  // Standalone inline code (`text`) — a small chip, same look as before this
+  // was split out of mdHighlight's tags.monospace spec into a stable class name.
+  '.cm-inline-code': {
+    fontFamily: 'var(--font-monospace, var(--vscode-editor-font-family, monospace))',
+    fontSize: '0.88em',
+    background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)))',
+    color: 'var(--code-normal, inherit)',
+    padding: '1px 4px', borderRadius: '3px',
+  },
+  // Fenced code blocks (```...```) — line classes added in livePreviewPlugin's
+  // FencedCode handling, one per line of the block (fence-open/-close lines
+  // included), so the whole block renders as a single cohesive box instead of
+  // tags.monospace's chip styling being applied per-visual-line (CM6 can't
+  // render one Decoration.mark spanning multiple lines as a single element, so
+  // a multi-line highlighted range always gets fragmented into one <span> per
+  // line — with the chip's own background+padding+radius, that looked like a
+  // stack of disconnected pills rather than one block).
+  '.cm-code-block': {
+    fontFamily: 'var(--font-monospace, var(--vscode-editor-font-family, monospace))',
+    fontSize: '0.88em',
+    background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)))',
+    color: 'var(--code-normal, inherit)',
+    borderLeft: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
+    borderRight: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
+    padding: '0 14px',
+  },
+  '.cm-code-block-first': {
+    borderTop: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
+    borderRadius: '6px 6px 0 0',
+    paddingTop: '8px', marginTop: '6px',
+  },
+  '.cm-code-block-last': {
+    borderBottom: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
+    borderRadius: '0 0 6px 6px',
+    paddingBottom: '8px', marginBottom: '10px',
+  },
+  '.cm-code-block-solo': {
+    border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
+    borderRadius: '6px',
+    paddingTop: '8px', paddingBottom: '8px', marginTop: '6px', marginBottom: '10px',
+  },
+  // Cancels the standalone inline-code chip look for CodeText found inside a
+  // fenced block's own box (see the comment on .cm-inline-code / mdHighlight above).
+  '.cm-code-block .cm-inline-code': { background: 'none', padding: '0', borderRadius: '0' },
   '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
   '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
@@ -285,12 +329,14 @@ const mdHighlight = HighlightStyle.define([
   { tag: tags.url,
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
     textDecoration: 'underline', textUnderlineOffset: '2px' },
-  { tag: tags.monospace,
-    fontFamily: 'var(--font-monospace, var(--vscode-editor-font-family, monospace))',
-    fontSize: '0.88em',
-    background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)))',
-    color: 'var(--code-normal, inherit)',
-    padding: '1px 4px', borderRadius: '3px' },
+  // class-only (see the heading entries above for why): tags.monospace matches
+  // BOTH standalone inline code (`text`) and a fenced code block's own content
+  // (lezer-markdown's default styleTags maps "InlineCode CodeText" to the same
+  // tag) — the two need different visual treatment (a small chip vs. one
+  // cohesive block), so the actual CSS lives in vsTheme under .cm-inline-code,
+  // with a `.cm-code-block .cm-inline-code` override cancelling the chip look
+  // specifically inside a fenced block (see the comment there).
+  { tag: tags.monospace, class: 'cm-inline-code' },
   { tag: tags.quote,
     borderLeft: '3px solid var(--blockquote-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.4)))',
     paddingLeft: '12px',
@@ -810,8 +856,33 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               } catch (_) {}
               return false;
             }
-            // Not a tasks block — fall through so normal FencedCode/CodeMark/
-            // CodeText handling (unchanged) still applies.
+            // Not a tasks block: give every line of the block (fence-open,
+            // content, fence-close) a shared box-style line class — see the
+            // .cm-code-block comment in vsTheme for why this is needed instead
+            // of just letting tags.monospace's chip styling apply per line.
+            // Added unconditionally (active or not), same as heading line
+            // classes above, so the box stays visible while editing inside it —
+            // only the ``` fence marks reveal/hide per the active-line check
+            // further down, same as any other syntax marker.
+            try {
+              const fromLine = state.doc.lineAt(node.from);
+              const endPos   = Math.max(node.from,
+                Math.min(node.to, state.doc.length) - 1);
+              const toLine   = state.doc.lineAt(endPos);
+              const solo = fromLine.number === toLine.number;
+              for (let ln = fromLine.number; ln <= toLine.number; ln++) {
+                const line = state.doc.line(ln);
+                let cls = 'cm-code-block';
+                if (solo) cls += ' cm-code-block-solo';
+                else if (ln === fromLine.number) cls += ' cm-code-block-first';
+                else if (ln === toLine.number) cls += ' cm-code-block-last';
+                lineDecs.push({ from: line.from, dec: Decoration.line({ class: cls }) });
+              }
+            } catch (_) {}
+            // Fall through so normal FencedCode/CodeMark/CodeText handling
+            // (unchanged) still applies — CodeMark hiding on non-active lines,
+            // CodeText's tags.monospace highlighting (now visually cancelled
+            // inside .cm-code-block, see vsTheme).
           }
 
           // ── Headings — line class for Obsidian theme (active + inactive) ──
@@ -1343,6 +1414,39 @@ function isWikiLinkEl(target, editorDom) {
 }
 
 const linkClickHandler = EditorView.domEventHandlers({
+  // Registered here (via EditorView.domEventHandlers, same as mousedown/click
+  // below) rather than as a raw document.addEventListener, because CM6's own
+  // EditorView has a BUILT-IN 'drop' handler (@codemirror/view's internal
+  // `handlers.drop`) that runs on the editor's contentDOM: when it sees
+  // `event.dataTransfer.files.length > 0`, it reads each file as *text*
+  // (FileReader.readAsText) and inserts the result into the document — garbage
+  // for a binary file like a .docx. CM6 composes handlers per event type as
+  // [...extension-registered handlers, ...its own built-in ones] and stops at
+  // the first one that returns a truthy value (calling preventDefault() for
+  // it), so registering our own drop handling as an extension here — exactly
+  // like this file's other custom mousedown/click handling — runs *before*
+  // and pre-empts CM6's default text-insert behavior, rather than racing
+  // against it as a separately-bound, later-in-bubble-order raw listener would.
+  dragenter(e) {
+    if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return false;
+    return true;
+  },
+  dragover(e) {
+    if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return false;
+    e.dataTransfer.dropEffect = 'copy';
+    return true;
+  },
+  drop(e, view) {
+    if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return false;
+    console.log('[vault-tool] CM6 drop handler: files=', e.dataTransfer.files.length);
+    const coordPos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    pendingDropPos = coordPos != null ? coordPos : view.state.selection.main.head;
+    const files = Array.from(e.dataTransfer.files);
+    Promise.all(files.map(f => readFileAsDataUrl(f).then(data => ({ name: f.name, data }))))
+      .then(payload => vscode.postMessage({ type: 'drop-files', files: payload }))
+      .catch(() => { pendingDropPos = null; });
+    return true;
+  },
   // mousedown: prevent CM6 cursor placement when clicking navigable elements
   mousedown(e, view) {
     const wikiEl = isWikiLinkEl(e.target, view.dom);
@@ -1812,15 +1916,13 @@ container.addEventListener('paste', e => {
 });
 
 // ── Drag & drop files (OS Explorer/Finder, or VS Code's own Explorer) ─────────
-// Without a `dragover` handler that calls preventDefault(), the browser never
-// considers this a valid drop target (per the HTML5 DnD spec, `drop` only fires
-// on an element whose `dragover` default was prevented) — so an OS file drag
-// over this webview used to fall through entirely to VS Code's own default of
-// opening the dropped file as a new editor tab. Claiming both events here lets
-// the webview handle it instead: save the file into the configured attachments
-// dir (host-side, mirroring paste-image but keeping the original filename) and
-// insert `![[filename]]` at the drop position — same embed convention already
-// used for pasted images and note transclusions.
+// The actual file-saving/embed-insert logic lives in `linkClickHandler`'s
+// dragenter/dragover/drop CM6 handlers above (registered that way specifically
+// to run before CM6's own built-in file-as-text drop handling — see the comment
+// there). `readFileAsDataUrl`/`pendingDropPos` are shared by that handler and by
+// the plain `document`-level fallback below, which only matters for a drop
+// landing outside the CM6 editor's own DOM (e.g. the title/breadcrumb area above
+// it, which CM6's contentDOM-scoped handler never sees).
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1832,13 +1934,27 @@ function readFileAsDataUrl(file) {
 
 let pendingDropPos = null;
 
-container.addEventListener('dragover', e => {
-  if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'copy';
-});
+// Temporary diagnostics: confirms whether an external file drag is reaching the
+// webview's DOM *at all*. Check via Command Palette → "Developer: Open Webview
+// Developer Tools" (with the note panel focused) while performing the drag.
+for (const evt of ['dragenter', 'dragover', 'drop']) {
+  document.addEventListener(evt, e => {
+    const hasFiles = !!(e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files'));
+    console.log(`[vault-tool] document ${evt}: hasFiles=${hasFiles} defaultPrevented=${e.defaultPrevented} target=${e.target && e.target.tagName}`);
+  }, true); // capture phase, so this always logs even if something else stops propagation first
+}
 
-container.addEventListener('drop', e => {
+for (const evt of ['dragenter', 'dragover']) {
+  document.addEventListener(evt, e => {
+    if (e.defaultPrevented) return; // already claimed by linkClickHandler's CM6-level handler
+    if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+}
+
+document.addEventListener('drop', e => {
+  if (e.defaultPrevented) return; // already claimed by linkClickHandler's CM6-level handler
   if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
   e.preventDefault();
   const coordPos = view.posAtCoords({ x: e.clientX, y: e.clientY });

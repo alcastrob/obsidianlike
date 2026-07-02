@@ -73,6 +73,19 @@ function getSaveDir(docFsPath) {
         default: return vaultRoot;
     }
 }
+// Keeps the original filename when possible (unlike paste-image's timestamped
+// name, a dropped/attached file's real name is known and worth preserving),
+// only disambiguating with a " N" suffix on an actual collision. Shared by the
+// `drop-files` message handler and the `vaultTool.insertAttachment` command.
+function uniqueAttachmentName(saveDir, filename) {
+    const ext = path.extname(filename);
+    const base = path.basename(filename, ext);
+    let candidate = filename;
+    for (let n = 1; fs.existsSync(path.join(saveDir, candidate)); n++) {
+        candidate = `${base} ${n}${ext}`;
+    }
+    return candidate;
+}
 function getAttachmentRoots(docUri) {
     const cfg = vscode.workspace.getConfiguration('vaultTool');
     const location = cfg.get('attachmentsLocation', 'vault');
@@ -133,15 +146,34 @@ function getThemeCss() {
         return fs.readFileSync(exactPath, 'utf-8');
     }
     catch { /* fall through to case-insensitive lookup */ }
+    // Case-insensitive fallback, matched by *name only* — deliberately not gated on
+    // `Dirent.isDirectory()` this time. A first attempt at this fallback did gate on
+    // it and still failed on a real macOS vault with the theme folder visibly present:
+    // readdirSync's Dirent type can misreport for reparse points / cloud-sync
+    // placeholders (iCloud Drive, Dropbox, OneDrive) / network or FUSE mounts — the
+    // exact same class of bug findImageFiles already has to work around elsewhere in
+    // this file, and it isn't actually Windows-specific, just more commonly hit there.
+    // Since the only thing that matters here is whether theme.css is readable at the
+    // expected path, skip the dirent-type check entirely and just try reading it for
+    // every name-matching candidate.
+    let entries = [];
     try {
-        const entries = fs.readdirSync(themesDir, { withFileTypes: true });
-        const match = entries.find(e => e.isDirectory() && e.name.toLowerCase() === themeName.toLowerCase());
-        if (match) {
-            return fs.readFileSync(path.join(themesDir, match.name, 'theme.css'), 'utf-8');
-        }
+        entries = fs.readdirSync(themesDir);
     }
     catch { /* .obsidian/themes itself missing or unreadable */ }
-    vscode.window.showWarningMessage(`Vault Tool: no se encontró el tema "${themeName}" en .obsidian/themes — revisa mayúsculas/minúsculas del nombre.`);
+    for (const name of entries) {
+        if (name.toLowerCase() !== themeName.toLowerCase()) {
+            continue;
+        }
+        try {
+            return fs.readFileSync(path.join(themesDir, name, 'theme.css'), 'utf-8');
+        }
+        catch { /* keep looking */ }
+    }
+    vscode.window.showWarningMessage(`Vault Tool: no se encontró el tema "${themeName}" en "${themesDir}". ` +
+        (entries.length > 0
+            ? `Carpetas encontradas ahí: ${entries.join(', ')}.`
+            : `No se pudo leer esa carpeta — comprueba que .obsidian/themes existe en el vault que tienes abierto como carpeta de workspace.`));
     return '';
 }
 // ── Fixing up wiki-links after a note is renamed or moved ─────────────────────
@@ -771,12 +803,7 @@ class MarkdownDocumentProvider {
                             try {
                                 const base64 = f.data.replace(/^data:[^;]*;base64,/, '');
                                 const buffer = Buffer.from(base64, 'base64');
-                                const ext = path.extname(f.name);
-                                const base = path.basename(f.name, ext);
-                                let filename = f.name;
-                                for (let n = 1; fs.existsSync(path.join(saveDir, filename)); n++) {
-                                    filename = `${base} ${n}${ext}`;
-                                }
+                                const filename = uniqueAttachmentName(saveDir, f.name);
                                 fs.writeFileSync(path.join(saveDir, filename), buffer);
                                 const uri = webviewPanel.webview.asWebviewUri(vscode.Uri.file(path.join(saveDir, filename))).toString();
                                 results.push({ filename, uri });
@@ -917,7 +944,52 @@ function activate(context) {
         const panel = activePanels.find(p => p.active) ?? activePanels.find(p => p.visible);
         panel?.webview.postMessage({ type: 'toggle-source-mode' });
     });
-    context.subscriptions.push(listNotesCmd, openKanbanCmd, toggleSourceCmd);
+    // Fallback for drag-and-drop: VS Code shows its own drag-tracking overlay above
+    // every webview for the whole duration of any drag targeting the editor area, so
+    // the `dragover`/`drop` listeners in editor.js never actually see an OS file
+    // dropped from the Explorer/Finder — see the CLAUDE.md section on this. Invoked
+    // from the Explorer's context menu instead: copies the right-clicked file(s) into
+    // the *active* note's attachments dir and inserts one `![[filename]]` per file at
+    // its cursor, reusing the exact same `files-dropped` reply the webview already
+    // knows how to handle (falls back to inserting at the current selection when
+    // `pendingDropPos` is null, which it always is here since no drop occurred).
+    const insertAttachmentCmd = vscode.commands.registerCommand('vaultTool.insertAttachment', async (clicked, selected) => {
+        const uris = selected && selected.length > 0 ? selected : (clicked ? [clicked] : []);
+        if (uris.length === 0) {
+            vscode.window.showWarningMessage('Selecciona uno o más archivos en el explorador primero.');
+            return;
+        }
+        const panel = activePanels.find(p => p.active) ?? activePanels.find(p => p.visible) ??
+            (activePanels.length === 1 ? activePanels[0] : undefined);
+        if (!panel) {
+            vscode.window.showWarningMessage('Abre primero la nota donde quieres insertar el adjunto.');
+            return;
+        }
+        const docPath = [...panelsByPath.entries()].find(([, p]) => p === panel)?.[0];
+        if (!docPath) {
+            return;
+        }
+        const saveDir = getSaveDir(docPath);
+        if (!fs.existsSync(saveDir)) {
+            fs.mkdirSync(saveDir, { recursive: true });
+        }
+        const results = [];
+        for (const src of uris) {
+            try {
+                const filename = uniqueAttachmentName(saveDir, path.basename(src.fsPath));
+                const destPath = path.join(saveDir, filename);
+                fs.copyFileSync(src.fsPath, destPath);
+                results.push({ filename, uri: panel.webview.asWebviewUri(vscode.Uri.file(destPath)).toString() });
+            }
+            catch (err) {
+                vscode.window.showErrorMessage(`No se pudo adjuntar "${src.fsPath}": ${err}`);
+            }
+        }
+        if (results.length > 0) {
+            panel.webview.postMessage({ type: 'files-dropped', files: results });
+        }
+    });
+    context.subscriptions.push(listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd);
 }
 function deactivate() { }
 //# sourceMappingURL=extension.js.map
