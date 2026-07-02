@@ -1095,6 +1095,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     const qp = vscode.window.createQuickPick<NoteQuickPickItem>();
     qp.placeholder = 'Escriba el nombre de la nota para abrir o crear…';
+    // QuickPick has no footer slot like Obsidian's own dialog does — `prompt`
+    // (shown below the input box, above the list) is the closest equivalent
+    // VS Code exposes, so the keybinding hints go there instead. Wording
+    // reflects what's actually wired up here, not a verbatim copy of
+    // Obsidian's own footer: there's no Shift+Enter here since "create" is a
+    // regular, always-visible list item instead (see onDidChangeValue below).
+    qp.prompt = '↑↓ navegar · ↵ abrir · Ctrl+↵ nueva pestaña · Ctrl+Alt+↵ dividir a la derecha · Esc descartar';
     qp.matchOnDescription = true;
     qp.items = recentItems.length > 0 ? recentItems : allItems;
     currentQuickPick = qp;
