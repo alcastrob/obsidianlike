@@ -837,103 +837,81 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             const info = infoNode ? state.doc.sliceString(infoNode.from, infoNode.to).trim() : '';
             // The closing ``` doesn't exist as a second CodeMark until the fence is
             // actually closed — while still open (being typed), lezer-markdown
-            // extends the node all the way to EOF/doc.length. Deriving "the closing
-            // line" from node.to/doc.length (as an earlier version of both branches
-            // below did) instead of this mark's real position misidentifies the
-            // *previous* (real content) line as the closing fence the moment the
-            // cursor moves onto a fresh empty line past it (node.to lands exactly at
-            // doc.length, and pulling back by 1 to stay inside the node walks past
-            // that empty line and back into the content line before it). That line
-            // then gets wrongly collapsed to zero height — severe enough to corrupt
-            // CM6's own cursor/selection tracking (frozen input: arrow keys and
-            // clicks doing nothing, until the document is closed and reopened).
-            // Fix: only ever do any of this once there's a real second CodeMark to
-            // anchor on; while still open, just fall through to the plain generic
-            // per-node handling below (which still correctly hides the *opening*
-            // marker on non-active lines — nothing special needed for that part).
+            // extends the node all the way to EOF/doc.length, which makes deriving
+            // "the closing line" from that positional math unreliable (see git log
+            // for the details of a real freeze this caused). So this whole node is
+            // now treated exactly like Table/```tasks```: fully raw (no marker
+            // hiding, no box styling at all — `return false` so nothing further
+            // down this tree walk touches its children either) whenever either
+            // (a) there's no second CodeMark yet, i.e. the fence isn't closed, or
+            // (b) the cursor is on any line from the opening fence to the closing
+            // one inclusive. Only a closed block with the cursor entirely outside
+            // it gets the rendered treatment.
             const marks = node.node.getChildren('CodeMark');
             const closeMark = marks.length >= 2 ? marks[marks.length - 1] : null;
+            if (!closeMark) { return false; }
+
+            const fromLine = state.doc.lineAt(node.from);
+            const toLine   = state.doc.lineAt(closeMark.from);
+            let isActive = false;
+            for (let i = fromLine.number; i <= toLine.number; i++) {
+              if (active.has(i)) { isActive = true; break; }
+            }
+            if (isActive) { return false; }
 
             if (info === 'tasks') {
-              if (closeMark) {
-                try {
-                  const fromLine = state.doc.lineAt(node.from);
-                  const toLine   = state.doc.lineAt(closeMark.from);
+              try {
+                const codeTextNode = node.node.getChild('CodeText');
+                const queryText = codeTextNode
+                  ? state.doc.sliceString(codeTextNode.from, codeTextNode.to).trim()
+                  : '';
 
-                  let isActive = false;
-                  for (let i = fromLine.number; i <= toLine.number; i++) {
-                    if (active.has(i)) { isActive = true; break; }
-                  }
-                  if (!isActive) {
-                    const codeTextNode = node.node.getChild('CodeText');
-                    const queryText = codeTextNode
-                      ? state.doc.sliceString(codeTextNode.from, codeTextNode.to).trim()
-                      : '';
+                const cached = tasksQueryCache.get(queryText);
+                if (!cached) { requestTasksQuery(queryText); }
 
-                    const cached = tasksQueryCache.get(queryText);
-                    if (!cached) { requestTasksQuery(queryText); }
-
-                    decs.push({ from: fromLine.from, to: fromLine.to,
-                      dec: Decoration.replace({ widget: new TasksQueryWidget(queryText, cached) }) });
-                    for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
-                      const line = state.doc.line(ln);
-                      decs.push({ from: line.from, to: line.to,
-                        dec: Decoration.replace({}) });
-                      lineDecs.push({ from: line.from,
-                        dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
-                    }
-                  }
-                } catch (_) {}
-              }
+                decs.push({ from: fromLine.from, to: fromLine.to,
+                  dec: Decoration.replace({ widget: new TasksQueryWidget(queryText, cached) }) });
+                for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
+                  const line = state.doc.line(ln);
+                  decs.push({ from: line.from, to: line.to,
+                    dec: Decoration.replace({}) });
+                  lineDecs.push({ from: line.from,
+                    dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+                }
+              } catch (_) {}
               return false;
             }
 
-            // Not a tasks block. Once the fence is confirmed closed: (1) the
-            // ``` fence-open/-close lines collapse to zero height (not just
-            // text-hidden) when not the active line, mirroring Obsidian — so
-            // they don't leave behind an empty, padded-looking line above/below
-            // the block; (2) every remaining *content* line gets a shared
-            // box-style line class (.cm-code-block/-first/-last/-solo — see
-            // vsTheme) so the block renders as one cohesive box. The box
-            // classes are added unconditionally (active or not), same as
-            // heading line classes above, so the box stays visible while
-            // editing inside it — a fence line only reverts to plain,
-            // uncollapsed raw text while it's itself the active line.
-            if (closeMark) {
-              try {
-                const fromLine = state.doc.lineAt(node.from);
-                const toLine   = state.doc.lineAt(closeMark.from);
+            // Regular (non-tasks) fenced code block, closed, cursor outside it
+            // entirely: the ``` fence-open/-close lines collapse to zero height
+            // (not just text-hidden), mirroring Obsidian — so they don't leave
+            // behind an empty, padded-looking line above/below the block —
+            // and every remaining *content* line gets a shared box-style line
+            // class (.cm-code-block/-first/-last/-solo — see vsTheme) so the
+            // block renders as one cohesive box.
+            try {
+              for (const fenceLine of [fromLine, toLine]) {
+                // Explicit full-line replace + height-collapse, same dual
+                // pattern as Table's collapsed rows and folded headings
+                // (foldPlugin) elsewhere in this file — also clears any
+                // CodeInfo language text (e.g. "js" from ```js).
+                decs.push({ from: fenceLine.from, to: fenceLine.to, dec: Decoration.replace({}) });
+                lineDecs.push({ from: fenceLine.from,
+                  dec: Decoration.line({ class: 'cm-code-fence-hidden' }) });
+              }
 
-                for (const fenceLine of [fromLine, toLine]) {
-                  if (!active.has(fenceLine.number)) {
-                    // Explicit full-line replace + height-collapse, same dual
-                    // pattern as Table's collapsed rows and folded headings
-                    // (foldPlugin) elsewhere in this file — the generic CodeMark
-                    // hiding further down would already blank the ``` glyphs, but
-                    // this also clears any leftover CodeInfo language text (e.g.
-                    // "js" from ```js) and is the more robust approach.
-                    decs.push({ from: fenceLine.from, to: fenceLine.to, dec: Decoration.replace({}) });
-                    lineDecs.push({ from: fenceLine.from,
-                      dec: Decoration.line({ class: 'cm-code-fence-hidden' }) });
-                  }
-                }
-
-                const contentFromLn = fromLine.number + 1;
-                const contentToLn   = toLine.number - 1;
-                for (let ln = contentFromLn; ln <= contentToLn; ln++) {
-                  const line = state.doc.line(ln);
-                  let cls = 'cm-code-block';
-                  if (contentFromLn === contentToLn) cls += ' cm-code-block-solo';
-                  else if (ln === contentFromLn) cls += ' cm-code-block-first';
-                  else if (ln === contentToLn) cls += ' cm-code-block-last';
-                  lineDecs.push({ from: line.from, dec: Decoration.line({ class: cls }) });
-                }
-              } catch (_) {}
-            }
-            // Fall through so normal FencedCode/CodeMark/CodeText handling
-            // (unchanged) still applies — CodeMark hiding on non-active lines,
-            // CodeText's tags.monospace highlighting (now visually cancelled
-            // inside .cm-code-block, see vsTheme).
+              const contentFromLn = fromLine.number + 1;
+              const contentToLn   = toLine.number - 1;
+              for (let ln = contentFromLn; ln <= contentToLn; ln++) {
+                const line = state.doc.line(ln);
+                let cls = 'cm-code-block';
+                if (contentFromLn === contentToLn) cls += ' cm-code-block-solo';
+                else if (ln === contentFromLn) cls += ' cm-code-block-first';
+                else if (ln === contentToLn) cls += ' cm-code-block-last';
+                lineDecs.push({ from: line.from, dec: Decoration.line({ class: cls }) });
+              }
+            } catch (_) {}
+            return false;
           }
 
           // ── Headings — line class for Obsidian theme (active + inactive) ──
