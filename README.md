@@ -1,12 +1,12 @@
-# Vault Tool — extensión local de VS Code / Windsurf
+# Obsidian-like — extensión local de VS Code / Windsurf
 
 Extensión de VS Code / Windsurf que actúa como vault local tipo Obsidian.
 Se instala localmente desde un `.vsix`, sin marketplace ni servidores externos.
 
 ## Resolución de imágenes (`![[archivo.png]]`)
 
-1. Se busca primero en la carpeta de adjuntos configurada (`vaultTool.attachmentsLocation` /
-   `vaultTool.attachmentsFolder`).
+1. Se busca primero en la carpeta de adjuntos configurada (`obsidianLike.attachmentsLocation` /
+   `obsidianLike.attachmentsFolder`).
 2. Si no está ahí, se busca recursivamente en toda la bóveda (primer archivo con ese
    nombre encontrado, asumiendo nombres únicos).
 3. Si no se encuentra en ningún sitio, se muestra el texto del enlace tal cual, sin
@@ -68,7 +68,7 @@ copiarlo a la carpeta de adjuntos e insertar `![[archivo]]` en el punto donde
 se suelta — igual que en Obsidian — pero VS Code puede interceptar el drop
 antes de que llegue al webview (ver detalle en `CLAUDE.md`, sección "Drag &
 drop"; no confirmado como 100% fiable). El camino garantizado: clic derecho
-sobre uno o varios archivos en el explorador de VS Code → "Vault Tool:
+sobre uno o varios archivos en el explorador de VS Code → "Obsidian-like:
 Insertar como adjunto en la nota activa".
 
 ## Código inline y bloques de código
@@ -78,24 +78,38 @@ modo fuente, igual que otros marcadores markdown. Los bloques ` ```código``` `
 se renderizan como una caja unificada (no una fila de "píldoras" por línea) y
 las líneas ` ``` ` de apertura/cierre desaparecen del todo mientras no estás
 editando dentro del bloque. La fuente monoespaciada usada en ambos casos es
-configurable por separado de la fuente general (`vaultTool.codeFont`).
+configurable por separado de la fuente general (`obsidianLike.codeFont`), y su
+tamaño también (`obsidianLike.codeFontSize`, 14px por defecto).
+
+## Cabeceras (`#`, `##`, `###`...)
+
+La barra de color vertical junto a cada cabecera reproduce el estilo del tema
+de Obsidian configurado (color, ancho, alto igual al del texto). El pequeño
+indicador de nivel ("H1", "H2"...) permanece oculto y solo aparece al pasar el
+ratón sobre la cabecera (la barra o el propio texto), igual que en Obsidian —
+también sirve para plegar/desplegar la sección. Detalle técnico completo en
+`CLAUDE.md`.
 
 ## Tareas (`- [ ] ...`) — integración con "Obsidian-Like Tasks"
 
 Las líneas de checkbox se reconocen y renderizan como en Obsidian: checkbox real (clicable),
-tachado al completar, fecha vencida en rojo. Los bloques ` ```tasks ` (con la misma sintaxis
-de consulta que el plugin Tasks de Obsidian — `not done`, `group by`, filtros con expresiones
-JS, etc.) se renderizan como una lista de tareas real dentro del propio editor.
+tachado al completar, fecha vencida en rojo, y un botón ✏️ junto a cada una para editarla (abre
+el diálogo "Create or edit Task" de la extensión de Tasks, ya relleno con los datos de esa tarea
+concreta). Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el plugin Tasks de
+Obsidian — `not done`, `group by`, filtros con expresiones JS, etc.) se renderizan como una lista
+de tareas real dentro del propio editor, cada fila con su propio checkbox y botón de editar.
 
 Esto funciona como **dependencia opcional** de la extensión hermana `angelCastro.obsidian-like-tasks`
-(repo `vscode-tasks`): si no está instalada, los checkboxes siguen funcionando con un toggle
-simple `[ ]`↔`[x]` sin recurrencia, y los bloques `tasks` no se renderizan. Si está instalada,
-toda la lógica de parseo/recurrencia/queries vive ahí — Vault Tool solo pinta el resultado y
-reenvía los clics. Detalle técnico completo en `CLAUDE.md`.
+(repo `obsidianlike_tasks`): si no está instalada, los checkboxes siguen funcionando con un toggle
+simple `[ ]`↔`[x]` sin recurrencia, los bloques `tasks` no se renderizan, y el botón de editar
+avisa de que hace falta esa extensión en vez de abrir nada. Si está instalada, toda la lógica de
+parseo/recurrencia/queries/edición vive ahí — Obsidian-like solo pinta el resultado y reenvía los
+clics (`{ type: 'edit-task', line }` / `{ type: 'edit-task-at-location', path, line }` para el
+botón de editar). Detalle técnico completo en `CLAUDE.md`.
 
 ## Compatibilidad multiplataforma (Windows / macOS)
 
-La búsqueda del tema de Obsidian configurado (`vaultTool.obsidianTheme`) es
+La búsqueda del tema de Obsidian configurado (`obsidianLike.obsidianTheme`) es
 insensible a mayúsculas/minúsculas y no depende de que el sistema de ficheros
 reporte correctamente si una entrada es un directorio (falla en vaults
 sincronizados por iCloud/Dropbox/OneDrive) — si aun así no se encuentra,

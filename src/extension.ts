@@ -41,7 +41,7 @@ function findImageFiles(dir: string, fileList: string[] = []): string[] {
 }
 
 function getSaveDir(docFsPath: string): string {
-  const cfg = vscode.workspace.getConfiguration('vaultTool');
+  const cfg = vscode.workspace.getConfiguration('obsidianLike');
   const location = cfg.get<string>('attachmentsLocation', 'vault');
   const folder   = cfg.get<string>('attachmentsFolder', 'attachments');
   const docDir   = path.dirname(docFsPath);
@@ -70,7 +70,7 @@ function uniqueAttachmentName(saveDir: string, filename: string): string {
 }
 
 function getAttachmentRoots(docUri: vscode.Uri): vscode.Uri[] {
-  const cfg = vscode.workspace.getConfiguration('vaultTool');
+  const cfg = vscode.workspace.getConfiguration('obsidianLike');
   const location = cfg.get<string>('attachmentsLocation', 'vault');
   const folder   = cfg.get<string>('attachmentsFolder', 'attachments');
   const docDir   = path.dirname(docUri.fsPath);
@@ -105,7 +105,7 @@ function getImageMap(webview: vscode.Webview, docUri: vscode.Uri): Record<string
 // lookup only works by accident on case-insensitive filesystems (default NTFS on
 // Windows). On a case-sensitive one (common for a vault synced onto macOS via
 // iCloud/Dropbox/git, or an explicitly case-sensitive APFS volume), a casing
-// mismatch between the `vaultTool.obsidianTheme` setting and the theme's actual
+// mismatch between the `obsidianLike.obsidianTheme` setting and the theme's actual
 // on-disk folder name makes the exact-case path silently miss, and the previous
 // bare `catch { return ''; }` swallowed that with no feedback — every heading/etc.
 // CSS var the theme defines (--h1-size, --h1-color, ...) then just never reaches
@@ -114,7 +114,7 @@ function getImageMap(webview: vscode.Webview, docUri: vscode.Uri): Record<string
 function getThemeCss(): string {
   const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!vaultRoot) { return ''; }
-  const themeName = vscode.workspace.getConfiguration('vaultTool').get<string>('obsidianTheme', '').trim();
+  const themeName = vscode.workspace.getConfiguration('obsidianLike').get<string>('obsidianTheme', '').trim();
   if (!themeName) { return ''; }
   const themesDir = path.join(vaultRoot, '.obsidian', 'themes');
 
@@ -139,7 +139,7 @@ function getThemeCss(): string {
   }
 
   vscode.window.showWarningMessage(
-    `Vault Tool: no se encontró el tema "${themeName}" en "${themesDir}". ` +
+    `Obsidian-like: no se encontró el tema "${themeName}" en "${themesDir}". ` +
     (entries.length > 0
       ? `Carpetas encontradas ahí: ${entries.join(', ')}.`
       : `No se pudo leer esa carpeta — comprueba que .obsidian/themes existe en el vault que tienes abierto como carpeta de workspace.`)
@@ -382,7 +382,7 @@ async function navigateToTarget(
 // exported API, instead of reimplementing its toggle/recurrence state machine.
 //
 // This is a soft dependency: no `extensionDependencies` entry in package.json, so
-// Vault Tool keeps working standalone if the Tasks extension isn't installed —
+// Obsidian-like keeps working standalone if the Tasks extension isn't installed —
 // `getTasksApi()` resolves to `undefined` and the `toggle-task` handler falls back
 // to `naiveToggleTaskLine()`.
 interface TaskDTO {
@@ -413,6 +413,13 @@ interface TasksExtensionApi {
   // only exposes the single-checkbox API above.
   renderTasksQuery?(queryText: string): TasksQueryResultDTO;
   toggleTaskAtLocation?(path: string, line: number): Promise<void>;
+  // Opens the Tasks extension's own "Create or edit Task" webview dialog for the
+  // task at (path, line) and applies the result. Added so the pencil icon next to
+  // a task checkbox (see `edit-task`/`edit-task-at-location` below) has somewhere
+  // to go — this editor's own `activeTextEditor`-based cursor tracking doesn't
+  // exist here (we're a CustomTextEditorProvider, not a TextEditor), so the Tasks
+  // extension has no way to know which task the user meant unless told explicitly.
+  editTaskAtLocation?(path: string, line: number): Promise<void>;
   onDidChangeTasks?: vscode.Event<void>;
 }
 
@@ -524,11 +531,14 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     recordNoteOpened(document.uri.fsPath);
 
     const getFont = (): string =>
-      vscode.workspace.getConfiguration('vaultTool').get<string>('markdownFont', '').trim() ||
+      vscode.workspace.getConfiguration('obsidianLike').get<string>('markdownFont', '').trim() ||
       'var(--vscode-editor-font-family)';
 
     const getCodeFont = (): string =>
-      vscode.workspace.getConfiguration('vaultTool').get<string>('codeFont', '').trim();
+      vscode.workspace.getConfiguration('obsidianLike').get<string>('codeFont', '').trim();
+
+    const getCodeFontSize = (): number =>
+      vscode.workspace.getConfiguration('obsidianLike').get<number>('codeFontSize', 14);
 
     const getFontSize = (): number =>
       vscode.workspace.getConfiguration('editor').get<number>('fontSize', 14);
@@ -561,6 +571,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       document.getText(),
       getFont(),
       getCodeFont(),
+      getCodeFontSize(),
       getFontSize(),
       webviewPanel.webview.cspSource,
       scriptUri.toString(),
@@ -595,18 +606,20 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
     const subs: vscode.Disposable[] = [
       vscode.workspace.onDidChangeConfiguration(e => {
-        if (e.affectsConfiguration('vaultTool.markdownFont') ||
-            e.affectsConfiguration('vaultTool.codeFont') ||
+        if (e.affectsConfiguration('obsidianLike.markdownFont') ||
+            e.affectsConfiguration('obsidianLike.codeFont') ||
+            e.affectsConfiguration('obsidianLike.codeFontSize') ||
             e.affectsConfiguration('editor.fontSize')) {
           webviewPanel.webview.postMessage({
             type: 'font-update',
             font: getFont(),
             codeFont: getCodeFont(),
+            codeFontSize: getCodeFontSize() + 'px',
             fontSize: getFontSize() + 'px',
           });
         }
-        if (e.affectsConfiguration('vaultTool.attachmentsLocation') ||
-            e.affectsConfiguration('vaultTool.attachmentsFolder')) {
+        if (e.affectsConfiguration('obsidianLike.attachmentsLocation') ||
+            e.affectsConfiguration('obsidianLike.attachmentsFolder')) {
           webviewPanel.webview.options = {
             enableScripts: true,
             localResourceRoots: [
@@ -615,7 +628,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             ],
           };
         }
-        if (e.affectsConfiguration('vaultTool.obsidianTheme')) {
+        if (e.affectsConfiguration('obsidianLike.obsidianTheme')) {
           webviewPanel.webview.postMessage({ type: 'theme-css', css: getThemeCss() });
         }
       }),
@@ -805,6 +818,43 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             }
           })();
 
+        } else if (msg.type === 'edit-task') {
+          // Same document this panel is showing — unlike `toggle-task`, editing needs a
+          // workspace-relative path (not just the line text) because the Tasks extension's
+          // dialog is a WebviewPanel of its own, resolved async via WorkspaceEdit rather than
+          // a synchronous string replace.
+          (async () => {
+            try {
+              const tasksApi = await getTasksApi();
+              if (!tasksApi?.editTaskAtLocation) {
+                vscode.window.showInformationMessage(
+                  'Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.',
+                );
+                return;
+              }
+              const path = vscode.workspace.asRelativePath(document.uri, false);
+              await tasksApi.editTaskAtLocation(path, msg.line as number);
+            } catch (err) {
+              vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
+            }
+          })();
+
+        } else if (msg.type === 'edit-task-at-location') {
+          (async () => {
+            try {
+              const tasksApi = await getTasksApi();
+              if (!tasksApi?.editTaskAtLocation) {
+                vscode.window.showInformationMessage(
+                  'Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.',
+                );
+                return;
+              }
+              await tasksApi.editTaskAtLocation(msg.path as string, msg.line as number);
+            } catch (err) {
+              vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
+            }
+          })();
+
         } else if (msg.type === 'paste-image') {
           try {
             const base64  = (msg.data as string).replace(/^data:image\/[a-z]+;base64,/, '');
@@ -859,6 +909,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     content: string,
     font: string,
     codeFont: string,
+    codeFontSize: number,
     fontSize: number,
     cspSource: string,
     scriptUri: string,
@@ -866,7 +917,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     imageMap:  Record<string, string> = {},
     breadcrumb: Array<{ name: string; fsPath: string }> = []
   ): string {
-    const init = JSON.stringify({ content, font, codeFont, fontSize, noteIndex, title, imageMap, breadcrumb });
+    const init = JSON.stringify({ content, font, codeFont, codeFontSize, fontSize, noteIndex, title, imageMap, breadcrumb });
     return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -958,7 +1009,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 export function activate(context: vscode.ExtensionContext) {
   extensionUri = context.extensionUri;
   extensionContext = context;
-  const outputChannel = vscode.window.createOutputChannel('Vault Tool');
+  const outputChannel = vscode.window.createOutputChannel('Obsidian-like');
 
   buildNoteIndex();
   const mdWatcher = vscode.workspace.createFileSystemWatcher('**/*.md');
@@ -993,7 +1044,7 @@ export function activate(context: vscode.ExtensionContext) {
     outputChannel.appendLine(`Vault: ${vaultPath}\nNotas: ${notes.length}\n---`);
     notes.forEach(p => outputChannel.appendLine(path.relative(vaultPath, p)));
     outputChannel.show();
-    vscode.window.showInformationMessage(`Vault Tool: ${notes.length} notas encontradas.`);
+    vscode.window.showInformationMessage(`Obsidian-like: ${notes.length} notas encontradas.`);
   });
 
   const openKanbanCmd = vscode.commands.registerCommand('vaultTool.openKanban', () => {
@@ -1202,7 +1253,7 @@ async function createAndOpenNote(name: string, vaultRoot: string, mode: OpenMode
 
 // Opens the picked note the same way the rest of the app navigates between
 // notes by default (`mode: 'replace'`): same column, then dispose whichever
-// vault-tool panel was active before — unless that panel already *is* the
+// obsidian-like panel was active before — unless that panel already *is* the
 // picked note, in which case there's nothing to replace. `'newtab'` opens
 // alongside it in the same column without disposing anything; `'side'` opens
 // in a new split column (`ViewColumn.Beside`) and likewise leaves the

@@ -1,9 +1,10 @@
 {
-  "name": "vault-tool",
-  "displayName": "Vault Tool",
+  "name": "obsidian-like",
+  "displayName": "Obsidian-like",
   "description": "Herramienta local para gestionar el vault de notas (sustituto de Obsidian)",
   "version": "0.0.1",
   "publisher": "angelCastro",
+  "icon": "media/obsidian-icon-violeta.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -28,25 +29,30 @@
     "customEditors": [
       {
         "viewType": "vaultTool.markdownEditor",
-        "displayName": "Vault: Vista de documento",
+        "displayName": "Obsidian-like: Vista de documento",
         "selector": [{ "filenamePattern": "*.md" }],
         "priority": "default"
       }
     ],
     "configuration": {
-      "title": "Vault Tool",
+      "title": "Obsidian-like",
       "properties": {
-        "vaultTool.markdownFont": {
+        "obsidianLike.markdownFont": {
           "type": "string",
           "default": "",
           "markdownDescription": "Fuente para archivos Markdown. Acepta el mismo formato que `editor.fontFamily` (ej: `'iA Writer Quattro S', Georgia, serif`). Vacío usa la fuente general del editor."
         },
-        "vaultTool.codeFont": {
+        "obsidianLike.codeFont": {
           "type": "string",
           "default": "",
           "markdownDescription": "Fuente monoespaciada para código inline (`` `texto` ``) y bloques de código. Acepta el mismo formato que `editor.fontFamily`. Vacío usa la fuente monoespaciada del tema de Obsidian o, en su defecto, la del editor."
         },
-        "vaultTool.attachmentsLocation": {
+        "obsidianLike.codeFontSize": {
+          "type": "number",
+          "default": 14,
+          "description": "Tamaño en píxeles para código inline y bloques de código."
+        },
+        "obsidianLike.attachmentsLocation": {
           "type": "string",
           "enum": ["vault", "samefolder", "subfolder", "specificfolder"],
           "enumDescriptions": [
@@ -58,12 +64,12 @@
           "default": "vault",
           "description": "Dónde buscar los archivos adjuntos referenciados con ![[nombre]]"
         },
-        "vaultTool.attachmentsFolder": {
+        "obsidianLike.attachmentsFolder": {
           "type": "string",
           "default": "attachments",
           "description": "Nombre de la subcarpeta (modo 'subfolder') o ruta completa/relativa a la bóveda (modo 'specificfolder')"
         },
-        "vaultTool.obsidianTheme": {
+        "obsidianLike.obsidianTheme": {
           "type": "string",
           "default": "",
           "description": "Nombre del tema de Obsidian a aplicar. Carga .obsidian/themes/{nombre}/theme.css desde la carpeta raíz del vault."
@@ -73,23 +79,23 @@
     "commands": [
       {
         "command": "vaultTool.listNotes",
-        "title": "Vault Tool: Listar notas del vault"
+        "title": "Obsidian-like: Listar notas del vault"
       },
       {
         "command": "vaultTool.openKanban",
-        "title": "Vault Tool: Abrir Kanban del vault"
+        "title": "Obsidian-like: Abrir Kanban del vault"
       },
       {
         "command": "vaultTool.toggleSourceMode",
-        "title": "Vault Tool: Alternar vista fuente / WYSIWYG"
+        "title": "Obsidian-like: Alternar vista fuente / WYSIWYG"
       },
       {
         "command": "vaultTool.insertAttachment",
-        "title": "Vault Tool: Insertar como adjunto en la nota activa"
+        "title": "Obsidian-like: Insertar como adjunto en la nota activa"
       },
       {
         "command": "vaultTool.openNoteQuickPick",
-        "title": "Vault Tool: Abrir nota…"
+        "title": "Obsidian-like: Abrir nota…"
       }
     ],
     "menus": {

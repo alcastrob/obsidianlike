@@ -77,6 +77,12 @@ const vsTheme = EditorView.theme({
     color: 'var(--text-muted, inherit)',
     textDecoration: 'line-through',
   },
+  // Wraps the checkbox + edit button rendered by TaskCheckboxWidget so both sit
+  // inline together where the "- [ ] " markdown source used to be.
+  '.cm-task-widget': {
+    display: 'inline-flex',
+    alignItems: 'center',
+  },
   '.cm-task-checkbox': {
     display: 'inline-block',
     width: '1em', height: '1em',
@@ -84,6 +90,21 @@ const vsTheme = EditorView.theme({
     verticalAlign: 'middle',
     cursor: 'pointer',
     position: 'relative', top: '-1px',
+  },
+  // Small pencil icon next to a task checkbox / tasks-query row — opens the
+  // "Create or edit Task" dialog for that task. Dim by default so it doesn't
+  // compete with the description text; full opacity on hover signals it's
+  // clickable, same convention as .cm-transclusion-open elsewhere in this theme.
+  '.cm-task-edit-btn': {
+    display: 'inline-block',
+    cursor: 'pointer',
+    opacity: '0.35',
+    fontSize: '0.85em',
+    verticalAlign: 'middle',
+    marginLeft: '0.3em',
+  },
+  '.cm-task-edit-btn:hover': {
+    opacity: '1',
   },
   '.cm-task-overdue': {
     color: 'var(--text-error, #e06c75)',
@@ -140,18 +161,63 @@ const vsTheme = EditorView.theme({
     overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
     visibility: 'hidden',
   },
-  // Heading fold indicator — mirrors Obsidian's .cm-fold-indicator structure
+  // Heading fold indicator — mirrors Obsidian's .cm-fold-indicator structure.
+  // Obsidian only reveals this (and the Border theme's H1/H2/H3 icon reskin
+  // for it) while the pointer is over the heading line; otherwise it's fully
+  // hidden, leaving just the colored ::before bar. Hidden by default here too.
   '.cm-fold-indicator': {
     display: 'inline-block', cursor: 'pointer', userSelect: 'none',
-    opacity: '0.35', transition: 'opacity 0.15s', verticalAlign: 'middle',
+    opacity: '0', transition: 'opacity 0.15s', verticalAlign: 'middle',
   },
-  '.cm-fold-indicator:hover': { opacity: '0.85' },
+  '.cm-line:hover .cm-fold-indicator, .cm-fold-indicator:hover': { opacity: '0.85' },
   '.cm-fold-indicator .svg-icon.right-triangle': {
     width: '14px', height: '14px', verticalAlign: 'middle',
     transition: 'transform 0.15s',
   },
   '.cm-fold-indicator.is-collapsed .svg-icon.right-triangle': {
     transform: 'rotate(-90deg)',
+  },
+  // Needs a positioning context so the fold indicator (below) and the
+  // full-height color bar (further below) can both be positioned absolutely
+  // against this line — .cm-line has no offset of its own, so this doesn't
+  // move or resize the line box itself. paddingLeft makes room for the bar,
+  // which no longer occupies inline flow width once it's absolutely positioned.
+  '.HyperMD-header': { position: 'relative', paddingLeft: '7px' },
+  // The heading's ::before bar starts at the line's own left edge (x:0) in
+  // normal flow, so to put the fold indicator to its *left* (matching real
+  // Obsidian — see the H1/H2 badge in its hover screenshot) it has to leave
+  // flow entirely and sit in the gutter carved out by .cm-content's own left
+  // padding, rather than being reordered as a sibling after the bar.
+  '.HyperMD-header .cm-fold-indicator': {
+    position: 'absolute', left: '-18px', top: '50%', transform: 'translateY(-50%)',
+  },
+  // Cancel the Border theme's own translateX(-8px) on this icon (tuned for
+  // Obsidian's own DOM/spacing, not ours) now that the outer .cm-fold-indicator
+  // above is doing 100% of the positioning — otherwise the two offsets compound.
+  '.HyperMD-header .collapse-indicator.collapse-icon': { transform: 'none !important' },
+  // Obsidian's own heading color bar (Border theme's `.HyperMD-header-N::before`)
+  // — color/radius/background stay theme-driven; everything about sizing and
+  // placement is overridden here. The theme's own version sizes the bar off
+  // `1.2em` (`calc(1.2em - 8px)` + a `translateY(4px)` nudge), which assumes
+  // `::before`'s font-size context is the heading's own big rendered size —
+  // true in Obsidian's DOM (the pseudo lives directly on the <h1>/etc.), but
+  // not here: our line's actual font-size class (`.cm-header-N`, added by
+  // mdHighlight) lives on a *child span* of the line, not the `.cm-line`
+  // element the `::before` is attached to, so `1.2em` resolved against the
+  // small base editor font-size instead and came out a few px short of the
+  // heading text's actual height. Anchoring the bar with `top:0;bottom:0`
+  // against `.HyperMD-header`'s own (already `position: relative`) box makes
+  // it span the line's real rendered height regardless of font-size context.
+  // Theme CSS also lands later via postMessage without `!important` (see "Why
+  // theme CSS is sent via postMessage" in CLAUDE.md), so this needs
+  // `!important` to win regardless of load order either way.
+  '.HyperMD-header-1::before, .HyperMD-header-2::before, .HyperMD-header-3::before, .HyperMD-header-4::before, .HyperMD-header-5::before, .HyperMD-header-6::before': {
+    position: 'absolute !important',
+    top: '0 !important', bottom: '0 !important', left: '0 !important',
+    height: 'auto !important',
+    width: '4px !important',
+    margin: '0 !important',
+    transform: 'none !important',
   },
   // Heading styles — mirrors Obsidian core CSS so theme vars apply.
   // CM6 uses class-only in mdHighlight, so styles must live here.
@@ -227,11 +293,13 @@ const vsTheme = EditorView.theme({
   // Standalone inline code (`text`) — a small chip, same look as before this
   // was split out of mdHighlight's tags.monospace spec into a stable class name.
   '.cm-inline-code': {
-    // --code-font is the user-configurable `vaultTool.codeFont` setting (empty
+    // --code-font is the user-configurable `obsidianLike.codeFont` setting (empty
     // by default, falling through to the Obsidian theme's --font-monospace var,
     // then VS Code's editor font, then a generic monospace).
     fontFamily: 'var(--code-font, var(--font-monospace, var(--vscode-editor-font-family, monospace)))',
-    fontSize: '0.88em',
+    // --code-font-size is the user-configurable `obsidianLike.codeFontSize` setting
+    // (default 14px) — an absolute size, unlike the surrounding text's em-relative sizing.
+    fontSize: 'var(--code-font-size, 14px)',
     background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)))',
     color: 'var(--code-normal, inherit)',
     padding: '1px 4px', borderRadius: '3px',
@@ -257,7 +325,7 @@ const vsTheme = EditorView.theme({
   // specificity doesn't help against a theme rule using its own !important.
   '.cm-code-block': {
     fontFamily: 'var(--code-font, var(--font-monospace, var(--vscode-editor-font-family, monospace)))',
-    fontSize: '0.88em',
+    fontSize: 'var(--code-font-size, 14px)',
     background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15))) !important',
     color: 'var(--code-normal, inherit)',
     borderLeft: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
@@ -540,20 +608,33 @@ class BulletWidget extends WidgetType {
 }
 
 // ── Task checkbox widget ──────────────────────────────────────────────────────
-// Renders a real <input type="checkbox">. Unlike BulletWidget, this is rendered on
-// the active/cursor line too (not gated behind `active.has(ln)`) so it stays
-// clickable while editing the task text. `line` is the 0-based doc line number,
-// read back by the click handler and sent to the extension host as `toggle-task`.
+// Renders a real <input type="checkbox"> plus a small "edit" button. Unlike
+// BulletWidget, this is rendered on the active/cursor line too (not gated behind
+// active.has(ln)) so it stays clickable while editing the task text. `line` is
+// the 0-based doc line number, read back by the click handler and sent to the
+// extension host as `toggle-task` / `edit-task`.
 class TaskCheckboxWidget extends WidgetType {
   constructor(checked, line) { super(); this.checked = checked; this.line = line; }
   eq(other) { return this.checked === other.checked && this.line === other.line; }
   toDOM() {
+    const wrapper = document.createElement('span');
+    wrapper.className = 'cm-task-widget';
+
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.className = 'cm-task-checkbox';
     input.checked = this.checked;
     input.dataset.line = String(this.line);
-    return input;
+    wrapper.appendChild(input);
+
+    const editBtn = document.createElement('span');
+    editBtn.className = 'cm-task-edit-btn';
+    editBtn.title = 'Edit task';
+    editBtn.dataset.line = String(this.line);
+    editBtn.textContent = '✏️';
+    wrapper.appendChild(editBtn);
+
+    return wrapper;
   }
   ignoreEvent() { return false; }
 }
@@ -588,10 +669,11 @@ const TASK_PRIORITY_ICON = {
 };
 
 // Renders a single TaskDTO as a checklist row. Mirrors TaskCheckboxWidget's DOM
-// shape (a real <input type="checkbox">, cm-task-checkbox class) but carries
-// both `data-path` and `data-line` since results can come from any file in the
-// vault, not just the currently open document — the click handler below reads
-// both and sends `toggle-task-at-location` instead of `toggle-task`.
+// shape (a real <input type="checkbox">, cm-task-checkbox class, plus an edit
+// button) but carries both `data-path` and `data-line` since results can come
+// from any file in the vault, not just the currently open document — the click
+// handler below reads both and sends `toggle-task-at-location`/
+// `edit-task-at-location` instead of `toggle-task`/`edit-task`.
 function renderTaskRow(t) {
   const row = document.createElement('div');
   row.className = 'cm-tasks-query-item' + (t.isDone ? ' cm-task-done' : '');
@@ -628,6 +710,14 @@ function renderTaskRow(t) {
     r.textContent = '🔁 ' + t.recurrenceRule;
     row.appendChild(r);
   }
+
+  const editBtn = document.createElement('span');
+  editBtn.className = 'cm-task-edit-btn cm-task-query-edit-btn';
+  editBtn.title = 'Edit task';
+  editBtn.dataset.path = t.path;
+  editBtn.dataset.line = String(t.line);
+  editBtn.textContent = '✏️';
+  row.appendChild(editBtn);
   return row;
 }
 
@@ -1477,7 +1567,7 @@ const linkClickHandler = EditorView.domEventHandlers({
   },
   drop(e, view) {
     if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return false;
-    console.log('[vault-tool] CM6 drop handler: files=', e.dataTransfer.files.length);
+    console.log('[obsidian-like] CM6 drop handler: files=', e.dataTransfer.files.length);
     const coordPos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     pendingDropPos = coordPos != null ? coordPos : view.state.selection.main.head;
     const files = Array.from(e.dataTransfer.files);
@@ -1498,6 +1588,8 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (transclOpen) { e.preventDefault(); return true; }
     const taskCb = e.target.closest('.cm-task-checkbox');
     if (taskCb) { e.preventDefault(); return true; }
+    const taskEditBtn = e.target.closest('.cm-task-edit-btn');
+    if (taskEditBtn) { e.preventDefault(); return true; }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
@@ -1551,6 +1643,25 @@ const linkClickHandler = EditorView.domEventHandlers({
       vscode.postMessage({ type: 'toggle-task', line: Number(taskCb.dataset.line) });
       return true;
     }
+    // Same split as the checkbox handling just above: a tasks-query row's edit
+    // button carries `data-path` (the task may live in any file in the vault),
+    // the inline widget's only carries `data-line` (always the open document).
+    const taskQueryEditBtn = e.target.closest('.cm-task-query-edit-btn');
+    if (taskQueryEditBtn) {
+      e.preventDefault();
+      vscode.postMessage({
+        type: 'edit-task-at-location',
+        path: taskQueryEditBtn.dataset.path,
+        line: Number(taskQueryEditBtn.dataset.line),
+      });
+      return true;
+    }
+    const taskEditBtn = e.target.closest('.cm-task-edit-btn');
+    if (taskEditBtn) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'edit-task', line: Number(taskEditBtn.dataset.line) });
+      return true;
+    }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
@@ -1578,15 +1689,16 @@ class FoldToggle extends WidgetType {
     outer.contentEditable = 'false';
     const inner = document.createElement('div');
     inner.className = 'collapse-indicator collapse-icon';
+    // Empty on purpose: kept only so the Border theme's mask-image reskin
+    // selectors (targeting .svg-icon.right-triangle) still have an element to
+    // attach to, but 0x0/empty viewBox means nothing is ever actually drawn.
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('width', '24'); svg.setAttribute('height', '24');
-    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none');
+    svg.setAttribute('width', '0'); svg.setAttribute('height', '0');
+    svg.setAttribute('viewBox', '0 0 0 0'); svg.setAttribute('fill', 'none');
     svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '2');
     svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
     svg.classList.add('svg-icon', 'right-triangle');
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', 'M3 8L12 17L21 8');
-    svg.appendChild(path); inner.appendChild(svg); outer.appendChild(inner);
+    inner.appendChild(svg); outer.appendChild(inner);
     const lf = this.lineFrom;
     outer.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
     outer.addEventListener('click', e => {
@@ -1736,6 +1848,7 @@ function createEditor(parent, content) {
 const root = document.documentElement;
 root.style.setProperty('--md-font', init.font || '');
 root.style.setProperty('--code-font', init.codeFont || '');
+root.style.setProperty('--code-font-size', (init.codeFontSize || 14) + 'px');
 root.style.setProperty('--md-font-size', (init.fontSize || 14) + 'px');
 
 // ── Breadcrumb ────────────────────────────────────────────────────────────────
@@ -1875,6 +1988,7 @@ window.addEventListener('message', ev => {
     case 'font-update':
       if (msg.font)      root.style.setProperty('--md-font', msg.font);
       if (msg.codeFont !== undefined) root.style.setProperty('--code-font', msg.codeFont);
+      if (msg.codeFontSize) root.style.setProperty('--code-font-size', msg.codeFontSize);
       if (msg.fontSize)  root.style.setProperty('--md-font-size', msg.fontSize);
       // Changing the font can change line-height/character metrics after CM6
       // already measured layout once — see the comment by the initial
@@ -1981,7 +2095,7 @@ let pendingDropPos = null;
 for (const evt of ['dragenter', 'dragover', 'drop']) {
   document.addEventListener(evt, e => {
     const hasFiles = !!(e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files'));
-    console.log(`[vault-tool] document ${evt}: hasFiles=${hasFiles} defaultPrevented=${e.defaultPrevented} target=${e.target && e.target.tagName}`);
+    console.log(`[obsidian-like] document ${evt}: hasFiles=${hasFiles} defaultPrevented=${e.defaultPrevented} target=${e.target && e.target.tagName}`);
   }, true); // capture phase, so this always logs even if something else stops propagation first
 }
 
