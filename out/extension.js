@@ -483,7 +483,13 @@ const panelsByPath = new Map();
 async function buildNoteIndex() {
     try {
         const files = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
-        noteIndex = files.map(f => path.basename(f.fsPath, '.md'));
+        const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        noteIndex = files.map(f => {
+            const relDir = vaultRoot
+                ? path.dirname(path.relative(vaultRoot, f.fsPath)).replace(/\\/g, '/')
+                : '';
+            return { name: path.basename(f.fsPath, '.md'), dir: relDir === '.' ? '' : relDir, fsPath: f.fsPath };
+        });
     }
     catch {
         noteIndex = [];
@@ -491,11 +497,13 @@ async function buildNoteIndex() {
     activePanels.forEach(p => {
         try {
             p.webview.postMessage({ type: 'note-index', notes: noteIndex });
+            p.webview.postMessage({ type: 'note-history', notes: recentNoteEntries() });
         }
         catch { }
     });
 }
-// ── Recently-opened notes history (for the "open note" quick pick) ────────────
+// ── Recently-opened notes history (for the "open note" quick pick and the
+// [[ ]] wiki-link suggester's empty-query "recent files" list) ───────────────
 // Persisted in globalState — not tied to a single window/session, and survives
 // VS Code restarts, same as Obsidian's own quick switcher history. Recorded from
 // resolveCustomTextEditor, the single choke point every note passes through
@@ -510,11 +518,35 @@ function recordNoteOpened(fsPath) {
 function getNoteHistory() {
     return extensionContext.globalState.get(NOTE_HISTORY_KEY, []);
 }
+// Maps the fsPath history onto current noteIndex entries (name + dir), dropping
+// any history entry whose file no longer exists — same filtering the "open
+// note" quick pick already does for its own recent-items list.
+function recentNoteEntries() {
+    const byPath = new Map(noteIndex.map(e => [e.fsPath, e]));
+    const out = [];
+    for (const p of getNoteHistory()) {
+        const e = byPath.get(p);
+        if (e) {
+            out.push(e);
+        }
+    }
+    return out;
+}
+function broadcastRecentNotes() {
+    const entries = recentNoteEntries();
+    activePanels.forEach(p => {
+        try {
+            p.webview.postMessage({ type: 'note-history', notes: entries });
+        }
+        catch { }
+    });
+}
 // ── Custom editor provider ────────────────────────────────────────────────────
 class MarkdownDocumentProvider {
     resolveCustomTextEditor(document, webviewPanel, _token) {
         void ensureSubscribedToTasksChanges();
         recordNoteOpened(document.uri.fsPath);
+        broadcastRecentNotes();
         const getFont = () => vscode.workspace.getConfiguration('obsidianLike').get('markdownFont', '').trim() ||
             'var(--vscode-editor-font-family)';
         const getCodeFont = () => vscode.workspace.getConfiguration('obsidianLike').get('codeFont', '').trim();
@@ -548,6 +580,7 @@ class MarkdownDocumentProvider {
         // issues with </style> sequences inside SVG data URLs in theme files.
         setTimeout(() => {
             webviewPanel.webview.postMessage({ type: 'note-index', notes: noteIndex });
+            webviewPanel.webview.postMessage({ type: 'note-history', notes: recentNoteEntries() });
             if (themeCss) {
                 webviewPanel.webview.postMessage({ type: 'theme-css', css: themeCss });
             }
@@ -878,7 +911,10 @@ class MarkdownDocumentProvider {
         webviewPanel.onDidDispose(() => subs.forEach(s => s.dispose()));
     }
     buildHtml(content, font, codeFont, codeFontSize, fontSize, cspSource, scriptUri, title, imageMap = {}, breadcrumb = []) {
-        const init = JSON.stringify({ content, font, codeFont, codeFontSize, fontSize, noteIndex, title, imageMap, breadcrumb });
+        const init = JSON.stringify({
+            content, font, codeFont, codeFontSize, fontSize, noteIndex, title, imageMap, breadcrumb,
+            recentNotes: recentNoteEntries(),
+        });
         return `<!DOCTYPE html>
 <html lang="es">
 <head>

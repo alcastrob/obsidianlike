@@ -1,7 +1,7 @@
 // webview-src/editor.js — CodeMirror 6 editor for the VS Code vault extension.
 // Bundled by esbuild into out/editor.bundle.js.
 
-import { EditorState, EditorSelection, RangeSetBuilder, Compartment, StateEffect } from "@codemirror/state";
+import { EditorState, EditorSelection, RangeSetBuilder, Compartment, StateEffect, Prec } from "@codemirror/state";
 import {
   EditorView, ViewPlugin, Decoration, WidgetType, keymap, drawSelection
 } from "@codemirror/view";
@@ -10,13 +10,17 @@ import {
 } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { syntaxHighlighting, HighlightStyle, syntaxTree } from "@codemirror/language";
-import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { tags } from "@lezer/highlight";
 
 // ── Bootstrap data ───────────────────────────────────────────────────────────
 const vscode = acquireVsCodeApi();
 const init   = window.__vaultInitial || {};
+// Array of { name, dir } — `dir` is the vault-relative parent directory ('' for
+// root-level notes), used as subtext in the [[ ]] suggester (WikiSuggestView).
 let noteIndex = init.noteIndex || [];
+// Same shape, most-recently-opened first — powers the suggester's empty-query
+// "recent files" list. Kept up to date by the 'note-history' message.
+let noteHistory = init.recentNotes || [];
 let imageMap  = init.imageMap  || {};
 let syncTimer = null;
 
@@ -90,6 +94,18 @@ const vsTheme = EditorView.theme({
     verticalAlign: 'middle',
     cursor: 'pointer',
     position: 'relative', top: '-1px',
+  },
+  // Status icon rendered in place of the native checkbox for any status other
+  // than the plain unchecked `[ ]` (done/cancelled/in-progress/custom letters
+  // like "w"/"d") — a checkbox can only ever show two visual states, so these
+  // are a separate clickable <span> instead (see TaskCheckboxWidget/STATUS_ICON
+  // below). Carries `.cm-task-checkbox` too, so it inherits cursor/margin/
+  // alignment from the rule above; only the box sizing is overridden here.
+  '.cm-task-status-icon': {
+    width: 'auto', height: 'auto',
+    lineHeight: '1',
+    fontSize: '1em',
+    top: '0',
   },
   // Small pencil icon next to a task checkbox / tasks-query row — opens the
   // "Create or edit Task" dialog for that task. Dim by default so it doesn't
@@ -290,6 +306,54 @@ const vsTheme = EditorView.theme({
     fontSize: '0.9em',
   },
   '.cm-transclusion-error': { color: 'var(--text-error, #e06c75)' },
+  // [[ ]] wiki-link suggester (see WikiSuggestView) — a plain floating DOM
+  // element appended as a child of `.cm-editor` (view.dom, which CM6 already
+  // gives `position: relative`) and positioned with plain absolute offsets
+  // computed from coordsAtPos, rather than CM6's built-in autocompletion
+  // tooltip — see the comment above WikiSuggestView for why.
+  '.cm-wikilink-suggest': {
+    position: 'absolute',
+    zIndex: '50',
+    minWidth: '260px',
+    maxWidth: '420px',
+    background: 'var(--vscode-editorWidget-background, #252526)',
+    color: 'var(--vscode-editorWidget-foreground, inherit)',
+    border: '1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35))',
+    borderRadius: '6px',
+    boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+    fontSize: '0.92em',
+    overflow: 'hidden',
+  },
+  '.cm-wls-list': { maxHeight: '220px', overflowY: 'auto' },
+  '.cm-wls-item': { padding: '6px 12px', cursor: 'pointer' },
+  '.cm-wls-item.is-selected': {
+    background: 'var(--vscode-list-activeSelectionBackground, rgba(128,128,128,0.25))',
+    color: 'var(--vscode-list-activeSelectionForeground, inherit)',
+  },
+  '.cm-wls-title': { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  '.cm-wls-title b': { fontWeight: '700' },
+  '.cm-wls-dir': {
+    fontSize: '0.85em',
+    opacity: '0.6',
+    marginTop: '1px',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+  '.cm-wls-empty, .cm-wls-loading': {
+    padding: '8px 12px',
+    opacity: '0.65',
+    fontStyle: 'italic',
+  },
+  '.cm-wls-footer': {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '4px 14px',
+    justifyContent: 'center',
+    padding: '6px 10px',
+    borderTop: '1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.25))',
+    fontSize: '0.78em',
+    opacity: '0.7',
+  },
+  '.cm-wls-footer b': { fontWeight: '700' },
   // Standalone inline code (`text`) — a small chip, same look as before this
   // was split out of mdHighlight's tags.monospace spec into a stable class name.
   '.cm-inline-code': {
@@ -607,25 +671,58 @@ class BulletWidget extends WidgetType {
   ignoreEvent() { return false; }
 }
 
+// Obsidian-Tasks-community-convention icons for statuses beyond the plain
+// unchecked/checked binary a native checkbox can show. Mirrors
+// `STATUS_ICON_EMOJI` in the sibling "angelCastro.obsidian-like-tasks"
+// extension's `src/markdownTasksPlugin.ts` (same symbols, same icons), so a
+// task looks the same whether viewed here or in VS Code's Markdown Preview.
+// `x`/`X`/`-` are included here (unlike that Preview-only map, which leaves
+// them to the native/VS-Code-rendered checkbox) because this editor's checkbox
+// is a real interactive element the user clicks to toggle, not passive
+// reading-view HTML — showing a done/cancelled icon on it is expected too.
+// Any symbol not listed (e.g. a future custom status) falls back to a generic
+// badge showing the raw character, same convention as that Preview map.
+const STATUS_ICON = {
+  'x': '✅', 'X': '✅',
+  '-': '❌',
+  '/': '🔄',
+  'w': '⏸️', // "Waiting" — matches this vault's own convention for custom statuses.
+  'd': '👤', // "Delegated" — ditto.
+};
+
 // ── Task checkbox widget ──────────────────────────────────────────────────────
-// Renders a real <input type="checkbox"> plus a small "edit" button. Unlike
-// BulletWidget, this is rendered on the active/cursor line too (not gated behind
-// active.has(ln)) so it stays clickable while editing the task text. `line` is
-// the 0-based doc line number, read back by the click handler and sent to the
-// extension host as `toggle-task` / `edit-task`.
+// Renders a real <input type="checkbox"> for the plain unchecked state (`[ ]`),
+// or a clickable status-icon <span> for anything else (see STATUS_ICON above —
+// a checkbox can only ever show two visual states, so done/cancelled/
+// in-progress/custom statuses need a real glyph instead), plus a small "edit"
+// button. Unlike BulletWidget, this is rendered on the active/cursor line too
+// (not gated behind active.has(ln)) so it stays clickable while editing the
+// task text. `line` is the 0-based doc line number, read back by the click
+// handler and sent to the extension host as `toggle-task` / `edit-task`.
 class TaskCheckboxWidget extends WidgetType {
-  constructor(checked, line) { super(); this.checked = checked; this.line = line; }
-  eq(other) { return this.checked === other.checked && this.line === other.line; }
+  constructor(statusChar, isDone, line) { super(); this.statusChar = statusChar; this.isDone = isDone; this.line = line; }
+  eq(other) { return this.statusChar === other.statusChar && this.line === other.line; }
   toDOM() {
     const wrapper = document.createElement('span');
     wrapper.className = 'cm-task-widget';
 
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.className = 'cm-task-checkbox';
-    input.checked = this.checked;
-    input.dataset.line = String(this.line);
-    wrapper.appendChild(input);
+    if (this.statusChar === ' ') {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.className = 'cm-task-checkbox';
+      input.checked = false;
+      input.dataset.line = String(this.line);
+      wrapper.appendChild(input);
+    } else {
+      const icon = document.createElement('span');
+      icon.className = 'cm-task-checkbox cm-task-status-icon';
+      icon.setAttribute('role', 'checkbox');
+      icon.setAttribute('aria-checked', String(this.isDone));
+      icon.title = this.statusChar;
+      icon.dataset.line = String(this.line);
+      icon.textContent = STATUS_ICON[this.statusChar] || this.statusChar;
+      wrapper.appendChild(icon);
+    }
 
     const editBtn = document.createElement('span');
     editBtn.className = 'cm-task-edit-btn';
@@ -669,8 +766,9 @@ const TASK_PRIORITY_ICON = {
 };
 
 // Renders a single TaskDTO as a checklist row. Mirrors TaskCheckboxWidget's DOM
-// shape (a real <input type="checkbox">, cm-task-checkbox class, plus an edit
-// button) but carries both `data-path` and `data-line` since results can come
+// shape — a native <input type="checkbox"> for the plain unchecked/checked
+// states, or a status-icon <span> otherwise (see STATUS_ICON/TaskCheckboxWidget
+// above) — but carries both `data-path` and `data-line` since results can come
 // from any file in the vault, not just the currently open document — the click
 // handler below reads both and sends `toggle-task-at-location`/
 // `edit-task-at-location` instead of `toggle-task`/`edit-task`.
@@ -678,10 +776,25 @@ function renderTaskRow(t) {
   const row = document.createElement('div');
   row.className = 'cm-tasks-query-item' + (t.isDone ? ' cm-task-done' : '');
 
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.className = 'cm-task-checkbox cm-task-query-checkbox';
-  cb.checked = !!t.isDone;
+  // `statusSymbol` is only present from a rebuilt sibling "Tasks" extension —
+  // treat a missing value the same as plain `[ ]` so this degrades gracefully
+  // against an older build that only sends `isDone`.
+  const statusSymbol = t.statusSymbol !== undefined ? t.statusSymbol : ' ';
+  let cb;
+  if (statusSymbol === ' ') {
+    cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!t.isDone;
+  } else {
+    cb = document.createElement('span');
+    cb.setAttribute('role', 'checkbox');
+    cb.setAttribute('aria-checked', String(!!t.isDone));
+    cb.title = statusSymbol;
+    cb.textContent = STATUS_ICON[statusSymbol] || statusSymbol;
+  }
+  cb.className = statusSymbol === ' '
+    ? 'cm-task-checkbox cm-task-query-checkbox'
+    : 'cm-task-checkbox cm-task-status-icon cm-task-query-checkbox';
   cb.dataset.path = t.path;
   cb.dataset.line = String(t.line);
   row.appendChild(cb);
@@ -862,7 +975,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
                 let end = lineStart + cbM[0].length;
                 if (state.doc.sliceString(end, end + 1) === ' ') end++;
                 decs.push({ from: markStart, to: end,
-                  dec: Decoration.replace({ widget: new TaskCheckboxWidget(isDone, line.number - 1) }) });
+                  dec: Decoration.replace({ widget: new TaskCheckboxWidget(statusChar, isDone, line.number - 1) }) });
 
                 if (!isDone) {
                   // Signifiers live in the remaining task text. Only the overdue due-date
@@ -1411,13 +1524,19 @@ const transclusionPlugin = ViewPlugin.fromClass(class {
   }
 }, { decorations: v => v.decorations });
 
-// ── Wiki-link / transclusion autocomplete ─────────────────────────────────────
-// Triggers on both `[[` (links) and `![[` (transclusions) since the match is on
-// `[[` alone (see the regex below) — the leading `!`, if present, is left as-is
-// and only the `[[...]]` span gets replaced by `apply`. Once the typed text
-// contains a `#`, the source switches to querying that note's headings (in
-// document order, i.e. the same hierarchical order they appear in the file)
-// instead of the note index.
+// ── Wiki-link suggestion popup ────────────────────────────────────────────────
+// Triggers on both `[[` (links) and `![[` (transclusions) since the trigger
+// regex matches on `[[` alone — the leading `!`, if present, is left as-is and
+// only the `[[...]]` span is ever replaced. Rendered as a plain floating DOM
+// element (WikiSuggestView below) rather than CM6's built-in autocompletion
+// tooltip: the desired look (a directory subtext under each note name, a
+// persistent keybinding-hint footer, "no results" as its own row) needs full
+// control over per-row markup that the Completion API doesn't expose — same
+// reasoning as every other custom-rendered widget in this file (TableWidget,
+// TransclusionWidget, TasksQueryWidget). Once the typed text contains a `#`,
+// it switches to searching that note's headings (in document order) instead
+// of the note index, via the same host round-trip the old CM6-based version
+// used.
 const pendingHeadingRequests = new Map(); // request id -> resolve
 let headingsReqSeq = 0;
 
@@ -1429,38 +1548,271 @@ function requestHeadings(note) {
   });
 }
 
-async function wikiComplete(ctx) {
-  const word = ctx.matchBefore(/\[\[[^\]]*$/);
-  if (!word && !ctx.explicit) return null;
-  const inner = word ? word.text.slice(2) : '';
-  const hashIdx = inner.indexOf('#');
+const WIKI_TRIGGER_RE = /\[\[([^\]\n]*)$/;
+const WIKI_SUGGEST_MAX = 5;
 
-  if (hashIdx === -1) {
-    const query = inner.toLowerCase();
-    const opts = noteIndex
-      .filter(n => n.toLowerCase().includes(query))
-      .slice(0, 30)
-      .map(name => ({ label: name, type: 'text', apply: `[[${name}]]` }));
-    if (!opts.length) return null;
-    // Excludes '#' so typing one invalidates this result and forces CM to re-run
-    // wikiComplete, switching to the heading-search branch below.
-    return { from: word ? word.from : ctx.pos, options: opts, validFor: /^\[\[[^\]#]*$/ };
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// HTML-escapes `text`, wrapping the first case-insensitive occurrence of
+// `query` in <b>. Empty query -> plain escaped text (used for the "recent
+// files" list, which isn't matched against anything so nothing is bolded).
+function highlightMatch(text, query) {
+  if (!query) return escapeHtml(text);
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return escapeHtml(text);
+  return escapeHtml(text.slice(0, idx)) + '<b>' + escapeHtml(text.slice(idx, idx + query.length)) + '</b>' +
+    escapeHtml(text.slice(idx + query.length));
+}
+
+// Top WIKI_SUGGEST_MAX notes whose name contains `query` (case-insensitive),
+// closest/earliest match first — "empiecen o contengan" from the spec, i.e. a
+// name starting with the query sorts before one merely containing it.
+function matchNotes(query) {
+  const q = query.toLowerCase();
+  const scored = [];
+  for (const n of noteIndex) {
+    const idx = n.name.toLowerCase().indexOf(q);
+    if (idx !== -1) scored.push({ n, idx });
+  }
+  scored.sort((a, b) => a.idx - b.idx || a.n.name.localeCompare(b.n.name));
+  return scored.slice(0, WIKI_SUGGEST_MAX).map(s => ({ type: 'note', name: s.n.name, dir: s.n.dir }));
+}
+
+class WikiSuggestView {
+  constructor(view) {
+    this.view = view;
+    this.dom = document.createElement('div');
+    this.dom.className = 'cm-wikilink-suggest';
+    this.dom.style.display = 'none';
+    view.dom.appendChild(this.dom);
+
+    this.open = false;
+    this.mode = null;             // 'notes' | 'headings'
+    this.query = '';              // text after [[ (notes) or after # (headings)
+    this.notePart = '';           // note name before # (headings mode only)
+    this.pos = null;              // cursor position (= end of replacement range)
+    this.openBracketFrom = null;  // doc position of the "[[" that opened this popup
+    this.items = [];
+    this.selected = 0;
+    this.loading = false;
+    // Set on Escape so the popup stays dismissed for this exact trigger context
+    // (same "[[" + same typed text) — cleared as soon as either changes.
+    this.dismissedKey = null;
+    this.headingsToken = 0;
+
+    // The popup is a plain DOM node outside CM6's contentDOM, so it can use
+    // ordinary listeners instead of routing through linkClickHandler.
+    this.dom.addEventListener('mousedown', e => e.preventDefault());
+    this.dom.addEventListener('click', e => {
+      const item = e.target.closest('.cm-wls-item');
+      if (item) this.accept(Number(item.dataset.index));
+    });
+
+    this.recompute();
   }
 
-  const notePart = inner.slice(0, hashIdx);
-  if (!notePart) return null;
-  const sectionQuery = inner.slice(hashIdx + 1).toLowerCase();
-  const headings = await requestHeadings(notePart);
-  const opts = headings
-    .filter(h => h.text.toLowerCase().includes(sectionQuery))
-    .map(h => ({
-      label: '#'.repeat(h.level) + ' ' + h.text,
-      type: 'text',
-      apply: `[[${notePart}#${h.text}]]`,
-    }));
-  if (!opts.length) return null;
-  return { from: word ? word.from : ctx.pos, options: opts, validFor: /^\[\[[^\]#]*#[^\]]*$/ };
+  destroy() { this.dom.remove(); }
+
+  update(u) {
+    if (u.docChanged || u.selectionSet) this.recompute();
+  }
+
+  currentContext() {
+    const state = this.view.state;
+    const sel = state.selection.main;
+    if (!sel.empty) return null;
+    const pos = sel.head;
+    const line = state.doc.lineAt(pos);
+    const before = line.text.slice(0, pos - line.from);
+    const m = WIKI_TRIGGER_RE.exec(before);
+    if (!m) return null;
+    return { pos, openBracketFrom: line.from + m.index, raw: m[1] };
+  }
+
+  recompute() {
+    const ctx = this.currentContext();
+    if (!ctx) { this.dismissedKey = null; this.close(); return; }
+
+    const key = ctx.openBracketFrom + ':' + ctx.raw;
+    if (this.dismissedKey === key) { this.hide(); return; }
+    this.dismissedKey = null;
+
+    this.pos = ctx.pos;
+    this.openBracketFrom = ctx.openBracketFrom;
+
+    const hashIdx = ctx.raw.indexOf('#');
+    if (hashIdx === -1) {
+      this.mode = 'notes';
+      this.query = ctx.raw;
+      this.notePart = '';
+      this.loading = false;
+      this.items = this.query ? matchNotes(this.query) : noteHistory.slice(0, WIKI_SUGGEST_MAX).map(n => ({ type: 'note', name: n.name, dir: n.dir }));
+      this.selected = 0;
+      this.open = true;
+      this.render();
+      return;
+    }
+
+    const notePart = ctx.raw.slice(0, hashIdx);
+    if (!notePart) { this.close(); return; }
+    this.mode = 'headings';
+    this.notePart = notePart;
+    this.query = ctx.raw.slice(hashIdx + 1);
+    this.open = true;
+    this.loading = true;
+    this.items = [];
+    this.selected = 0;
+    this.render();
+
+    const token = ++this.headingsToken;
+    const wantQuery = this.query;
+    requestHeadings(notePart).then(headings => {
+      if (token !== this.headingsToken) return; // superseded by a later keystroke
+      const q = wantQuery.toLowerCase();
+      this.items = headings
+        .filter(h => h.text.toLowerCase().includes(q))
+        .slice(0, WIKI_SUGGEST_MAX)
+        .map(h => ({ type: 'heading', level: h.level, text: h.text }));
+      this.loading = false;
+      this.selected = 0;
+      this.render();
+    });
+  }
+
+  close() {
+    this.open = false;
+    this.mode = null;
+    this.hide();
+  }
+
+  hide() { this.dom.style.display = 'none'; }
+
+  // Escape: hide without altering text, and don't reopen for this exact
+  // context until the user types more or moves elsewhere.
+  dismiss() {
+    if (!this.open) return;
+    this.dismissedKey = this.openBracketFrom + ':' + (this.mode === 'headings' ? this.notePart + '#' + this.query : this.query);
+    this.open = false;
+    this.hide();
+  }
+
+  moveSelection(delta) {
+    if (!this.open || this.loading || this.items.length === 0) return false;
+    this.selected = (this.selected + delta + this.items.length) % this.items.length;
+    this.render();
+    return true;
+  }
+
+  accept(index) {
+    const idx = Number.isInteger(index) ? index : this.selected;
+    let insertText;
+    if (this.items.length === 0) {
+      // No matches — Enter creates the wikilink using the typed text as-is.
+      const raw = this.mode === 'headings' ? `${this.notePart}#${this.query}` : this.query;
+      insertText = `[[${raw}]]`;
+    } else {
+      const it = this.items[idx];
+      insertText = it.type === 'heading' ? `[[${this.notePart}#${it.text}]]` : `[[${it.name}]]`;
+    }
+    const from = this.openBracketFrom;
+    const to = this.pos;
+    const view = this.view;
+    this.close();
+    view.dispatch({
+      changes: { from, to, insert: insertText },
+      selection: { anchor: from + insertText.length },
+      userEvent: 'input',
+    });
+    view.focus();
+  }
+
+  rowTitle(it) {
+    if (it.type === 'heading') {
+      return escapeHtml('#'.repeat(it.level) + ' ') + highlightMatch(it.text, this.query);
+    }
+    return highlightMatch(it.name, this.query);
+  }
+
+  render() {
+    if (!this.open) { this.hide(); return; }
+    const coords = this.view.coordsAtPos(this.pos);
+    if (!coords) { this.hide(); return; }
+
+    const dom = this.dom;
+    dom.textContent = '';
+    dom.style.display = 'block';
+
+    const list = document.createElement('div');
+    list.className = 'cm-wls-list';
+    if (this.loading) {
+      const loading = document.createElement('div');
+      loading.className = 'cm-wls-loading';
+      loading.textContent = 'Cargando…';
+      list.appendChild(loading);
+    } else if (this.items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'cm-wls-empty';
+      empty.textContent = 'No se encontraron resultados';
+      list.appendChild(empty);
+    } else {
+      this.items.forEach((it, i) => {
+        const row = document.createElement('div');
+        row.className = 'cm-wls-item' + (i === this.selected ? ' is-selected' : '');
+        row.dataset.index = String(i);
+        const title = document.createElement('div');
+        title.className = 'cm-wls-title';
+        title.innerHTML = this.rowTitle(it);
+        row.appendChild(title);
+        if (it.type === 'note' && it.dir) {
+          const dirEl = document.createElement('div');
+          dirEl.className = 'cm-wls-dir';
+          dirEl.textContent = it.dir + '/';
+          row.appendChild(dirEl);
+        }
+        list.appendChild(row);
+      });
+    }
+    dom.appendChild(list);
+
+    const footer = document.createElement('div');
+    footer.className = 'cm-wls-footer';
+    footer.innerHTML =
+      '<span>Use <b>#</b> para enlazar el encabezado</span>' +
+      '<span>Use <b>^</b> para enlazar bloques</span>' +
+      '<span>Use <b>|</b> para cambiar el texto mostrado</span>';
+    dom.appendChild(footer);
+
+    const editorRect = this.view.dom.getBoundingClientRect();
+    dom.style.left = Math.max(0, coords.left - editorRect.left) + 'px';
+    dom.style.top = (coords.bottom - editorRect.top + 4) + 'px';
+  }
 }
+
+const wikiSuggestPlugin = ViewPlugin.fromClass(WikiSuggestView);
+
+const wikiSuggestKeymap = Prec.highest(keymap.of([
+  { key: 'Escape', run: view => {
+      const p = view.plugin(wikiSuggestPlugin);
+      if (p && p.open) { p.dismiss(); return true; }
+      return false;
+    } },
+  { key: 'ArrowDown', run: view => {
+      const p = view.plugin(wikiSuggestPlugin);
+      return p ? p.moveSelection(1) : false;
+    } },
+  { key: 'ArrowUp', run: view => {
+      const p = view.plugin(wikiSuggestPlugin);
+      return p ? p.moveSelection(-1) : false;
+    } },
+  { key: 'Enter', run: view => {
+      const p = view.plugin(wikiSuggestPlugin);
+      if (!p || !p.open) return false;
+      if (!p.loading) p.accept();
+      return true;
+    } },
+]));
 
 // ── Markdown shortcuts ────────────────────────────────────────────────────────
 function toggleWrap(view, marker) {
@@ -1822,13 +2174,13 @@ function createEditor(parent, content) {
       previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]),
       foldPlugin,
       linkClickHandler,
-      autocompletion({ override: [wikiComplete], closeOnBlur: true }),
+      wikiSuggestPlugin,
+      wikiSuggestKeymap,
       keymap.of([
         { key: 'Mod-b', run: v => toggleWrap(v, '**') },
         { key: 'Mod-i', run: v => toggleWrap(v, '*')  },
         ...defaultKeymap,
         ...historyKeymap,
-        ...completionKeymap,
         indentWithTab,
       ]),
       vsTheme,
@@ -1934,6 +2286,9 @@ window.addEventListener('message', ev => {
   switch (msg.type) {
     case 'note-index':
       noteIndex = msg.notes || [];
+      break;
+    case 'note-history':
+      noteHistory = msg.notes || [];
       break;
     case 'image-map':
       imageMap = msg.map || {};

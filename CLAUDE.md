@@ -50,10 +50,10 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 
 ### Module-level state
 
-- `noteIndex: string[]` — all `.md` filenames in vault (no extension). Built at activation, updated by `FileSystemWatcher` on create/delete, broadcast to all open panels.
-- `activePanels: vscode.WebviewPanel[]` — tracks open panels to push `note-index` updates.
+- `noteIndex: NoteIndexEntry[]` (`{ name, dir, fsPath }`) — every `.md` file in the vault; `dir` is the vault-relative parent directory (`''` for root-level notes), `fsPath` is host-only (used to match note-history entries back to a name/dir pair, never sent to the webview as its own field). Built at activation, updated by `FileSystemWatcher` on create/delete, broadcast to all open panels as `note-index` (webview only receives `name`/`dir`).
+- `activePanels: vscode.WebviewPanel[]` — tracks open panels to push `note-index`/`note-history` updates.
 - `panelsByPath: Map<string, vscode.WebviewPanel>` — the panel currently showing each document path (set/cleared alongside `activePanels`, keyed by `document.uri.fsPath`). Exists solely so `navigateToTarget` can find the just-opened (or already-open) target panel to send `scroll-to-line` to — `vscode.openWith` doesn't hand back a panel reference, and `supportsMultipleEditorsPerDocument: false` means there's at most one panel per path to track.
-- `extensionContext: vscode.ExtensionContext` — stashed at `activate()` purely to reach `context.globalState` from `recordNoteOpened`/`getNoteHistory` (see "`vaultTool.openNoteQuickPick`" below), which live outside `activate()`'s own closure.
+- `extensionContext: vscode.ExtensionContext` — stashed at `activate()` purely to reach `context.globalState` from `recordNoteOpened`/`getNoteHistory` (see "`vaultTool.openNoteQuickPick`" below), which live outside `activate()`'s own closure. `recentNoteEntries()` maps `getNoteHistory()`'s fsPaths onto current `noteIndex` entries (dropping any that no longer exist) and `broadcastRecentNotes()` pushes that as `note-history` to every open panel — called from `resolveCustomTextEditor` right after `recordNoteOpened`, and from `buildNoteIndex` (a rename/delete can change which history entries still resolve).
 
 ### `resolveCustomTextEditor`
 
@@ -77,7 +77,7 @@ Obsidian themes (e.g. Border) embed SVG data URLs in CSS properties like `-webki
 | `open-note` | `navigateToTarget(name, ..., createIfMissing: true)` — resolves the wiki-link target (optionally `note#section`) and opens it with `vscode.openWith` in the same column, scrolling to the heading if a section was given (see below for resolution/creation rules) |
 | `open-transclusion` | Same as `open-note` but `createIfMissing: false` — clicking a transclusion's "open source" button navigates to it like a link, but a missing target just shows a warning instead of creating an empty note |
 | `get-transclusion` | Resolves `msg.target` (`note`, `dir/note`, or `...#section`), reads the target's text via `vscode.workspace.openTextDocument` (so unsaved edits in another open tab are reflected), slices out the section if one was given, and replies `transclusion-result` — see "Transclusions" below |
-| `get-headings` | Resolves `msg.note`, returns `parseHeadings(text)` (level/text only, no line) as `headings-result` — powers the `#`-section step of `wikiComplete`'s autocomplete |
+| `get-headings` | Resolves `msg.note`, returns `parseHeadings(text)` (level/text only, no line) as `headings-result` — powers the `#`-section step of `WikiSuggestView`'s suggestion popup |
 | `open-url` | `vscode.env.openExternal(vscode.Uri.parse(url))` |
 | `reveal-path` | `vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(fsPath))` |
 | `paste-image` | Saves base64 buffer as `Pasted image YYYYMMDDHHMMSS.png` to configured attachments dir, sends back `image-pasted` with webview URI |
@@ -162,8 +162,9 @@ Generates the full webview HTML. Key points:
   previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]),
   foldPlugin,
   linkClickHandler,
-  autocompletion({ override: [wikiComplete], closeOnBlur: true }),
-  keymap.of([Mod-b (bold), Mod-i (italic), ...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
+  wikiSuggestPlugin,
+  wikiSuggestKeymap, // Prec.highest — see "WikiSuggestView" below
+  keymap.of([Mod-b (bold), Mod-i (italic), ...defaultKeymap, ...historyKeymap, indentWithTab]),
   vsTheme,
   EditorView.updateListener (400ms sync debounce),
 ]
@@ -328,18 +329,23 @@ CM6 measures line-height/character metrics once during its own layout passes, us
 
 `findUrlAtPos(view, pos)`: walks the syntax tree up from `pos` looking for `URL` or `Link/URL` nodes; falls back to regex `/https?:\/\/[^\s)"'\]>]+/g` on the line text.
 
-### `wikiComplete`
+### `WikiSuggestView` — wiki-link suggestion popup
 
-CM6 async autocompletion source (returns a `Promise` — CM6's `autocompletion({ override: [...] })` supports async sources natively). Triggered by `\[\[[^\]]*$` before cursor — matches whether preceded by `!` or not, so it fires for both `[[note]]` links and `![[note]]` transclusions; the `!` is left untouched and only the `[[...]]` span is replaced by `apply`.
+Not CM6's built-in autocompletion (that was the old `wikiComplete` source, removed): a plain floating `<div class="cm-wikilink-suggest">` appended as a child of `view.dom`, positioned with absolute offsets computed from `coordsAtPos` (`view.dom`/`.cm-editor` already has `position: relative` from CM6's own base theme). It's a `ViewPlugin.fromClass(WikiSuggestView)` (`wikiSuggestPlugin`) with no decorations — a pure side-effect plugin, same shape as `foldPlugin` conceptually but managing its own detached DOM instead of CM6 decorations. Built this way (rather than `Completion.info`/`detail`) because the desired look — a directory subtext line under each note name, a persistent keybinding-hint footer, a dedicated "no results" row — needs full control over per-row markup that the Completion API doesn't expose, same reasoning as `TableWidget`/`TransclusionWidget`/`TasksQueryWidget`.
 
-- **No `#` typed yet**: filters `noteIndex` by substring match, `apply: '[[Name]]'`. `validFor: /^\[\[[^\]#]*$/` deliberately excludes `#` — typing one invalidates the result and forces CM6 to re-run the source rather than just re-filtering the existing (note-name) options against a query that now contains `#`.
-- **`#` typed** (`![[Note#` or `[[Note#`): switches to heading search for the note part before the `#`. `requestHeadings(notePart)` posts `{ type: 'get-headings', id, note: notePart }` and returns a `Promise` resolved by the `headings-result` handler (correlated via a locally-generated `id`, tracked in `pendingHeadingRequests: Map<id, resolve>` — parallel in spirit to how `tasksQueryPending`/`transclusionPending` dedupe host round-trips, but here every request gets its own id since results aren't cached/reused across different queries). Options are the host's `parseHeadings()` order (i.e. **document order**, not alphabetical — satisfies "same hierarchical order as written"), filtered by substring on `text`, labeled `'#'.repeat(level) + ' ' + text` so the `#`/`##`/`###` prefix visually conveys nesting, `apply: '[[notePart#Heading]]'`.
+- **Trigger**: `WIKI_TRIGGER_RE = /\[\[([^\]\n]*)$/` against the text before the cursor, re-evaluated on every `docChanged`/`selectionSet` update. Matches whether preceded by `!` or not (fires for both `[[note]]` links and `![[note]]` transclusions) — only the `[[...]]` span (from the `[[` onward, i.e. `openBracketFrom` through the cursor) is ever replaced on accept.
+- **No `#` typed yet** (`mode: 'notes'`): empty query → `noteHistory.slice(0, 5)` (see `note-history` below); non-empty query → `matchNotes(query)`, which filters `noteIndex` by substring match on `name` (case-insensitive) and sorts by match-index-then-name so a name *starting with* the query sorts ahead of one that merely contains it, capped to `WIKI_SUGGEST_MAX` (5). Zero matches renders a "No se encontraron resultados" row instead of hiding the popup.
+- **`#` typed** (`![[Note#` or `[[Note#`, `mode: 'headings'`): unchanged from the old `wikiComplete` — `requestHeadings(notePart)` posts `{ type: 'get-headings', id, note: notePart }` and resolves via the `headings-result` handler, correlated by a locally-generated `id` tracked in `pendingHeadingRequests: Map<id, resolve>` (parallel to how `tasksQueryPending`/`transclusionPending` dedupe host round-trips, but every request gets its own id here since results aren't cached/reused across queries). A `headingsToken` counter discards a stale reply if a newer keystroke has since re-triggered the request. Results are the host's `parseHeadings()` order (document order, not alphabetical), filtered by substring on `text`, capped to 5, labeled with `'#'.repeat(level) + ' '` prefix. An empty `notePart` (bare `[[#`) closes the popup rather than searching — same as before.
+- **Accept** (Enter, or a mouse click on a row — the popup is a real detached DOM node so this uses plain `addEventListener`, not `linkClickHandler`): replaces `[openBracketFrom, cursorPos)` with `[[Name]]` (notes mode), `[[notePart#Heading]]` (headings mode), or — when there are zero matches — `[[<raw typed text>]]` verbatim, then places the cursor immediately after the closing `]]`.
+- **Navigation**: `ArrowUp`/`ArrowDown` move `selected` with wraparound and re-render; `Escape` hides the popup and remembers the exact trigger context (`dismissedKey`) so it doesn't immediately reopen until the typed text or cursor position actually changes. All four keys, plus `Enter`, are bound via `wikiSuggestKeymap = Prec.highest(keymap.of([...]))` — highest precedence so they intercept before `defaultKeymap`'s own Enter/arrow-key handling, but only while `view.plugin(wikiSuggestPlugin).open` is true; otherwise each binding returns `false` and normal editing proceeds untouched.
+- Matched substrings are bold (`highlightMatch`): the popup builds `innerHTML` from `escapeHtml()` output plus `<b>...</b>` around the first case-insensitive occurrence of the query — safe against injection since note names/heading text only ever go through `escapeHtml` first, never raw.
 
 ### Message handlers (host → webview)
 
 | Message | Action |
 |---|---|
-| `note-index` | Updates `noteIndex` array |
+| `note-index` | Updates `noteIndex` array (`{ name, dir }[]` — `dir` is the vault-relative parent directory, `''` for root-level notes) |
+| `note-history` | Updates `noteHistory` array, same `{ name, dir }[]` shape, most-recently-opened first — powers `WikiSuggestView`'s empty-query "recent files" list |
 | `image-map` | Updates `imageMap`, triggers view dispatch to redraw imgPlugin |
 | `title-revert` | Restores title element to given name (rename failed) |
 | `external-update` | Replaces full editor content if it differs |
@@ -351,7 +357,7 @@ CM6 async autocompletion source (returns a `Promise` — CM6's `autocompletion({
 | `theme-css` | Sets `element.textContent = css` on `<style id="__obsidian-theme">`, then calls `view.requestMeasure()` (see "Font/theme metrics and `requestMeasure()`" below) |
 | `toggle-source-mode` | Reconfigures `previewCompartment` to `[]` or back |
 | `transclusion-result` | Caches `{ content, title, line, error }` in `transclusionCache` keyed by `msg.id` (the raw target string), dispatches `transclusionRebuildEffect` |
-| `headings-result` | Resolves the matching `pendingHeadingRequests` entry (by `msg.id`) with `msg.headings` — feeds `wikiComplete`'s section-search branch |
+| `headings-result` | Resolves the matching `pendingHeadingRequests` entry (by `msg.id`) with `msg.headings` — feeds `WikiSuggestView`'s heading-search mode |
 | `scroll-to-line` | Moves the selection to `doc.line(msg.line + 1)` and scrolls it to the vertical center — sent after navigating to a `#section` target |
 
 ### Drag & drop files onto the editor — status: fix attempted, not yet confirmed working

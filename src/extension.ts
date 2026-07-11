@@ -391,6 +391,12 @@ interface TaskDTO {
   description: string;
   tags: string[];
   isDone: boolean;
+  // Added alongside the note-checkbox status-icon fix in `webview-src/editor.js` — `isDone`
+  // alone can't distinguish "in progress" from "todo" from a custom status letter, which
+  // `renderTaskRow` needs to show a matching icon instead of a plain checked/unchecked box.
+  // Optional so this still degrades gracefully against an older build of the sibling
+  // extension that doesn't send it yet.
+  statusSymbol?: string;
   isOverdue: boolean;
   priority: string;
   dueDate: string | null;
@@ -483,7 +489,13 @@ function naiveToggleTaskLine(lineText: string): string[] {
 
 let extensionUri: vscode.Uri;
 let extensionContext: vscode.ExtensionContext;
-let noteIndex: string[] = [];
+// Sent to the webview for the [[ ]] wiki-link suggester (WikiSuggestView in
+// editor.js): `dir` is the vault-relative parent directory ('' for root-level
+// notes), shown as subtext under the note name, mirroring Obsidian's own
+// suggester. `fsPath` is only used host-side, to match note-history entries
+// (absolute paths) back to a name/dir pair — it isn't sent to the webview.
+interface NoteIndexEntry { name: string; dir: string; fsPath: string }
+let noteIndex: NoteIndexEntry[] = [];
 const activePanels: vscode.WebviewPanel[] = [];
 // Tracks the panel currently showing each document path, so navigateToTarget can
 // find a just-opened (or already-open) target panel to send `scroll-to-line` to.
@@ -492,14 +504,24 @@ const panelsByPath: Map<string, vscode.WebviewPanel> = new Map();
 async function buildNoteIndex(): Promise<void> {
   try {
     const files = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
-    noteIndex = files.map(f => path.basename(f.fsPath, '.md'));
+    const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    noteIndex = files.map(f => {
+      const relDir = vaultRoot
+        ? path.dirname(path.relative(vaultRoot, f.fsPath)).replace(/\\/g, '/')
+        : '';
+      return { name: path.basename(f.fsPath, '.md'), dir: relDir === '.' ? '' : relDir, fsPath: f.fsPath };
+    });
   } catch { noteIndex = []; }
   activePanels.forEach(p => {
-    try { p.webview.postMessage({ type: 'note-index', notes: noteIndex }); } catch {}
+    try {
+      p.webview.postMessage({ type: 'note-index', notes: noteIndex });
+      p.webview.postMessage({ type: 'note-history', notes: recentNoteEntries() });
+    } catch {}
   });
 }
 
-// ── Recently-opened notes history (for the "open note" quick pick) ────────────
+// ── Recently-opened notes history (for the "open note" quick pick and the
+// [[ ]] wiki-link suggester's empty-query "recent files" list) ───────────────
 // Persisted in globalState — not tied to a single window/session, and survives
 // VS Code restarts, same as Obsidian's own quick switcher history. Recorded from
 // resolveCustomTextEditor, the single choke point every note passes through
@@ -517,6 +539,26 @@ function getNoteHistory(): string[] {
   return extensionContext.globalState.get<string[]>(NOTE_HISTORY_KEY, []);
 }
 
+// Maps the fsPath history onto current noteIndex entries (name + dir), dropping
+// any history entry whose file no longer exists — same filtering the "open
+// note" quick pick already does for its own recent-items list.
+function recentNoteEntries(): NoteIndexEntry[] {
+  const byPath = new Map(noteIndex.map(e => [e.fsPath, e]));
+  const out: NoteIndexEntry[] = [];
+  for (const p of getNoteHistory()) {
+    const e = byPath.get(p);
+    if (e) { out.push(e); }
+  }
+  return out;
+}
+
+function broadcastRecentNotes(): void {
+  const entries = recentNoteEntries();
+  activePanels.forEach(p => {
+    try { p.webview.postMessage({ type: 'note-history', notes: entries }); } catch {}
+  });
+}
+
 // ── Custom editor provider ────────────────────────────────────────────────────
 
 class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
@@ -529,6 +571,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
   ): void {
     void ensureSubscribedToTasksChanges();
     recordNoteOpened(document.uri.fsPath);
+    broadcastRecentNotes();
 
     const getFont = (): string =>
       vscode.workspace.getConfiguration('obsidianLike').get<string>('markdownFont', '').trim() ||
@@ -585,6 +628,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     // issues with </style> sequences inside SVG data URLs in theme files.
     setTimeout(() => {
       webviewPanel.webview.postMessage({ type: 'note-index', notes: noteIndex });
+      webviewPanel.webview.postMessage({ type: 'note-history', notes: recentNoteEntries() });
       if (themeCss) {
         webviewPanel.webview.postMessage({ type: 'theme-css', css: themeCss });
       }
@@ -917,7 +961,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     imageMap:  Record<string, string> = {},
     breadcrumb: Array<{ name: string; fsPath: string }> = []
   ): string {
-    const init = JSON.stringify({ content, font, codeFont, codeFontSize, fontSize, noteIndex, title, imageMap, breadcrumb });
+    const init = JSON.stringify({
+      content, font, codeFont, codeFontSize, fontSize, noteIndex, title, imageMap, breadcrumb,
+      recentNotes: recentNoteEntries(),
+    });
     return `<!DOCTYPE html>
 <html lang="es">
 <head>
