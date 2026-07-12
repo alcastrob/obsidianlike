@@ -830,41 +830,6 @@ class MarkdownDocumentProvider {
                         }
                     })();
                 }
-                else if (msg.type === 'edit-task') {
-                    // Same document this panel is showing — unlike `toggle-task`, editing needs a
-                    // workspace-relative path (not just the line text) because the Tasks extension's
-                    // dialog is a WebviewPanel of its own, resolved async via WorkspaceEdit rather than
-                    // a synchronous string replace.
-                    (async () => {
-                        try {
-                            const tasksApi = await getTasksApi();
-                            if (!tasksApi?.editTaskAtLocation) {
-                                vscode.window.showInformationMessage('Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.');
-                                return;
-                            }
-                            const path = vscode.workspace.asRelativePath(document.uri, false);
-                            await tasksApi.editTaskAtLocation(path, msg.line);
-                        }
-                        catch (err) {
-                            vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
-                        }
-                    })();
-                }
-                else if (msg.type === 'edit-task-at-location') {
-                    (async () => {
-                        try {
-                            const tasksApi = await getTasksApi();
-                            if (!tasksApi?.editTaskAtLocation) {
-                                vscode.window.showInformationMessage('Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.');
-                                return;
-                            }
-                            await tasksApi.editTaskAtLocation(msg.path, msg.line);
-                        }
-                        catch (err) {
-                            vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
-                        }
-                    })();
-                }
                 else if (msg.type === 'paste-image') {
                     try {
                         const base64 = msg.data.replace(/^data:image\/[a-z]+;base64,/, '');
@@ -1117,7 +1082,7 @@ function activate(context) {
         try {
             const tasksApi = await getTasksApi();
             if (!tasksApi?.editTaskAtLocation) {
-                vscode.window.showInformationMessage('Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.');
+                vscode.window.showInformationMessage('Editar tareas requiere la extensión "Obsidian-like Tasks" instalada y actualizada.');
                 return;
             }
             await tasksApi.editTaskAtLocation(vscode.workspace.asRelativePath(vscode.Uri.file(docPath), false), line);

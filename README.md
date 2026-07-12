@@ -48,6 +48,16 @@ rectángulo con un botón "↗" para abrir la nota de origen (y hacer scroll a l
 sección, si la hay). Se resuelve de forma asíncrona contra el host, igual que
 los bloques ` ```tasks ` de la integración de Tareas.
 
+## Vista previa al pasar el ratón (`Ctrl`/`Cmd` + hover sobre un `[[wikilink]]`)
+
+Manteniendo pulsado `Ctrl` (o `Cmd` en macOS) mientras el cursor del ratón está
+sobre un `[[wikilink]]` (también funciona sobre los enlaces dentro de una
+tabla), aparece un pequeño popup flotante con el contenido de la nota
+apuntada (o solo la sección, si el enlace incluye `#Encabezado`) — igual que
+la vista previa de página de Obsidian. Se puede mover el ratón hacia el
+propio popup para leerlo con calma sin que se cierre; se cierra al soltar
+`Ctrl`/`Cmd` o al mover el ratón fuera del enlace y del popup.
+
 ## Abrir nota (`Ctrl+O` / `Cmd+O`)
 
 Selector flotante (`QuickPick` nativo de VS Code — un webview no puede flotar
@@ -94,24 +104,23 @@ ratón sobre la cabecera (la barra o el propio texto), igual que en Obsidian —
 también sirve para plegar/desplegar la sección. Detalle técnico completo en
 `CLAUDE.md`.
 
-## Tareas (`- [ ] ...`) — integración con "Obsidian-Like Tasks"
+## Tareas (`- [ ] ...`) — integración con "Obsidian-like Tasks"
 
 Las líneas de checkbox se reconocen y renderizan como en Obsidian: checkbox real (clicable),
-tachado al completar, fecha vencida en rojo, y un botón ✏️ junto a cada una para editarla (abre
-el diálogo "Create or edit Task" de la extensión de Tasks, ya relleno con los datos de esa tarea
-concreta) — o, con el cursor sobre la línea de la tarea, el atajo `Shift+Alt+E` hace lo
-mismo sin necesidad del ratón. Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el
-plugin Tasks de Obsidian — `not done`, `group by`, filtros con expresiones JS, etc.) se renderizan
-como una lista de tareas real dentro del propio editor, cada fila con su propio checkbox y botón
-de editar.
+tachado al completar, fecha vencida en rojo. Con el cursor sobre la línea de la tarea, el atajo
+`Shift+Alt+E` (comando `vaultTool.editTaskAtCursor`) abre el diálogo "Create or edit Task" de la
+extensión de Tasks, ya relleno con los datos de esa tarea concreta. Los bloques ` ```tasks ` (con
+la misma sintaxis de consulta que el plugin Tasks de Obsidian — `not done`, `group by`, filtros
+con expresiones JS, etc.) se renderizan como una lista de tareas real dentro del propio editor,
+cada fila con su propio checkbox.
 
 Esto funciona como **dependencia opcional** de la extensión hermana `angelCastro.obsidian-like-tasks`
 (repo `obsidianlike_tasks`): si no está instalada, los checkboxes siguen funcionando con un toggle
-simple `[ ]`↔`[x]` sin recurrencia, los bloques `tasks` no se renderizan, y el botón de editar
-avisa de que hace falta esa extensión en vez de abrir nada. Si está instalada, toda la lógica de
+simple `[ ]`↔`[x]` sin recurrencia, los bloques `tasks` no se renderizan, y `Shift+Alt+E` avisa de
+que hace falta esa extensión en vez de abrir nada. Si está instalada, toda la lógica de
 parseo/recurrencia/queries/edición vive ahí — Obsidian-like solo pinta el resultado y reenvía los
-clics (`{ type: 'edit-task', line }` / `{ type: 'edit-task-at-location', path, line }` para el
-botón de editar). Detalle técnico completo en `CLAUDE.md`.
+clics de checkbox (`{ type: 'toggle-task', line }` / `{ type: 'toggle-task-at-location', path,
+line }`). Detalle técnico completo en `CLAUDE.md`.
 
 ## Compatibilidad multiplataforma (Windows / macOS)
 

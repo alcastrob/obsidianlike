@@ -138,21 +138,6 @@ const vsTheme = EditorView.theme({
     fontSize: '1em',
     top: '0',
   },
-  // Small pencil icon next to a task checkbox / tasks-query row — opens the
-  // "Create or edit Task" dialog for that task. Dim by default so it doesn't
-  // compete with the description text; full opacity on hover signals it's
-  // clickable, same convention as .cm-transclusion-open elsewhere in this theme.
-  '.cm-task-edit-btn': {
-    display: 'inline-block',
-    cursor: 'pointer',
-    opacity: '0.35',
-    fontSize: '0.85em',
-    verticalAlign: 'middle',
-    marginLeft: '0.3em',
-  },
-  '.cm-task-edit-btn:hover': {
-    opacity: '1',
-  },
   '.cm-task-overdue': {
     color: 'var(--text-error, #e06c75)',
     fontWeight: 'bold',
@@ -385,6 +370,36 @@ const vsTheme = EditorView.theme({
     opacity: '0.7',
   },
   '.cm-wls-footer b': { fontWeight: '700' },
+  // Ctrl/Cmd+hover wiki-link preview popup (HoverPreviewView) — a plain floating
+  // DOM element appended to `.cm-editor`, positioned like `.cm-wikilink-suggest`.
+  '.cm-hover-preview': {
+    position: 'absolute',
+    zIndex: '60',
+    minWidth: '260px',
+    maxWidth: '420px',
+    maxHeight: '320px',
+    overflowY: 'auto',
+    background: 'var(--vscode-editorWidget-background, #252526)',
+    color: 'var(--vscode-editorWidget-foreground, inherit)',
+    border: '1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35))',
+    borderRadius: '6px',
+    boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+    fontSize: '0.92em',
+    padding: '10px 14px',
+  },
+  '.cm-hover-preview-title': {
+    fontWeight: '600',
+    fontSize: '0.82em',
+    opacity: '0.6',
+    marginBottom: '4px',
+  },
+  '.cm-hover-preview-body > :first-child': { marginTop: '0' },
+  '.cm-hover-preview-body > :last-child': { marginBottom: '0' },
+  '.cm-hover-preview-loading, .cm-hover-preview-error': {
+    opacity: '0.6',
+    fontStyle: 'italic',
+  },
+  '.cm-hover-preview-error': { color: 'var(--text-error, #e06c75)' },
   // Standalone inline code (`text`) — a small chip, same look as before this
   // was split out of mdHighlight's tags.monospace spec into a stable class name.
   '.cm-inline-code': {
@@ -736,11 +751,11 @@ const STATUS_ICON = {
 // Renders a real <input type="checkbox"> for the plain unchecked state (`[ ]`),
 // or a clickable status-icon <span> for anything else (see STATUS_ICON above —
 // a checkbox can only ever show two visual states, so done/cancelled/
-// in-progress/custom statuses need a real glyph instead), plus a small "edit"
-// button. Unlike BulletWidget, this is rendered on the active/cursor line too
-// (not gated behind active.has(ln)) so it stays clickable while editing the
-// task text. `line` is the 0-based doc line number, read back by the click
-// handler and sent to the extension host as `toggle-task` / `edit-task`.
+// in-progress/custom statuses need a real glyph instead). Unlike BulletWidget,
+// this is rendered on the active/cursor line too (not gated behind
+// active.has(ln)) so it stays clickable while editing the task text. `line` is
+// the 0-based doc line number, read back by the click handler and sent to the
+// extension host as `toggle-task`.
 class TaskCheckboxWidget extends WidgetType {
   constructor(statusChar, isDone, line) { super(); this.statusChar = statusChar; this.isDone = isDone; this.line = line; }
   eq(other) { return this.statusChar === other.statusChar && this.line === other.line; }
@@ -765,13 +780,6 @@ class TaskCheckboxWidget extends WidgetType {
       icon.textContent = STATUS_ICON[this.statusChar] || this.statusChar;
       wrapper.appendChild(icon);
     }
-
-    const editBtn = document.createElement('span');
-    editBtn.className = 'cm-task-edit-btn';
-    editBtn.title = 'Edit task';
-    editBtn.dataset.line = String(this.line);
-    editBtn.textContent = '✏️';
-    wrapper.appendChild(editBtn);
 
     return wrapper;
   }
@@ -812,8 +820,8 @@ const TASK_PRIORITY_ICON = {
 // states, or a status-icon <span> otherwise (see STATUS_ICON/TaskCheckboxWidget
 // above) — but carries both `data-path` and `data-line` since results can come
 // from any file in the vault, not just the currently open document — the click
-// handler below reads both and sends `toggle-task-at-location`/
-// `edit-task-at-location` instead of `toggle-task`/`edit-task`.
+// handler below reads both and sends `toggle-task-at-location` instead of
+// `toggle-task`.
 function renderTaskRow(t) {
   const row = document.createElement('div');
   row.className = 'cm-tasks-query-item' + (t.isDone ? ' cm-task-done' : '');
@@ -866,13 +874,6 @@ function renderTaskRow(t) {
     row.appendChild(r);
   }
 
-  const editBtn = document.createElement('span');
-  editBtn.className = 'cm-task-edit-btn cm-task-query-edit-btn';
-  editBtn.title = 'Edit task';
-  editBtn.dataset.path = t.path;
-  editBtn.dataset.line = String(t.line);
-  editBtn.textContent = '✏️';
-  row.appendChild(editBtn);
   return row;
 }
 
@@ -1630,6 +1631,140 @@ const transclusionPlugin = ViewPlugin.fromClass(class {
   }
 }, { decorations: v => v.decorations });
 
+// ── Ctrl+hover wiki-link preview popup ────────────────────────────────────────
+// Holding Ctrl (Cmd on macOS) while the mouse rests over a [[wiki-link]] shows a
+// small floating popup with the target note's content — Obsidian's own "page
+// preview" hover behavior. Reuses the exact same host round-trip as note
+// transclusions (`transclusionCache`/`requestTransclusion`/`transclusion-result`)
+// since the data need — raw target string -> { content, title, line, error } —
+// is identical; this also means a target already fetched for a `![[...]]`
+// transclusion elsewhere in the doc previews instantly, and vice versa.
+//
+// Detection piggybacks on `linkClickHandler`'s own `mousemove` handler (added
+// there, not here) rather than a second DOM walk: `e.ctrlKey`/`e.metaKey` is
+// read straight off the mousemove event, since keydown/keyup only fire while
+// some element in the page has focus and would miss "Ctrl already held, then
+// move the mouse over a link" — a plain mousemove's modifier flags are always
+// current regardless of focus.
+const HOVER_PREVIEW_DELAY = 300; // ms — mirrors Obsidian's own hover-preview delay
+
+class HoverPreviewView {
+  constructor(view) {
+    this.view = view;
+    this.dom = document.createElement('div');
+    this.dom.className = 'cm-hover-preview';
+    this.dom.style.display = 'none';
+    view.dom.appendChild(this.dom);
+
+    this.linkEl = null;   // the .cm-wiki-link/[data-wiki] element currently tracked
+    this.target = null;   // its raw wiki-link target string
+    this.showTimer = null;
+    this.visible = false;
+    this.overPopup = false; // pointer is over the popup itself — keep it open
+
+    this.dom.addEventListener('mouseenter', () => { this.overPopup = true; });
+    this.dom.addEventListener('mouseleave', () => {
+      this.overPopup = false;
+      if (!this.linkEl) this.hide();
+    });
+  }
+
+  destroy() { this.dom.remove(); }
+
+  onMouseMove(e, linkEl, rawTarget) {
+    const ctrlHeld = e.ctrlKey || e.metaKey;
+    if (!ctrlHeld || !linkEl) { this.leaveLink(); return; }
+    if (linkEl === this.linkEl) return; // still hovering the same link
+    this.leaveLink();
+    this.linkEl = linkEl;
+    this.target = rawTarget;
+    this.showTimer = setTimeout(() => this.show(), HOVER_PREVIEW_DELAY);
+  }
+
+  // Called on Ctrl/Cmd release too (see the document-level keyup listener near
+  // the bottom of this file) so the popup disappears immediately even if the
+  // mouse doesn't move right after releasing the key.
+  leaveLink() {
+    clearTimeout(this.showTimer);
+    this.showTimer = null;
+    this.linkEl = null;
+    this.target = null;
+    if (!this.overPopup) this.hide();
+  }
+
+  show() {
+    if (!this.target) return;
+    this.visible = true;
+    const cached = transclusionCache.get(this.target);
+    if (cached === undefined) requestTransclusion(this.target);
+    this.render(cached);
+  }
+
+  hide() {
+    this.visible = false;
+    this.dom.style.display = 'none';
+  }
+
+  // Re-paints with fresh data once a pending transclusion-result for this exact
+  // target arrives — see the 'transclusion-result' message handler below.
+  refresh() {
+    if (!this.visible || !this.target) return;
+    this.render(transclusionCache.get(this.target));
+  }
+
+  render(data) {
+    if (!this.linkEl || !this.linkEl.isConnected) { this.hide(); return; }
+    // Deferred via requestMeasure, not read synchronously here — same reason as
+    // WikiSuggestView.render() above: this can run from inside a domEventHandlers
+    // callback, and CM6 forbids reading layout synchronously at arbitrary times.
+    this.view.requestMeasure({
+      key: this,
+      read: () => ({
+        linkRect: this.linkEl.getBoundingClientRect(),
+        editorRect: this.view.dom.getBoundingClientRect(),
+      }),
+      write: measured => this.paint(measured, data),
+    });
+  }
+
+  paint({ linkRect, editorRect }, data) {
+    if (!this.visible) return;
+    const dom = this.dom;
+    dom.textContent = '';
+    dom.style.display = 'block';
+
+    if (data === undefined) {
+      const loading = document.createElement('div');
+      loading.className = 'cm-hover-preview-loading';
+      loading.textContent = 'Cargando…';
+      dom.appendChild(loading);
+    } else if (data.error) {
+      const err = document.createElement('div');
+      err.className = 'cm-hover-preview-error';
+      err.textContent = data.error === 'section-not-found'
+        ? `Sección no encontrada en "${data.title || this.target}"`
+        : `No se encontró "${this.target}"`;
+      dom.appendChild(err);
+    } else {
+      if (data.title) {
+        const titleEl = document.createElement('div');
+        titleEl.className = 'cm-hover-preview-title';
+        titleEl.textContent = data.title;
+        dom.appendChild(titleEl);
+      }
+      const body = document.createElement('div');
+      body.className = 'cm-hover-preview-body';
+      body.appendChild(renderMarkdownBlock(data.content));
+      dom.appendChild(body);
+    }
+
+    dom.style.left = Math.max(0, linkRect.left - editorRect.left) + 'px';
+    dom.style.top = (linkRect.bottom - editorRect.top + 4) + 'px';
+  }
+}
+
+const hoverPreviewPlugin = ViewPlugin.fromClass(HoverPreviewView);
+
 // ── Wiki-link suggestion popup ────────────────────────────────────────────────
 // Triggers on both `[[` (links) and `![[` (transclusions) since the trigger
 // regex matches on `[[` alone — the leading `!`, if present, is left as-is and
@@ -2070,8 +2205,6 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (transclOpen) { e.preventDefault(); return true; }
     const taskCb = e.target.closest('.cm-task-checkbox');
     if (taskCb) { e.preventDefault(); return true; }
-    const taskEditBtn = e.target.closest('.cm-task-edit-btn');
-    if (taskEditBtn) { e.preventDefault(); return true; }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
@@ -2125,25 +2258,6 @@ const linkClickHandler = EditorView.domEventHandlers({
       vscode.postMessage({ type: 'toggle-task', line: Number(taskCb.dataset.line) });
       return true;
     }
-    // Same split as the checkbox handling just above: a tasks-query row's edit
-    // button carries `data-path` (the task may live in any file in the vault),
-    // the inline widget's only carries `data-line` (always the open document).
-    const taskQueryEditBtn = e.target.closest('.cm-task-query-edit-btn');
-    if (taskQueryEditBtn) {
-      e.preventDefault();
-      vscode.postMessage({
-        type: 'edit-task-at-location',
-        path: taskQueryEditBtn.dataset.path,
-        line: Number(taskQueryEditBtn.dataset.line),
-      });
-      return true;
-    }
-    const taskEditBtn = e.target.closest('.cm-task-edit-btn');
-    if (taskEditBtn) {
-      e.preventDefault();
-      vscode.postMessage({ type: 'edit-task', line: Number(taskEditBtn.dataset.line) });
-      return true;
-    }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
@@ -2153,6 +2267,23 @@ const linkClickHandler = EditorView.domEventHandlers({
       vscode.postMessage({ type: 'open-url', url });
       return true;
     }
+    return false;
+  },
+  // Ctrl/Cmd+hover preview (HoverPreviewView) — never claims the event, only
+  // observes it, so it can't interfere with normal cursor placement/selection.
+  mousemove(e, view) {
+    const hp = view.plugin(hoverPreviewPlugin);
+    if (!hp) return false;
+    const wikiEl = isWikiLinkEl(e.target, view.dom);
+    const tableWiki = !wikiEl ? e.target.closest('[data-wiki]') : null;
+    const linkEl = wikiEl || tableWiki;
+    const rawTarget = wikiEl ? (wikiEl.dataset.target || wikiEl.textContent.trim())
+                      : tableWiki ? tableWiki.dataset.wiki : null;
+    hp.onMouseMove(e, linkEl, rawTarget);
+    return false;
+  },
+  mouseleave(e, view) {
+    view.plugin(hoverPreviewPlugin)?.leaveLink();
     return false;
   },
 });
@@ -2304,6 +2435,7 @@ function createEditor(parent, content) {
       previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]),
       foldPlugin,
       linkClickHandler,
+      hoverPreviewPlugin,
       wikiSuggestPlugin,
       wikiSuggestKeymap,
       keymap.of([
@@ -2409,6 +2541,15 @@ view.focus();
 if (document.fonts && document.fonts.ready) {
   document.fonts.ready.then(() => { try { view.requestMeasure(); } catch (_) {} });
 }
+
+// Releasing Ctrl/Cmd should close the hover-preview popup right away, even if
+// the mouse doesn't move afterward — mousemove's own e.ctrlKey check (in
+// linkClickHandler) only re-evaluates on the next pointer movement.
+document.addEventListener('keyup', e => {
+  if (e.key === 'Control' || e.key === 'Meta') {
+    currentView && currentView.plugin(hoverPreviewPlugin)?.leaveLink();
+  }
+});
 
 // ── Source mode toggle ────────────────────────────────────────────────────────
 function toggleSourceMode() {
@@ -2519,6 +2660,7 @@ window.addEventListener('message', ev => {
       transclusionCache.set(msg.id, { content: msg.content, title: msg.title, line: msg.line, error: msg.error });
       transclusionPending.delete(msg.id);
       view.dispatch({ effects: transclusionRebuildEffect.of(null) });
+      view.plugin(hoverPreviewPlugin)?.refresh();
       break;
     case 'headings-result': {
       const resolve = pendingHeadingRequests.get(msg.id);

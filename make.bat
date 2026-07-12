@@ -23,6 +23,12 @@ ECHO CODE 4
 call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidianlike-calendar
 call code --profile "Obsidian like" --install-extension obsidianlike-calendar-0.0.1.vsix
 
+cd ..\obsidianlike_search
+call npm run package
+ECHO CODE 5
+call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidianlike-search
+call code --profile "Obsidian like" --install-extension obsidianlike-search-0.0.1.vsix
+
 cd ..\obsidianlike
 ECHO Matas
 taskkill /IM code.exe /F

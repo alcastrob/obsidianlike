@@ -420,11 +420,10 @@ interface TasksExtensionApi {
   renderTasksQuery?(queryText: string): TasksQueryResultDTO;
   toggleTaskAtLocation?(path: string, line: number): Promise<void>;
   // Opens the Tasks extension's own "Create or edit Task" webview dialog for the
-  // task at (path, line) and applies the result. Added so the pencil icon next to
-  // a task checkbox (see `edit-task`/`edit-task-at-location` below) has somewhere
-  // to go — this editor's own `activeTextEditor`-based cursor tracking doesn't
-  // exist here (we're a CustomTextEditorProvider, not a TextEditor), so the Tasks
-  // extension has no way to know which task the user meant unless told explicitly.
+  // task at (path, line) and applies the result. Used by `vaultTool.editTaskAtCursor`
+  // (this editor's own `activeTextEditor`-based cursor tracking doesn't exist here —
+  // we're a CustomTextEditorProvider, not a TextEditor — so the Tasks extension has
+  // no way to know which task the user meant unless told explicitly).
   editTaskAtLocation?(path: string, line: number): Promise<void>;
   onDidChangeTasks?: vscode.Event<void>;
 }
@@ -871,43 +870,6 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             }
           })();
 
-        } else if (msg.type === 'edit-task') {
-          // Same document this panel is showing — unlike `toggle-task`, editing needs a
-          // workspace-relative path (not just the line text) because the Tasks extension's
-          // dialog is a WebviewPanel of its own, resolved async via WorkspaceEdit rather than
-          // a synchronous string replace.
-          (async () => {
-            try {
-              const tasksApi = await getTasksApi();
-              if (!tasksApi?.editTaskAtLocation) {
-                vscode.window.showInformationMessage(
-                  'Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.',
-                );
-                return;
-              }
-              const path = vscode.workspace.asRelativePath(document.uri, false);
-              await tasksApi.editTaskAtLocation(path, msg.line as number);
-            } catch (err) {
-              vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
-            }
-          })();
-
-        } else if (msg.type === 'edit-task-at-location') {
-          (async () => {
-            try {
-              const tasksApi = await getTasksApi();
-              if (!tasksApi?.editTaskAtLocation) {
-                vscode.window.showInformationMessage(
-                  'Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.',
-                );
-                return;
-              }
-              await tasksApi.editTaskAtLocation(msg.path as string, msg.line as number);
-            } catch (err) {
-              vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
-            }
-          })();
-
         } else if (msg.type === 'paste-image') {
           try {
             const base64  = (msg.data as string).replace(/^data:image\/[a-z]+;base64,/, '');
@@ -1181,7 +1143,7 @@ export function activate(context: vscode.ExtensionContext) {
       const tasksApi = await getTasksApi();
       if (!tasksApi?.editTaskAtLocation) {
         vscode.window.showInformationMessage(
-          'Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.',
+          'Editar tareas requiere la extensión "Obsidian-like Tasks" instalada y actualizada.',
         );
         return;
       }
