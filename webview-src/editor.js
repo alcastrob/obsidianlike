@@ -64,11 +64,25 @@ const vsTheme = EditorView.theme({
   // [[wiki-link]]'s inner "[Foo]" (see the comment above where this class is
   // applied, in livePreviewPlugin) — !important since it must win over
   // mdHighlight's plain (non-!important) generated classes regardless of
-  // which stylesheet CM6 happens to insert first.
-  '.cm-wiki-link-raw': {
+  // which stylesheet CM6 happens to insert first. Also applied to `*`
+  // (every descendant): CM6 renders overlapping mark decorations from
+  // different extensions as *nested* spans, so mdHighlight's own tags.link/
+  // tags.processingInstruction classes end up on inner spans (the bracket
+  // characters and the link text each get their own nested span with their
+  // own explicit `color`/`font-size`). A child element's own explicit CSS
+  // property always wins over an ancestor's value for that property, no
+  // matter how the ancestor's rule is weighted — `!important` on the outer
+  // `.cm-wiki-link-raw` span alone does nothing for those inner spans, since
+  // "inherit" only kicks in when nothing else matches the element itself.
+  // Verified empirically with a real EditorView in jsdom (throwaway script,
+  // not checked in): the DOM comes out as
+  // `<span class="cm-wiki-link-raw"><span class="tok-link tok-processingInstruction">[</span>...`
+  // i.e. genuinely nested, not a single flat span with combined classes.
+  '.cm-wiki-link-raw, .cm-wiki-link-raw *': {
     color: 'inherit !important',
     textDecoration: 'none !important',
     fontSize: 'inherit !important',
+    cursor: 'text !important',
   },
   '.cm-md-link': {
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
@@ -533,6 +547,22 @@ const TASK_DUE_RE        = /(?:📅|📆|🗓)\uFE0F? *(\d{4}-\d{2}-\d{2})/u;
 const TASK_PRIORITY_RE   = /(🔺|⏫|🔼|🔽|⏬)/u;
 const TASK_RECURRENCE_RE = /🔁\uFE0F? *([a-zA-Z0-9, !]+)/u;
 
+// CM6 keymap action for "edit task at cursor" (Mod-Alt-e, see createEditor below). Deliberately
+// not Mod-Shift-Enter (the first version): that chord is VS Code's own default for "Insert Line
+// Above", and for a CustomTextEditorProvider webview that appears to be enough for VS Code to
+// swallow the keydown before it ever reaches CM6, regardless of any `when` clause — the key
+// simply did nothing. Mod-Alt-e has no default VS Code binding and no known extension conflict.
+// Mirrors the ✏️ button's click handler: same `edit-task` message, same 0-based line number
+// (line.number is 1-based). Runs entirely inside the webview, where the cursor position is
+// already known locally — no need to expose it to any other extension for this.
+function editTaskAtCursor(view) {
+  const pos = view.state.selection.main.head;
+  const line = view.state.doc.lineAt(pos);
+  if (!TASK_LINE_RE.test(line.text)) return false;
+  vscode.postMessage({ type: 'edit-task', line: line.number - 1 });
+  return true;
+}
+
 function todayDateOnly() {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -554,6 +584,16 @@ function getActiveLines(state) {
     for (let i = a; i <= b; i++) set.add(i);
   }
   return set;
+}
+
+// Whether any selection range touches [from, to] (inclusive) — used where a
+// raw/rendered switch must key off the cursor being inside a specific token
+// (e.g. a `[[wiki-link]]`'s own brackets) rather than merely on the same line.
+function rangeIsActive(state, from, to) {
+  for (const r of state.selection.ranges) {
+    if (r.from <= to && r.to >= from) return true;
+  }
+  return false;
 }
 
 // ── Table widget ──────────────────────────────────────────────────────────────
@@ -1156,7 +1196,8 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           const ln = state.doc.lineAt(node.from).number;
 
           // ── [[wiki-link]] inner brackets — cancel lezer-markdown's coincidental
-          // Link/LinkMark tagging, active line ONLY ──────────────────────────
+          // Link/LinkMark tagging, only while the cursor is inside THIS link's
+          // own brackets ──────────────────────────────────────────────────────
           // `[[Foo]]` isn't real CommonMark syntax, but the *inner* "[Foo]"
           // looks exactly like a shortcut reference link to lezer-markdown, so
           // it parses as a Link node with its own LinkMark children — while the
@@ -1164,18 +1205,23 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           // syntax-highlighting classes at all. That leaves the inner brackets
           // styled (tags.link + tags.processingInstruction, i.e. colored and a
           // smaller font-size) while the outer ones stay plain text-colored —
-          // visibly mismatched while editing. Gated to the active line only:
-          // on a non-active line wikiLinkPlugin's own decorations already hide
-          // the brackets and style the display text with .cm-wiki-link — this
-          // decoration would stack on top of that (same node, different plugin)
-          // and its !important reset would cancel wikiLinkPlugin's blue/underline
-          // styling too. `![[Foo]]` doesn't have this problem: the leading "!"
-          // makes the *outer* Image node wrap everything, so every character —
-          // brackets included — already gets the same tags.link styling
-          // uniformly; skip nodes parented by Image so that stays untouched.
-          if (active.has(ln) && n === 'Link' && node.node.parent && node.node.parent.name !== 'Image' &&
+          // visibly mismatched while editing. Gated to this link's own bracket
+          // range, not the whole line: wikiLinkPlugin now also switches a link
+          // to raw/rendered per-token (not per-line), so with several
+          // [[wiki-links]] on one active line, only the one the cursor is
+          // actually inside should stay raw — the others still get
+          // wikiLinkPlugin's hidden-brackets + .cm-wiki-link styling, and this
+          // decoration must not stack on top of that (same node, different
+          // plugin) since its !important reset would cancel wikiLinkPlugin's
+          // blue/underline styling too. `![[Foo]]` doesn't have this problem:
+          // the leading "!" makes the *outer* Image node wrap everything, so
+          // every character — brackets included — already gets the same
+          // tags.link styling uniformly; skip nodes parented by Image so that
+          // stays untouched.
+          if (n === 'Link' && node.node.parent && node.node.parent.name !== 'Image' &&
               state.doc.sliceString(node.from - 1, node.from) === '[' &&
-              state.doc.sliceString(node.to, node.to + 1) === ']') {
+              state.doc.sliceString(node.to, node.to + 1) === ']' &&
+              rangeIsActive(state, node.from - 1, node.to + 1)) {
             decs.push({ from: node.from, to: node.to, dec: Decoration.mark({ class: 'cm-wiki-link-raw' }) });
           }
 
@@ -1322,7 +1368,6 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
   }
   _build(view) {
     const { state } = view;
-    const active = getActiveLines(state);
     const { from: vf, to: vt } = view.viewport;
     const str = state.doc.sliceString(vf, vt);
     const re = /(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
@@ -1331,8 +1376,7 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
     while ((m = re.exec(str)) !== null) {
       const mFrom = vf + m.index;
       const mTo   = mFrom + m[0].length;
-      const ln = state.doc.lineAt(mFrom).number;
-      if (active.has(ln)) continue;
+      if (rangeIsActive(state, mFrom, mTo)) continue;
       const name  = m[1];
       const alias = m[2];
       const linkClass = 'cm-wiki-link' + (noteTargetExists(name) ? '' : ' cm-wiki-link-missing');
@@ -2280,6 +2324,7 @@ function createEditor(parent, content) {
       keymap.of([
         { key: 'Mod-b', run: v => toggleWrap(v, '**') },
         { key: 'Mod-i', run: v => toggleWrap(v, '*')  },
+        { key: 'Mod-Alt-e', run: editTaskAtCursor },
         ...defaultKeymap,
         ...historyKeymap,
         indentWithTab,

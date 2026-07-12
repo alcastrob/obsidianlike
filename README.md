@@ -36,6 +36,10 @@ correctamente como directorio en Windows.
   editor), todos los `[[wikilinks]]` que apuntaban a ella en el resto de la bóveda se
   actualizan automáticamente — añadiendo o quitando la carpeta de desambiguación según
   corresponda a la nueva ubicación.
+- Modo fuente vs. vista previa: cada `[[wikilink]]` cambia a texto plano (corchetes
+  visibles, sin subrayado ni color de enlace, no clicable) solo mientras el cursor está
+  entre sus propios corchetes — si hay varios `[[enlaces]]` en la misma línea, el resto
+  se sigue mostrando renderizado normalmente aunque el cursor esté en esa línea.
 
 ## Transclusiones (`![[nota]]`, `![[carpeta/nota]]`, `![[nota#sección]]`)
 
@@ -95,9 +99,11 @@ también sirve para plegar/desplegar la sección. Detalle técnico completo en
 Las líneas de checkbox se reconocen y renderizan como en Obsidian: checkbox real (clicable),
 tachado al completar, fecha vencida en rojo, y un botón ✏️ junto a cada una para editarla (abre
 el diálogo "Create or edit Task" de la extensión de Tasks, ya relleno con los datos de esa tarea
-concreta). Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el plugin Tasks de
-Obsidian — `not done`, `group by`, filtros con expresiones JS, etc.) se renderizan como una lista
-de tareas real dentro del propio editor, cada fila con su propio checkbox y botón de editar.
+concreta) — o, con el cursor sobre la línea de la tarea, el atajo `Ctrl+Alt+E` hace lo
+mismo sin necesidad del ratón. Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el
+plugin Tasks de Obsidian — `not done`, `group by`, filtros con expresiones JS, etc.) se renderizan
+como una lista de tareas real dentro del propio editor, cada fila con su propio checkbox y botón
+de editar.
 
 Esto funciona como **dependencia opcional** de la extensión hermana `angelCastro.obsidian-like-tasks`
 (repo `obsidianlike_tasks`): si no está instalada, los checkboxes siguen funcionando con un toggle
