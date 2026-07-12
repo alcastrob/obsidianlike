@@ -390,6 +390,10 @@ interface TaskDTO {
   line: number;
   description: string;
   tags: string[];
+  // Optional so this degrades gracefully against an older build of the sibling extension that
+  // doesn't send them yet — see `statusSymbol` above for the same pattern.
+  id?: string;
+  dependsOn?: string[];
   isDone: boolean;
   // Added alongside the note-checkbox status-icon fix in `webview-src/editor.js` — `isDone`
   // alone can't distinguish "in progress" from "todo" from a custom status letter, which
@@ -867,6 +871,26 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
               await tasksApi?.toggleTaskAtLocation?.(msg.path as string, msg.line as number);
             } catch (err) {
               vscode.window.showErrorMessage(`No se pudo alternar la tarea: ${err}`);
+            }
+          })();
+
+        } else if (msg.type === 'edit-task-at-location') {
+          // Sent by a ```tasks``` query row's edit button — unlike the single inline checkbox
+          // widget (covered by the `vaultTool.editTaskAtCursor` keybinding instead), a query
+          // result can point at any file in the vault, so there's no "current cursor" to fall
+          // back on here; the row already carries the exact (path, line) to edit.
+          (async () => {
+            try {
+              const tasksApi = await getTasksApi();
+              if (!tasksApi?.editTaskAtLocation) {
+                vscode.window.showInformationMessage(
+                  'Editar tareas requiere la extensión "Obsidian-like Tasks" instalada y actualizada.',
+                );
+                return;
+              }
+              await tasksApi.editTaskAtLocation(msg.path as string, msg.line as number);
+            } catch (err) {
+              vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
             }
           })();
 

@@ -131,12 +131,21 @@ const vsTheme = EditorView.theme({
   // like "w"/"d") — a checkbox can only ever show two visual states, so these
   // are a separate clickable <span> instead (see TaskCheckboxWidget/STATUS_ICON
   // below). Carries `.cm-task-checkbox` too, so it inherits cursor/margin/
-  // alignment from the rule above; only the box sizing is overridden here.
+  // alignment from the rule above. A color-emoji glyph renders noticeably
+  // larger than the checkbox's own 1em box at the same font-size, so this
+  // shrinks the font-size and centers/clips the glyph into that same fixed
+  // box instead of letting it size itself (`width/height: auto`, tried first,
+  // let each glyph's own oversized metrics dictate the box, which is exactly
+  // what made icons of different sizes/paddings misalign against the checkbox
+  // and against each other in a list of mixed-status tasks).
   '.cm-task-status-icon': {
-    width: 'auto', height: 'auto',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    width: '1em', height: '1em',
+    fontSize: '0.7em',
     lineHeight: '1',
-    fontSize: '1em',
-    top: '0',
   },
   '.cm-task-overdue': {
     color: 'var(--text-error, #e06c75)',
@@ -166,6 +175,32 @@ const vsTheme = EditorView.theme({
     fontSize: '0.95em',
     margin: '10px 0 4px',
   },
+  '.cm-tasks-query-filter': {
+    margin: '0 0 8px',
+  },
+  '.cm-tasks-query-filter input': {
+    width: '100%',
+    boxSizing: 'border-box',
+    font: 'inherit',
+    fontSize: '0.9em',
+    padding: '4px 8px',
+    background: 'var(--background-modifier-form-field, var(--background-secondary))',
+    color: 'inherit',
+    border: '1px solid var(--background-modifier-border, transparent)',
+    borderRadius: '4px',
+  },
+  '.cm-tasks-query-count': {
+    marginTop: '8px',
+    fontSize: '0.85em',
+    opacity: '0.6',
+  },
+  // Compound selectors (not just `.cm-tasks-query-hidden` alone) so this reliably wins over
+  // `.cm-tasks-query-item`/`.cm-tasks-query-group-title`'s own `display` regardless of which
+  // rule happens to be declared later in this object — equal-specificity single-class
+  // selectors would otherwise have the *later* declaration silently win the cascade.
+  '.cm-tasks-query-item.cm-tasks-query-hidden, .cm-tasks-query-group-title.cm-tasks-query-hidden': {
+    display: 'none',
+  },
   '.cm-tasks-query-list': {
     display: 'flex',
     flexDirection: 'column',
@@ -173,7 +208,8 @@ const vsTheme = EditorView.theme({
   },
   '.cm-tasks-query-item': {
     display: 'flex',
-    alignItems: 'flex-start',
+    flexWrap: 'wrap',
+    alignItems: 'center',
     gap: '0.3em',
     lineHeight: '1.5',
   },
@@ -181,11 +217,40 @@ const vsTheme = EditorView.theme({
     color: 'var(--text-muted, inherit)',
     textDecoration: 'line-through',
   },
-  '.cm-tasks-query-desc': { flex: '1 1 auto' },
+  '.cm-tasks-query-desc': { flex: '0 1 auto' },
   '.cm-tasks-query-badge': {
     opacity: '0.75',
     fontSize: '0.9em',
     whiteSpace: 'nowrap',
+  },
+  '.cm-tasks-query-due, .cm-tasks-query-depends': {
+    fontSize: '0.9em',
+    whiteSpace: 'nowrap',
+  },
+  '.cm-tasks-query-tag, .cm-tasks-query-id': {
+    display: 'inline-block',
+    padding: '0 0.5em',
+    borderRadius: '999px',
+    fontSize: '0.85em',
+    lineHeight: '1.6em',
+    whiteSpace: 'nowrap',
+    background: 'var(--tag-background, var(--background-modifier-hover))',
+    color: 'var(--tag-color, var(--text-normal, inherit))',
+  },
+  '.cm-tasks-query-backlink': {
+    fontSize: '0.85em',
+    opacity: '0.75',
+    whiteSpace: 'nowrap',
+  },
+  '.cm-task-query-edit-btn': {
+    display: 'inline-block',
+    cursor: 'pointer',
+    opacity: '0.35',
+    fontSize: '0.85em',
+    verticalAlign: 'middle',
+  },
+  '.cm-task-query-edit-btn:hover': {
+    opacity: '1',
   },
   // Folded heading content
   '.cm-fold-hidden': {
@@ -854,6 +919,22 @@ function renderTaskRow(t) {
   desc.textContent = t.description || '';
   row.appendChild(desc);
 
+  // Tags, ID, and depends-on are only present from a rebuilt sibling "Tasks" extension —
+  // `tags` degrades to `[]` and `id`/`dependsOn` to `undefined` against an older build, same
+  // pattern as `statusSymbol` above.
+  for (const tag of t.tags || []) {
+    const tg = document.createElement('span');
+    tg.className = 'cm-tasks-query-tag';
+    tg.textContent = tag;
+    row.appendChild(tg);
+  }
+  if (t.id) {
+    const idEl = document.createElement('span');
+    idEl.className = 'cm-tasks-query-id';
+    idEl.textContent = '🆔 ' + t.id;
+    row.appendChild(idEl);
+  }
+
   const icon = TASK_PRIORITY_ICON[t.priority];
   if (icon) {
     const p = document.createElement('span');
@@ -861,11 +942,27 @@ function renderTaskRow(t) {
     p.textContent = icon;
     row.appendChild(p);
   }
+  if (t.dependsOn && t.dependsOn.length > 0) {
+    // Plain text like the dates below, not a `.cm-tasks-query-badge` pill — same reasoning as
+    // the due-date fix: this should read as part of the task's own text.
+    const dep = document.createElement('span');
+    dep.className = 'cm-tasks-query-depends';
+    dep.textContent = '⛔ ' + t.dependsOn.join(',');
+    row.appendChild(dep);
+  }
   if (t.dueDate) {
+    // Unlike priority/recurrence, not wrapped in `.cm-tasks-query-badge` — a date should read as
+    // part of the task's own text (same font/color/weight as the description), not as a pill.
     const d = document.createElement('span');
-    d.className = 'cm-tasks-query-badge' + (t.isOverdue ? ' cm-task-overdue' : '');
+    d.className = 'cm-tasks-query-due' + (t.isOverdue ? ' cm-task-overdue' : '');
     d.textContent = '📅 ' + t.dueDate;
     row.appendChild(d);
+  }
+  if (t.startDate) {
+    const s = document.createElement('span');
+    s.className = 'cm-tasks-query-due';
+    s.textContent = '🛫 ' + t.startDate;
+    row.appendChild(s);
   }
   if (t.isRecurring && t.recurrenceRule) {
     const r = document.createElement('span');
@@ -873,6 +970,30 @@ function renderTaskRow(t) {
     r.textContent = '🔁 ' + t.recurrenceRule;
     row.appendChild(r);
   }
+
+  // Backlink to the file (and heading, if the task sits under one) the task was found in —
+  // clickable like any other wikilink, reusing the `[data-wiki]` pattern the table-cell
+  // wikilink handler already understands (see `linkClickHandler` below) rather than adding a
+  // new message type.
+  const noteName = (t.path || '').replace(/\.md$/i, '').split('/').pop();
+  if (noteName) {
+    const back = document.createElement('span');
+    back.className = 'cm-tasks-query-backlink';
+    const link = document.createElement('span');
+    link.className = 'cm-wiki-link';
+    link.dataset.wiki = t.heading ? `${noteName}#${t.heading}` : noteName;
+    link.textContent = t.heading ? `${noteName} > ${t.heading}` : noteName;
+    back.append('(', link, ')');
+    row.appendChild(back);
+  }
+
+  const editBtn = document.createElement('span');
+  editBtn.className = 'cm-task-query-edit-btn';
+  editBtn.title = 'Edit task';
+  editBtn.dataset.path = t.path;
+  editBtn.dataset.line = String(t.line);
+  editBtn.textContent = '✏️';
+  row.appendChild(editBtn);
 
   return row;
 }
@@ -891,29 +1012,47 @@ function renderEmptyNotice(container) {
   container.appendChild(empty);
 }
 
-// Renders a TasksQueryResultDTO into `container` (a freshly-created wrapper div).
+// Renders a TasksQueryResultDTO into `container` (a freshly-created wrapper div). Adds a
+// description filter box above the list and a "N tasks" count below it — both purely
+// client-side (filtering only ever toggles visibility of already-rendered rows), matching
+// Obsidian Tasks' own query results, which likewise just filter/count what's already rendered
+// rather than re-running the query.
 function renderTasksQueryResult(container, result) {
   const groups = result && result.groups;
   const items  = (result && result.items) || [];
+  const totalCount = groups ? groups.reduce((n, g) => n + ((g.items && g.items.length) || 0), 0) : items.length;
 
+  let filterInput = null;
+  if (totalCount > 0) {
+    const filterWrap = document.createElement('div');
+    filterWrap.className = 'cm-tasks-query-filter';
+    filterInput = document.createElement('input');
+    filterInput.type = 'text';
+    filterInput.placeholder = 'Filter by description...';
+    filterWrap.appendChild(filterInput);
+    container.appendChild(filterWrap);
+  }
+
+  const listWrap = document.createElement('div');
   if (groups) {
     const nonEmpty = groups.filter(g => g.items && g.items.length > 0);
     if (nonEmpty.length === 0) {
-      renderEmptyNotice(container);
+      renderEmptyNotice(listWrap);
     } else {
       nonEmpty.forEach(g => {
         const h = document.createElement('div');
         h.className = 'cm-tasks-query-group-title';
         h.textContent = g.name;
-        container.appendChild(h);
-        container.appendChild(renderTaskList(g.items));
+        listWrap.appendChild(h);
+        listWrap.appendChild(renderTaskList(g.items));
       });
     }
   } else if (items.length > 0) {
-    container.appendChild(renderTaskList(items));
+    listWrap.appendChild(renderTaskList(items));
   } else {
-    renderEmptyNotice(container);
+    renderEmptyNotice(listWrap);
   }
+  container.appendChild(listWrap);
 
   const unrecognized = (result && result.unrecognizedLines) || [];
   if (unrecognized.length > 0) {
@@ -921,6 +1060,33 @@ function renderTasksQueryResult(container, result) {
     warn.className = 'cm-tasks-query-warning';
     warn.textContent = '⚠ Líneas no reconocidas: ' + unrecognized.join(' | ');
     container.appendChild(warn);
+  }
+
+  if (totalCount > 0) {
+    const countEl = document.createElement('div');
+    countEl.className = 'cm-tasks-query-count';
+    container.appendChild(countEl);
+
+    const updateCount = () => {
+      const visible = listWrap.querySelectorAll('.cm-tasks-query-item:not(.cm-tasks-query-hidden)');
+      countEl.textContent = visible.length + (visible.length === 1 ? ' task' : ' tasks');
+    };
+
+    filterInput.addEventListener('input', () => {
+      const q = filterInput.value.trim().toLowerCase();
+      listWrap.querySelectorAll('.cm-tasks-query-item').forEach(row => {
+        const desc = row.querySelector('.cm-tasks-query-desc');
+        const text = desc ? desc.textContent.toLowerCase() : '';
+        row.classList.toggle('cm-tasks-query-hidden', q !== '' && !text.includes(q));
+      });
+      listWrap.querySelectorAll('.cm-tasks-query-group-title').forEach(h => {
+        const list = h.nextElementSibling;
+        const anyVisible = list && list.querySelector('.cm-tasks-query-item:not(.cm-tasks-query-hidden)');
+        h.classList.toggle('cm-tasks-query-hidden', !anyVisible);
+      });
+      updateCount();
+    });
+    updateCount();
   }
 }
 
@@ -2205,6 +2371,8 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (transclOpen) { e.preventDefault(); return true; }
     const taskCb = e.target.closest('.cm-task-checkbox');
     if (taskCb) { e.preventDefault(); return true; }
+    const taskQueryEditBtn = e.target.closest('.cm-task-query-edit-btn');
+    if (taskQueryEditBtn) { e.preventDefault(); return true; }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
@@ -2249,6 +2417,21 @@ const linkClickHandler = EditorView.domEventHandlers({
         type: 'toggle-task-at-location',
         path: taskQueryCb.dataset.path,
         line: Number(taskQueryCb.dataset.line),
+      });
+      return true;
+    }
+    // A tasks-query row's edit button carries `data-path` + `data-line` too (the task may live
+    // in any file in the vault), same reasoning as `.cm-task-query-checkbox` above — there's no
+    // equivalent for the single inline checkbox widget, since editing that one is covered by the
+    // `vaultTool.editTaskAtCursor` keybinding instead (the cursor is always in the right document
+    // for that case, unlike an arbitrary row in a query result).
+    const taskQueryEditBtn = e.target.closest('.cm-task-query-edit-btn');
+    if (taskQueryEditBtn) {
+      e.preventDefault();
+      vscode.postMessage({
+        type: 'edit-task-at-location',
+        path: taskQueryEditBtn.dataset.path,
+        line: Number(taskQueryEditBtn.dataset.line),
       });
       return true;
     }

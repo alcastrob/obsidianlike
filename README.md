@@ -107,20 +107,28 @@ también sirve para plegar/desplegar la sección. Detalle técnico completo en
 ## Tareas (`- [ ] ...`) — integración con "Obsidian-like Tasks"
 
 Las líneas de checkbox se reconocen y renderizan como en Obsidian: checkbox real (clicable),
-tachado al completar, fecha vencida en rojo. Con el cursor sobre la línea de la tarea, el atajo
-`Shift+Alt+E` (comando `vaultTool.editTaskAtCursor`) abre el diálogo "Create or edit Task" de la
-extensión de Tasks, ya relleno con los datos de esa tarea concreta. Los bloques ` ```tasks ` (con
-la misma sintaxis de consulta que el plugin Tasks de Obsidian — `not done`, `group by`, filtros
-con expresiones JS, etc.) se renderizan como una lista de tareas real dentro del propio editor,
-cada fila con su propio checkbox.
+tachado al completar, fecha vencida en rojo, con el mismo tamaño/alineación para los iconos de
+estado no estándar (en curso, en espera, delegada, cancelada) que para el checkbox nativo. Con el
+cursor sobre la línea de la tarea, el atajo `Shift+Alt+E` (comando `vaultTool.editTaskAtCursor`)
+abre el diálogo "Create or edit Task" de la extensión de Tasks, ya relleno con los datos de esa
+tarea concreta.
+
+Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el plugin Tasks de Obsidian —
+`not done`, `group by`, filtros con expresiones JS, etc.) se renderizan como una lista de tareas
+real dentro del propio editor: cada fila muestra checkbox, tags como pills, ID, prioridad,
+dependencias, fechas y un backlink clicable a la nota (con el encabezado bajo el que está la
+tarea, si tiene uno) — con un botón ✏️ propio para editar esa tarea concreta sin salir del
+listado. Encima del listado hay un filtro de texto por descripción, y debajo un contador de
+tareas mostradas, igual que en Obsidian.
 
 Esto funciona como **dependencia opcional** de la extensión hermana `angelCastro.obsidian-like-tasks`
 (repo `obsidianlike_tasks`): si no está instalada, los checkboxes siguen funcionando con un toggle
-simple `[ ]`↔`[x]` sin recurrencia, los bloques `tasks` no se renderizan, y `Shift+Alt+E` avisa de
-que hace falta esa extensión en vez de abrir nada. Si está instalada, toda la lógica de
-parseo/recurrencia/queries/edición vive ahí — Obsidian-like solo pinta el resultado y reenvía los
-clics de checkbox (`{ type: 'toggle-task', line }` / `{ type: 'toggle-task-at-location', path,
-line }`). Detalle técnico completo en `CLAUDE.md`.
+simple `[ ]`↔`[x]` sin recurrencia, los bloques `tasks` no se renderizan, y `Shift+Alt+E`/el botón
+✏️ de una fila avisan de que hace falta esa extensión en vez de abrir nada. Si está instalada, toda
+la lógica de parseo/recurrencia/queries/edición vive ahí — Obsidian-like solo pinta el resultado y
+reenvía los clics (`toggle-task`/`toggle-task-at-location` para el checkbox,
+`edit-task-at-location` para el botón de editar de una fila). Detalle técnico completo en
+`CLAUDE.md`.
 
 ## Compatibilidad multiplataforma (Windows / macOS)
 
