@@ -461,6 +461,76 @@ async function ensureSubscribedToTasksChanges(retriesLeft = 5) {
         catch { } });
     });
 }
+let dataviewApiPromise;
+// Same "retry on failure, cache on success" reasoning as getTasksApi() above.
+function getDataviewApi() {
+    if (!dataviewApiPromise) {
+        dataviewApiPromise = (async () => {
+            const ext = vscode.extensions.getExtension('angelCastro.obsidianlike-dataview');
+            if (!ext) {
+                dataviewApiPromise = undefined;
+                return undefined;
+            }
+            try {
+                return (await ext.activate());
+            }
+            catch {
+                dataviewApiPromise = undefined;
+                return undefined;
+            }
+        })();
+    }
+    return dataviewApiPromise;
+}
+function escapeHtmlForDataviewError(err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+// `lang` is the fence's info string ('dataview' | 'dql' | 'dataviewjs'); `currentFilePath` is the
+// vault-relative path of the note the block lives in, used as `dv.current()` for dataviewjs.
+async function renderDataviewBlock(lang, query, currentFilePath) {
+    const api = await getDataviewApi();
+    if (!api) {
+        return {
+            ok: false,
+            html: '<div class="dv-error">La extensión "Obsidian-like Dataview" no está instalada o activa.</div>',
+        };
+    }
+    try {
+        if (lang === 'dataviewjs') {
+            const result = await api.runDataviewJs(query, currentFilePath);
+            return { ok: result.ok, html: api.renderDataviewJsOutputHtml(result.output, result.error) };
+        }
+        return { ok: true, html: api.renderQueryResultHtml(api.runQuery(query)) };
+    }
+    catch (err) {
+        return { ok: false, html: `<div class="dv-error">${escapeHtmlForDataviewError(err)}</div>` };
+    }
+}
+// Broadcasts `dataview-changed` to every open panel whenever the sibling extension's workspace
+// index changes (a note was edited/created/deleted anywhere in the vault), so each panel's
+// ```dataview``` block cache gets invalidated and re-requests fresh data. Mirrors
+// ensureSubscribedToTasksChanges()'s retry-on-cold-start-race reasoning above.
+let subscribedToDataviewChanges = false;
+async function ensureSubscribedToDataviewChanges(retriesLeft = 5) {
+    if (subscribedToDataviewChanges) {
+        return;
+    }
+    const api = await getDataviewApi();
+    if (!api?.onDidChangeIndex) {
+        if (retriesLeft > 0) {
+            setTimeout(() => { void ensureSubscribedToDataviewChanges(retriesLeft - 1); }, 1500);
+        }
+        return;
+    }
+    subscribedToDataviewChanges = true;
+    api.onDidChangeIndex(() => {
+        activePanels.forEach(p => { try {
+            p.webview.postMessage({ type: 'dataview-changed' });
+        }
+        catch { } });
+    });
+}
 // Fallback used when the Tasks extension isn't installed/active: a plain [ ]/[x]
 // flip with no recurrence handling.
 function naiveToggleTaskLine(lineText) {
@@ -550,6 +620,7 @@ function broadcastRecentNotes() {
 class MarkdownDocumentProvider {
     resolveCustomTextEditor(document, webviewPanel, _token) {
         void ensureSubscribedToTasksChanges();
+        void ensureSubscribedToDataviewChanges();
         recordNoteOpened(document.uri.fsPath);
         broadcastRecentNotes();
         const getFont = () => vscode.workspace.getConfiguration('obsidianLike').get('markdownFont', '').trim() ||
@@ -819,6 +890,15 @@ class MarkdownDocumentProvider {
                         webviewPanel.webview.postMessage({ type: 'tasks-query-result', query: msg.query, result });
                     })();
                 }
+                else if (msg.type === 'run-dataview-query') {
+                    (async () => {
+                        const lang = msg.lang;
+                        const query = msg.query;
+                        const currentFilePath = vscode.workspace.asRelativePath(document.uri, false).replace(/\\/g, '/');
+                        const result = await renderDataviewBlock(lang, query, currentFilePath);
+                        webviewPanel.webview.postMessage({ type: 'dataview-query-result', lang, query, result });
+                    })();
+                }
                 else if (msg.type === 'toggle-task-at-location') {
                     (async () => {
                         try {
@@ -827,6 +907,25 @@ class MarkdownDocumentProvider {
                         }
                         catch (err) {
                             vscode.window.showErrorMessage(`No se pudo alternar la tarea: ${err}`);
+                        }
+                    })();
+                }
+                else if (msg.type === 'edit-task-at-location') {
+                    // Sent by a ```tasks``` query row's edit button — unlike the single inline checkbox
+                    // widget (covered by the `vaultTool.editTaskAtCursor` keybinding instead), a query
+                    // result can point at any file in the vault, so there's no "current cursor" to fall
+                    // back on here; the row already carries the exact (path, line) to edit.
+                    (async () => {
+                        try {
+                            const tasksApi = await getTasksApi();
+                            if (!tasksApi?.editTaskAtLocation) {
+                                vscode.window.showInformationMessage('Editar tareas requiere la extensión "Obsidian-like Tasks" instalada y actualizada.');
+                                return;
+                            }
+                            await tasksApi.editTaskAtLocation(msg.path, msg.line);
+                        }
+                        catch (err) {
+                            vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
                         }
                     })();
                 }
