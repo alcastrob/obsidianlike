@@ -10,6 +10,12 @@ ECHO CODE 2
 call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidian-like-tasks
 call code --profile "Obsidian like" --install-extension obsidian-like-tasks-0.1.0.vsix
 
+cd ..\obsidianlike_clearunusedimages
+call npm run package
+ECHO CODE 3
+call code --profile "Obsidian like" --uninstall-extension angelCastro.clear-unused-images
+call code --profile "Obsidian like" --install-extension clear-unused-images-0.1.0.vsix
+
 cd ..\obsidianlike
 ECHO Matas
 taskkill /IM code.exe /F
