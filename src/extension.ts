@@ -500,6 +500,11 @@ const activePanels: vscode.WebviewPanel[] = [];
 // Tracks the panel currently showing each document path, so navigateToTarget can
 // find a just-opened (or already-open) target panel to send `scroll-to-line` to.
 const panelsByPath: Map<string, vscode.WebviewPanel> = new Map();
+// Last cursor line reported by each panel's `cursor-position` message (updated on every CM6
+// selection change — see editor.js). VS Code never exposes this webview as a `TextEditor`, so
+// this cache is the only way `vaultTool.editTaskAtCursor` (below) can know which line to hand
+// off without re-implementing cursor tracking on the host side.
+const panelCursorLine: Map<vscode.WebviewPanel, number> = new Map();
 
 async function buildNoteIndex(): Promise<void> {
   try {
@@ -604,6 +609,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       const i = activePanels.indexOf(webviewPanel);
       if (i !== -1) { activePanels.splice(i, 1); }
       if (panelsByPath.get(document.uri.fsPath) === webviewPanel) { panelsByPath.delete(document.uri.fsPath); }
+      panelCursorLine.delete(webviewPanel);
     });
 
     const imgMap    = getImageMap(webviewPanel.webview, document.uri);
@@ -717,6 +723,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       webviewPanel.webview.onDidReceiveMessage(msg => {
         if (msg.type === 'content-for-save') {
           pendingSaveResolve?.(msg.content as string);
+
+        } else if (msg.type === 'cursor-position') {
+          panelCursorLine.set(webviewPanel, msg.line as number);
 
         } else if (msg.type === 'sync') {
           applySync(msg.content as string);
@@ -1150,6 +1159,38 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  // "Edit task at cursor" — a real `contributes.keybindings` entry (so it shows up, and can be
+  // reassigned, in VS Code's own Keyboard Shortcuts UI), unlike the CM6-only keymap this
+  // replaced. That first version worked but couldn't be discovered or rebound from the UI at
+  // all, since it was never anything VS Code's keybinding system knew about — just a raw
+  // key handler inside the webview's own JS. This command is a normal keybinding target
+  // (`"when": "activeCustomEditorId == 'vaultTool.markdownEditor'"`, same pattern
+  // `vaultTool.openNoteQuickPick` already uses), so it resolves the *last known* cursor line
+  // from `panelCursorLine` (kept current by the `cursor-position` message editor.js posts on
+  // every CM6 selection change) instead of `vscode.window.activeTextEditor`, which doesn't
+  // exist for this custom editor.
+  const editTaskAtCursorCmd = vscode.commands.registerCommand('vaultTool.editTaskAtCursor', async () => {
+    const panel = activePanels.find(p => p.active) ?? activePanels.find(p => p.visible) ??
+      (activePanels.length === 1 ? activePanels[0] : undefined);
+    if (!panel) { return; }
+    const docPath = [...panelsByPath.entries()].find(([, p]) => p === panel)?.[0];
+    const line = panelCursorLine.get(panel);
+    if (!docPath || line == null) { return; }
+
+    try {
+      const tasksApi = await getTasksApi();
+      if (!tasksApi?.editTaskAtLocation) {
+        vscode.window.showInformationMessage(
+          'Editar tareas requiere la extensión "Obsidian-Like Tasks" instalada y actualizada.',
+        );
+        return;
+      }
+      await tasksApi.editTaskAtLocation(vscode.workspace.asRelativePath(vscode.Uri.file(docPath), false), line);
+    } catch (err) {
+      vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
+    }
+  });
+
   // "Open note" quick switcher — a floating dialog (search box + list, same
   // widget the Command Palette itself uses) rather than a webview, since
   // webviews in VS Code always occupy a fixed editor tab; there's no API for a
@@ -1252,7 +1293,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd,
+    listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, editTaskAtCursorCmd,
     openNoteQuickPickCmd, openNoteQuickPickNewTabCmd, openNoteQuickPickSideCmd
   );
 }

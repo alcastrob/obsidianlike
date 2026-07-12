@@ -96,6 +96,10 @@
       {
         "command": "vaultTool.openNoteQuickPick",
         "title": "Obsidian-like: Abrir nota…"
+      },
+      {
+        "command": "vaultTool.editTaskAtCursor",
+        "title": "Obsidian-like: Editar tarea en el cursor"
       }
     ],
     "menus": {
@@ -111,6 +115,11 @@
         "command": "vaultTool.openNoteQuickPick",
         "key": "ctrl+o",
         "mac": "cmd+o",
+        "when": "activeCustomEditorId == 'vaultTool.markdownEditor'"
+      },
+      {
+        "command": "vaultTool.editTaskAtCursor",
+        "key": "shift+alt+e",
         "when": "activeCustomEditorId == 'vaultTool.markdownEditor'"
       },
       {

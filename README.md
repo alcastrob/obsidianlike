@@ -99,7 +99,7 @@ también sirve para plegar/desplegar la sección. Detalle técnico completo en
 Las líneas de checkbox se reconocen y renderizan como en Obsidian: checkbox real (clicable),
 tachado al completar, fecha vencida en rojo, y un botón ✏️ junto a cada una para editarla (abre
 el diálogo "Create or edit Task" de la extensión de Tasks, ya relleno con los datos de esa tarea
-concreta) — o, con el cursor sobre la línea de la tarea, el atajo `Ctrl+Alt+E` hace lo
+concreta) — o, con el cursor sobre la línea de la tarea, el atajo `Shift+Alt+E` hace lo
 mismo sin necesidad del ratón. Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el
 plugin Tasks de Obsidian — `not done`, `group by`, filtros con expresiones JS, etc.) se renderizan
 como una lista de tareas real dentro del propio editor, cada fila con su propio checkbox y botón

@@ -547,21 +547,6 @@ const TASK_DUE_RE        = /(?:📅|📆|🗓)\uFE0F? *(\d{4}-\d{2}-\d{2})/u;
 const TASK_PRIORITY_RE   = /(🔺|⏫|🔼|🔽|⏬)/u;
 const TASK_RECURRENCE_RE = /🔁\uFE0F? *([a-zA-Z0-9, !]+)/u;
 
-// CM6 keymap action for "edit task at cursor" (Mod-Alt-e, see createEditor below). Deliberately
-// not Mod-Shift-Enter (the first version): that chord is VS Code's own default for "Insert Line
-// Above", and for a CustomTextEditorProvider webview that appears to be enough for VS Code to
-// swallow the keydown before it ever reaches CM6, regardless of any `when` clause — the key
-// simply did nothing. Mod-Alt-e has no default VS Code binding and no known extension conflict.
-// Mirrors the ✏️ button's click handler: same `edit-task` message, same 0-based line number
-// (line.number is 1-based). Runs entirely inside the webview, where the cursor position is
-// already known locally — no need to expose it to any other extension for this.
-function editTaskAtCursor(view) {
-  const pos = view.state.selection.main.head;
-  const line = view.state.doc.lineAt(pos);
-  if (!TASK_LINE_RE.test(line.text)) return false;
-  vscode.postMessage({ type: 'edit-task', line: line.number - 1 });
-  return true;
-}
 
 function todayDateOnly() {
   const now = new Date();
@@ -2324,13 +2309,23 @@ function createEditor(parent, content) {
       keymap.of([
         { key: 'Mod-b', run: v => toggleWrap(v, '**') },
         { key: 'Mod-i', run: v => toggleWrap(v, '*')  },
-        { key: 'Mod-Alt-e', run: editTaskAtCursor },
         ...defaultKeymap,
         ...historyKeymap,
         indentWithTab,
       ]),
       vsTheme,
       EditorView.updateListener.of(u => {
+        // Reports the cursor's line to the extension host on every selection change (cheap — a
+        // single int, no debounce needed unlike `sync`'s full document text). This is what lets
+        // `vaultTool.editTaskAtCursor` (a *real* contributes.keybindings entry, reassignable in
+        // VS Code's Keyboard Shortcuts UI, unlike the old CM6-only keymap this replaced) know
+        // which line to hand off to the Tasks extension without VS Code ever exposing this
+        // webview as a `TextEditor` — see the CLAUDE.md section on this command for why a plain
+        // CM6 keybinding wasn't good enough on its own.
+        if (u.selectionSet) {
+          const line = u.state.doc.lineAt(u.state.selection.main.head).number - 1;
+          vscode.postMessage({ type: 'cursor-position', line });
+        }
         if (!u.docChanged) return;
         clearTimeout(syncTimer);
         syncTimer = setTimeout(() => {
