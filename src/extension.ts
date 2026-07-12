@@ -480,6 +480,92 @@ async function ensureSubscribedToTasksChanges(retriesLeft = 5): Promise<void> {
   });
 }
 
+// ── Dataview soft dependency ─────────────────────────────────────────────────
+// Same soft-dependency shape as the Tasks extension above: a ```dataview```/
+// ```dql```/```dataviewjs``` block needs data indexed from the *entire vault*
+// by the sibling "angelCastro.obsidianlike-dataview" extension, which the
+// webview can't compute locally from the current document's AST alone. No
+// `extensionDependencies` entry in package.json, so Obsidian-like keeps working
+// standalone if that extension isn't installed — the block just renders an
+// explanatory error instead of a table/list.
+//
+// Unlike the Tasks integration, the sibling extension returns ready-to-embed
+// HTML (`renderQueryResultHtml`/`renderDataviewJsOutputHtml`) rather than a
+// structured DTO: dataview result shapes (LIST/TABLE/TASK/CALENDAR, arbitrary
+// column expressions) are far more varied than the Tasks extension's fixed
+// TaskDTO, so re-deriving a DOM renderer for all of them here isn't worth it.
+// The returned markup uses `data-wiki` (not `command:` links) for navigable
+// cells, which `linkClickHandler` below already understands generically.
+interface DataviewQueryResultDTO { ok: boolean; html: string }
+interface DataviewExtensionApi {
+  runQuery(queryText: string): unknown;
+  runDataviewJs(code: string, currentFilePath?: string): Promise<{ ok: boolean; output: unknown[]; error?: string }>;
+  renderQueryResultHtml(result: unknown): string;
+  renderDataviewJsOutputHtml(nodes: unknown[], error?: string): string;
+  onDidChangeIndex: vscode.Event<void>;
+}
+
+let dataviewApiPromise: Promise<DataviewExtensionApi | undefined> | undefined;
+
+// Same "retry on failure, cache on success" reasoning as getTasksApi() above.
+function getDataviewApi(): Promise<DataviewExtensionApi | undefined> {
+  if (!dataviewApiPromise) {
+    dataviewApiPromise = (async () => {
+      const ext = vscode.extensions.getExtension('angelCastro.obsidianlike-dataview');
+      if (!ext) { dataviewApiPromise = undefined; return undefined; }
+      try { return (await ext.activate()) as DataviewExtensionApi; }
+      catch { dataviewApiPromise = undefined; return undefined; }
+    })();
+  }
+  return dataviewApiPromise;
+}
+
+function escapeHtmlForDataviewError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// `lang` is the fence's info string ('dataview' | 'dql' | 'dataviewjs'); `currentFilePath` is the
+// vault-relative path of the note the block lives in, used as `dv.current()` for dataviewjs.
+async function renderDataviewBlock(lang: string, query: string, currentFilePath: string): Promise<DataviewQueryResultDTO> {
+  const api = await getDataviewApi();
+  if (!api) {
+    return {
+      ok: false,
+      html: '<div class="dv-error">La extensión "Obsidian-like Dataview" no está instalada o activa.</div>',
+    };
+  }
+  try {
+    if (lang === 'dataviewjs') {
+      const result = await api.runDataviewJs(query, currentFilePath);
+      return { ok: result.ok, html: api.renderDataviewJsOutputHtml(result.output, result.error) };
+    }
+    return { ok: true, html: api.renderQueryResultHtml(api.runQuery(query)) };
+  } catch (err) {
+    return { ok: false, html: `<div class="dv-error">${escapeHtmlForDataviewError(err)}</div>` };
+  }
+}
+
+// Broadcasts `dataview-changed` to every open panel whenever the sibling extension's workspace
+// index changes (a note was edited/created/deleted anywhere in the vault), so each panel's
+// ```dataview``` block cache gets invalidated and re-requests fresh data. Mirrors
+// ensureSubscribedToTasksChanges()'s retry-on-cold-start-race reasoning above.
+let subscribedToDataviewChanges = false;
+async function ensureSubscribedToDataviewChanges(retriesLeft = 5): Promise<void> {
+  if (subscribedToDataviewChanges) { return; }
+  const api = await getDataviewApi();
+  if (!api?.onDidChangeIndex) {
+    if (retriesLeft > 0) {
+      setTimeout(() => { void ensureSubscribedToDataviewChanges(retriesLeft - 1); }, 1500);
+    }
+    return;
+  }
+  subscribedToDataviewChanges = true;
+  api.onDidChangeIndex(() => {
+    activePanels.forEach(p => { try { p.webview.postMessage({ type: 'dataview-changed' }); } catch {} });
+  });
+}
+
 // Fallback used when the Tasks extension isn't installed/active: a plain [ ]/[x]
 // flip with no recurrence handling.
 function naiveToggleTaskLine(lineText: string): string[] {
@@ -578,6 +664,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     _token: vscode.CancellationToken
   ): void {
     void ensureSubscribedToTasksChanges();
+    void ensureSubscribedToDataviewChanges();
     recordNoteOpened(document.uri.fsPath);
     broadcastRecentNotes();
 
@@ -862,6 +949,15 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
               ? tasksApi.renderTasksQuery(msg.query as string)
               : { items: [], groups: null, unrecognizedLines: [] };
             webviewPanel.webview.postMessage({ type: 'tasks-query-result', query: msg.query, result });
+          })();
+
+        } else if (msg.type === 'run-dataview-query') {
+          (async () => {
+            const lang = msg.lang as string;
+            const query = msg.query as string;
+            const currentFilePath = vscode.workspace.asRelativePath(document.uri, false).replace(/\\/g, '/');
+            const result = await renderDataviewBlock(lang, query, currentFilePath);
+            webviewPanel.webview.postMessage({ type: 'dataview-query-result', lang, query, result });
           })();
 
         } else if (msg.type === 'toggle-task-at-location') {

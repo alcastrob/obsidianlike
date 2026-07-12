@@ -130,6 +130,22 @@ reenvía los clics (`toggle-task`/`toggle-task-at-location` para el checkbox,
 `edit-task-at-location` para el botón de editar de una fila). Detalle técnico completo en
 `CLAUDE.md`.
 
+## Dataview (` ```dataview ` / ` ```dql ` / ` ```dataviewjs `) — integración con "Obsidian-like Dataview"
+
+Los bloques ` ```dataview `/` ```dql ` (consultas `LIST`/`TABLE`/`TASK`/`CALENDAR` al estilo del
+plugin Dataview de Obsidian: `FROM`, `WHERE`, `SORT`, `GROUP BY`, `LIMIT`, `FLATTEN`) y
+` ```dataviewjs ` (JavaScript con la API `dv.pages()`/`dv.table()`/`dv.list()`/`dv.taskList()`,
+sandboxed) se renderizan directamente en el editor, igual que los bloques ` ```tasks `: enlaces a
+notas clicables, tablas, listas y listados de tareas con checkbox.
+
+Es también una **dependencia opcional**, esta vez de `angelCastro.obsidianlike-dataview`
+(repo `obsidianlike_dataview`): si no está instalada, cada bloque muestra un aviso indicándolo en
+vez de fallar en silencio o quedarse cargando indefinidamente. Toda la lógica (indexado del vault,
+parser DQL, motor de consultas, sandbox de dataviewjs) vive en esa extensión — Obsidian-like solo
+reenvía la consulta y pinta el HTML de resultado que le devuelve. A diferencia de la integración
+con Tasks, los checkboxes de un bloque `TASK` son de solo lectura por ahora (no hay toggle
+interactivo). Detalle técnico completo en `CLAUDE.md`.
+
 ## Compatibilidad multiplataforma (Windows / macOS)
 
 La búsqueda del tema de Obsidian configurado (`obsidianLike.obsidianTheme`) es

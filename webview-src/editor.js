@@ -252,6 +252,66 @@ const vsTheme = EditorView.theme({
   '.cm-task-query-edit-btn:hover': {
     opacity: '1',
   },
+  // ```dataview```/```dql```/```dataviewjs``` query block rendering (see DataviewQueryWidget).
+  // The inner markup (`.dv-*` classes) comes verbatim from the sibling
+  // "angelCastro.obsidianlike-dataview" extension's HTML renderer, so these rules style classes
+  // this file doesn't itself generate — kept in sync manually with that extension's render/html.ts.
+  '.cm-dataview-query': {
+    display: 'block',
+    margin: '4px 0 10px',
+    padding: '2px 0',
+  },
+  '.cm-dataview-query-loading': {
+    opacity: '0.55',
+    fontStyle: 'italic',
+    fontSize: '0.9em',
+    padding: '2px 0',
+  },
+  '.cm-dataview-query .dv-error': {
+    color: 'var(--text-error, #e06c75)',
+    fontSize: '0.9em',
+    opacity: '0.9',
+  },
+  '.cm-dataview-query .dv-empty': {
+    opacity: '0.55',
+    fontStyle: 'italic',
+    fontSize: '0.9em',
+  },
+  '.cm-dataview-query .dv-list': {
+    margin: '0',
+    paddingLeft: '1.4em',
+  },
+  '.cm-dataview-query .dv-table': {
+    borderCollapse: 'collapse',
+    width: '100%',
+    fontSize: '0.95em',
+  },
+  '.cm-dataview-query .dv-table th, .cm-dataview-query .dv-table td': {
+    border: '1px solid var(--background-modifier-border, rgba(128,128,128,0.3))',
+    padding: '3px 8px',
+    textAlign: 'left',
+  },
+  '.cm-dataview-query .dv-table th': {
+    opacity: '0.75',
+    fontWeight: '600',
+  },
+  '.cm-dataview-query .dv-link': {
+    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
+    textDecoration: 'underline',
+    textUnderlineOffset: '2px',
+    cursor: 'pointer',
+  },
+  '.cm-dataview-query .dv-task-group': {
+    marginBottom: '8px',
+  },
+  '.cm-dataview-query .dv-task-list': {
+    margin: '2px 0 0',
+    paddingLeft: '1.4em',
+    listStyle: 'none',
+  },
+  '.cm-dataview-query .dv-calendar-day': {
+    margin: '2px 0',
+  },
   // Folded heading content
   '.cm-fold-hidden': {
     height: '0 !important', lineHeight: '0 !important',
@@ -806,9 +866,9 @@ class BulletWidget extends WidgetType {
 // badge showing the raw character, same convention as that Preview map.
 const STATUS_ICON = {
   'x': '✅', 'X': '✅',
-  '-': '❌',
+  '-': '✖',
   '/': '🔄',
-  'w': '⏸️', // "Waiting" — matches this vault's own convention for custom statuses.
+  'w': '⏳', // "Waiting" — matches this vault's own convention for custom statuses.
   'd': '👤', // "Delegated" — ditto.
 };
 
@@ -874,6 +934,27 @@ function requestTasksQuery(query) {
   if (tasksQueryPending.has(query)) return;
   tasksQueryPending.add(query);
   vscode.postMessage({ type: 'run-tasks-query', query });
+}
+
+// ── Dataview query blocks (```dataview```/```dql```/```dataviewjs```) ─────────
+// Same async round-trip as the Tasks query block above (webview → this
+// extension's host → sibling "angelCastro.obsidianlike-dataview" extension's API
+// → back to the webview), for the same reason: query results depend on the
+// *entire vault*'s index, which only that sibling extension maintains. Unlike
+// Tasks, the response is ready-to-embed HTML (DataviewQueryResultDTO = { ok,
+// html }), not a DTO this file renders itself — see the comment above
+// `renderDataviewBlock` in extension.ts for why.
+const dataviewQueryCache   = new Map(); // "lang query" -> DataviewQueryResultDTO
+const dataviewQueryPending = new Set(); // "lang query" currently awaiting a response
+const dataviewRebuildEffect = StateEffect.define();
+
+function dataviewCacheKey(lang, query) { return lang + ' ' + query; }
+
+function requestDataviewQuery(lang, query) {
+  const key = dataviewCacheKey(lang, query);
+  if (dataviewQueryPending.has(key)) return;
+  dataviewQueryPending.add(key);
+  vscode.postMessage({ type: 'run-dataview-query', lang, query });
 }
 
 const TASK_PRIORITY_ICON = {
@@ -1115,7 +1196,42 @@ class TasksQueryWidget extends WidgetType {
     }
     return wrap;
   }
-  ignoreEvent() { return false; }
+  // Everything inside this widget handles its own clicks (checkbox, edit button, backlink) via
+  // `linkClickHandler`'s preventDefault-on-mousedown guards — *except* the filter `<input>`,
+  // which needs completely normal DOM focus/typing behaviour. Returning `true` (ignore) for
+  // events targeting it tells CM6 not to also try to move the document selection there; without
+  // this, clicking into the filter box moved the cursor into this block's document range, which
+  // made the next rebuild treat the block as "cursor is inside" and swap the whole widget out for
+  // raw source — destroying the input (and any typed filter text) before a single keystroke could
+  // register.
+  ignoreEvent(event) {
+    return !!(event.target && event.target.closest && event.target.closest('.cm-tasks-query-filter'));
+  }
+}
+
+// Single-line replacement widget for the opening ```dataview/```dql/```dataviewjs fence — same
+// "replace only the first line, collapse the rest" strategy as TasksQueryWidget above. `cached`
+// is whatever's in `dataviewQueryCache` for this (lang, query) pair when `_build()` ran:
+// `undefined` while the request is in flight, or the resolved `{ ok, html }` once the host
+// responds. The sibling extension's HTML already carries its own `dv-*` classes/`data-wiki`
+// attributes — `[data-wiki]` clicks are picked up for free by the generic handler in
+// `linkClickHandler` below, no extra wiring needed here.
+class DataviewQueryWidget extends WidgetType {
+  constructor(lang, query, cached) { super(); this.lang = lang; this.query = query; this.cached = cached; }
+  eq(other) { return this.lang === other.lang && this.query === other.query && this.cached === other.cached; }
+  toDOM() {
+    const wrap = document.createElement('div');
+    wrap.className = 'cm-dataview-query';
+    if (this.cached) {
+      wrap.innerHTML = this.cached.html;
+    } else {
+      const loading = document.createElement('div');
+      loading.className = 'cm-dataview-query-loading';
+      loading.textContent = 'Cargando consulta dataview…';
+      wrap.appendChild(loading);
+    }
+    return wrap;
+  }
 }
 
 // ── Live-preview plugin ───────────────────────────────────────────────────────
@@ -1124,7 +1240,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
   update(u) {
     if (u.docChanged || u.selectionSet || u.viewportChanged ||
         syntaxTree(u.startState) !== syntaxTree(u.state) ||
-        u.transactions.some(t => t.effects.some(e => e.is(tasksRebuildEffect)))) {
+        u.transactions.some(t => t.effects.some(e => e.is(tasksRebuildEffect) || e.is(dataviewRebuildEffect)))) {
       this.decorations = this._build(u.view);
     }
   }
@@ -1293,6 +1409,30 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
 
                 decs.push({ from: fromLine.from, to: fromLine.to,
                   dec: Decoration.replace({ widget: new TasksQueryWidget(queryText, cached) }) });
+                for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
+                  const line = state.doc.line(ln);
+                  decs.push({ from: line.from, to: line.to,
+                    dec: Decoration.replace({}) });
+                  lineDecs.push({ from: line.from,
+                    dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+                }
+              } catch (_) {}
+              return false;
+            }
+
+            if (info === 'dataview' || info === 'dql' || info === 'dataviewjs') {
+              try {
+                const codeTextNode = node.node.getChild('CodeText');
+                const queryText = codeTextNode
+                  ? state.doc.sliceString(codeTextNode.from, codeTextNode.to).trim()
+                  : '';
+
+                const key = dataviewCacheKey(info, queryText);
+                const cached = dataviewQueryCache.get(key);
+                if (!cached) { requestDataviewQuery(info, queryText); }
+
+                decs.push({ from: fromLine.from, to: fromLine.to,
+                  dec: Decoration.replace({ widget: new DataviewQueryWidget(info, queryText, cached) }) });
                 for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
                   const line = state.doc.line(ln);
                   decs.push({ from: line.from, to: line.to,
@@ -2839,6 +2979,13 @@ window.addEventListener('message', ev => {
       tasksQueryPending.delete(msg.query);
       view.dispatch({ effects: tasksRebuildEffect.of(null) });
       break;
+    case 'dataview-query-result': {
+      const key = dataviewCacheKey(msg.lang, msg.query);
+      dataviewQueryCache.set(key, msg.result);
+      dataviewQueryPending.delete(key);
+      view.dispatch({ effects: dataviewRebuildEffect.of(null) });
+      break;
+    }
     case 'transclusion-result':
       transclusionCache.set(msg.id, { content: msg.content, title: msg.title, line: msg.line, error: msg.error });
       transclusionPending.delete(msg.id);
@@ -2871,6 +3018,14 @@ window.addEventListener('message', ev => {
       // at for the fraction of a second it took to refetch.
       for (const query of tasksQueryCache.keys()) {
         requestTasksQuery(query);
+      }
+      break;
+    case 'dataview-changed':
+      // Same reasoning as 'tasks-changed' above: don't clear the cache eagerly, just re-request
+      // every dataview block currently on screen and let the response swap it in once it arrives.
+      for (const key of dataviewQueryCache.keys()) {
+        const sep = key.indexOf(' ');
+        requestDataviewQuery(key.slice(0, sep), key.slice(sep + 1));
       }
       break;
   }
