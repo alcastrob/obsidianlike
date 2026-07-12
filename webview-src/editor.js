@@ -53,6 +53,23 @@ const vsTheme = EditorView.theme({
     textUnderlineOffset: '2px',
     cursor: 'pointer',
   },
+  // A [[wiki-link]] whose target note doesn't exist anywhere in the vault —
+  // same color/underline as a resolved link, just faded, so it still reads as
+  // a link (unlike Obsidian's --link-unresolved-color, which stays close to
+  // plain text color; this codebase has no such separate var to lean on).
+  '.cm-wiki-link-missing': {
+    opacity: 'var(--link-unresolved-opacity, 0.55)',
+  },
+  // Cancels lezer-markdown's coincidental Link/LinkMark tagging of a
+  // [[wiki-link]]'s inner "[Foo]" (see the comment above where this class is
+  // applied, in livePreviewPlugin) — !important since it must win over
+  // mdHighlight's plain (non-!important) generated classes regardless of
+  // which stylesheet CM6 happens to insert first.
+  '.cm-wiki-link-raw': {
+    color: 'inherit !important',
+    textDecoration: 'none !important',
+    fontSize: 'inherit !important',
+  },
   '.cm-md-link': {
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
     textDecoration: 'underline',
@@ -1137,6 +1154,31 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           }
 
           const ln = state.doc.lineAt(node.from).number;
+
+          // ── [[wiki-link]] inner brackets — cancel lezer-markdown's coincidental
+          // Link/LinkMark tagging, active line ONLY ──────────────────────────
+          // `[[Foo]]` isn't real CommonMark syntax, but the *inner* "[Foo]"
+          // looks exactly like a shortcut reference link to lezer-markdown, so
+          // it parses as a Link node with its own LinkMark children — while the
+          // outer "[" and "]" fall completely outside any node and get no
+          // syntax-highlighting classes at all. That leaves the inner brackets
+          // styled (tags.link + tags.processingInstruction, i.e. colored and a
+          // smaller font-size) while the outer ones stay plain text-colored —
+          // visibly mismatched while editing. Gated to the active line only:
+          // on a non-active line wikiLinkPlugin's own decorations already hide
+          // the brackets and style the display text with .cm-wiki-link — this
+          // decoration would stack on top of that (same node, different plugin)
+          // and its !important reset would cancel wikiLinkPlugin's blue/underline
+          // styling too. `![[Foo]]` doesn't have this problem: the leading "!"
+          // makes the *outer* Image node wrap everything, so every character —
+          // brackets included — already gets the same tags.link styling
+          // uniformly; skip nodes parented by Image so that stays untouched.
+          if (active.has(ln) && n === 'Link' && node.node.parent && node.node.parent.name !== 'Image' &&
+              state.doc.sliceString(node.from - 1, node.from) === '[' &&
+              state.doc.sliceString(node.to, node.to + 1) === ']') {
+            decs.push({ from: node.from, to: node.to, dec: Decoration.mark({ class: 'cm-wiki-link-raw' }) });
+          }
+
           if (active.has(ln)) return;
 
           if (n === 'HeaderMark') {
@@ -1246,11 +1288,35 @@ const mdLinkPlugin = ViewPlugin.fromClass(class {
 }, { decorations: v => v.decorations });
 
 // ── Wiki-link plugin ──────────────────────────────────────────────────────────
+// Dispatched by the `note-index` message handler so wikiLinkPlugin re-checks
+// which links resolve — unlike docChanged/selectionSet/viewportChanged, a
+// noteIndex update carries no doc/viewport change of its own to key off of.
+const noteIndexRebuildEffect = StateEffect.define();
+
+// Mirrors resolveNoteUri's rules host-side (splitTarget + splitDirHint): a
+// target may carry a "#section" suffix (irrelevant to existence) and a single
+// directory-hint segment (`folder/Note`, only the immediate parent name).
+// Existence only, not full resolution — doesn't need to know the *current*
+// note's directory, since "no hint" existence is "some note has this name
+// anywhere" (same-dir-first vs. vault-wide fallback both resolve if either
+// matches) and "with hint" existence just needs a name+parent-dir match.
+function noteTargetExists(rawTarget) {
+  const notePart = rawTarget.split('#')[0];
+  const segments = notePart.replace(/\\/g, '/').split('/').filter(Boolean);
+  const noteName = segments.pop() || notePart;
+  const dirHint = segments.length > 0 ? segments[segments.length - 1] : null;
+  if (!dirHint) return noteIndex.some(n => n.name === noteName);
+  const hint = dirHint.toLowerCase();
+  return noteIndex.some(n => n.name === noteName &&
+    (n.dir ? n.dir.split('/').pop() : '').toLowerCase() === hint);
+}
+
 const wikiLinkPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
     if (u.docChanged || u.selectionSet || u.viewportChanged ||
-        syntaxTree(u.startState) !== syntaxTree(u.state)) {
+        syntaxTree(u.startState) !== syntaxTree(u.state) ||
+        u.transactions.some(tr => tr.effects.some(e => e.is(noteIndexRebuildEffect)))) {
       this.decorations = this._build(u.view);
     }
   }
@@ -1269,15 +1335,26 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
       if (active.has(ln)) continue;
       const name  = m[1];
       const alias = m[2];
+      const linkClass = 'cm-wiki-link' + (noteTargetExists(name) ? '' : ' cm-wiki-link-missing');
       all.push({ from: mFrom,     to: mFrom + 2, dec: Decoration.replace({}) });
+      // No alias: `name` may still carry a "#section" (e.g. "Note#Heading") —
+      // show only the section text, same as an alias hides "target|" and
+      // shows just the alias, rather than the raw "Note#Heading" as-is.
+      const hashIdx = alias === undefined ? name.indexOf('#') : -1;
       if (alias !== undefined) {
         all.push({ from: mFrom + 2, to: mFrom + 2 + name.length + 1, dec: Decoration.replace({}) });
         const aFrom = mFrom + 2 + name.length + 1;
         all.push({ from: aFrom, to: aFrom + alias.length,
-          dec: Decoration.mark({ class: 'cm-wiki-link', attributes: { 'data-target': name } }) });
+          dec: Decoration.mark({ class: linkClass, attributes: { 'data-target': name } }) });
+      } else if (hashIdx !== -1) {
+        const section = name.slice(hashIdx + 1);
+        all.push({ from: mFrom + 2, to: mFrom + 2 + hashIdx + 1, dec: Decoration.replace({}) });
+        const sFrom = mFrom + 2 + hashIdx + 1;
+        all.push({ from: sFrom, to: sFrom + section.length,
+          dec: Decoration.mark({ class: linkClass, attributes: { 'data-target': name } }) });
       } else {
         all.push({ from: mFrom + 2, to: mFrom + 2 + name.length,
-          dec: Decoration.mark({ class: 'cm-wiki-link', attributes: { 'data-target': name } }) });
+          dec: Decoration.mark({ class: linkClass, attributes: { 'data-target': name } }) });
       }
       all.push({ from: mTo - 2, to: mTo, dec: Decoration.replace({}) });
     }
@@ -1717,8 +1794,14 @@ class WikiSuggestView {
       insertText = it.type === 'heading' ? `[[${this.notePart}#${it.text}]]` : `[[${it.name}]]`;
     }
     const from = this.openBracketFrom;
-    const to = this.pos;
     const view = this.view;
+    let to = this.pos;
+    // If the cursor sits inside an already-closed [[...]] — e.g. the user
+    // clicked back between "enlaces" and "]]" to type "#cabecera" — that
+    // trailing "]]" is still in the document past `to`. Swallow it into the
+    // replaced range so insertText's own "]]" replaces it instead of leaving
+    // both (which produced "[[enlaces#cabecera]]]]").
+    if (view.state.doc.sliceString(to, to + 2) === ']]') to += 2;
     this.close();
     view.dispatch({
       changes: { from, to, insert: insertText },
@@ -1735,9 +1818,28 @@ class WikiSuggestView {
     return highlightMatch(it.name, this.query);
   }
 
+  // Schedules the actual paint via requestMeasure rather than reading
+  // coordsAtPos/getBoundingClientRect synchronously here. render() can be
+  // called from inside the ViewPlugin's own update() (via recompute(), on
+  // every keystroke) — and CM6 throws "Reading the editor layout isn't
+  // allowed during an update" if coordsAtPos is read synchronously in that
+  // window, which crashes and permanently deactivates this plugin (CM6
+  // destroys+deactivates a ViewPlugin the first time its update() throws).
+  // `key: this` ties queued requests to this instance, so a later render()
+  // call (e.g. arrow-key navigation) replaces an earlier still-pending one
+  // instead of piling up.
   render() {
     if (!this.open) { this.hide(); return; }
-    const coords = this.view.coordsAtPos(this.pos);
+    this.view.requestMeasure({
+      key: this,
+      read: view => ({ coords: view.coordsAtPos(this.pos), editorRect: view.dom.getBoundingClientRect() }),
+      write: measured => this.paint(measured),
+    });
+  }
+
+  paint(measured) {
+    if (!this.open) { this.hide(); return; }
+    const { coords, editorRect } = measured;
     if (!coords) { this.hide(); return; }
 
     const dom = this.dom;
@@ -1784,7 +1886,6 @@ class WikiSuggestView {
       '<span>Use <b>|</b> para cambiar el texto mostrado</span>';
     dom.appendChild(footer);
 
-    const editorRect = this.view.dom.getBoundingClientRect();
     dom.style.left = Math.max(0, coords.left - editorRect.left) + 'px';
     dom.style.top = (coords.bottom - editorRect.top + 4) + 'px';
   }
@@ -2286,6 +2387,7 @@ window.addEventListener('message', ev => {
   switch (msg.type) {
     case 'note-index':
       noteIndex = msg.notes || [];
+      view.dispatch({ effects: noteIndexRebuildEffect.of(null) });
       break;
     case 'note-history':
       noteHistory = msg.notes || [];
