@@ -280,6 +280,10 @@ const vsTheme = EditorView.theme({
   '.cm-dataview-query .dv-list': {
     margin: '0',
     paddingLeft: '1.4em',
+    lineHeight: '1.5',
+  },
+  '.cm-dataview-query .dv-list li': {
+    margin: '2px 0',
   },
   '.cm-dataview-query .dv-table': {
     borderCollapse: 'collapse',
@@ -302,12 +306,28 @@ const vsTheme = EditorView.theme({
     cursor: 'pointer',
   },
   '.cm-dataview-query .dv-task-group': {
-    marginBottom: '8px',
+    marginBottom: '6px',
   },
+  // Flex column + small gap, not native list-item block flow — a plain `<li>` inherits
+  // `.cm-content`'s prose `line-height: 1.75`, which read as a much bigger gap between rows
+  // than Obsidian's own Dataview task list. Mirrors `.cm-tasks-query-list`/`-item` above.
   '.cm-dataview-query .dv-task-list': {
     margin: '2px 0 0',
-    paddingLeft: '1.4em',
+    padding: '0',
     listStyle: 'none',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+  },
+  '.cm-dataview-query .dv-task-list li': {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.4em',
+    lineHeight: '1.5',
+  },
+  '.cm-dataview-query .dv-task-list input[type="checkbox"]': {
+    verticalAlign: 'middle',
+    margin: '0',
   },
   '.cm-dataview-query .dv-calendar-day': {
     margin: '2px 0',
@@ -944,11 +964,11 @@ function requestTasksQuery(query) {
 // Tasks, the response is ready-to-embed HTML (DataviewQueryResultDTO = { ok,
 // html }), not a DTO this file renders itself — see the comment above
 // `renderDataviewBlock` in extension.ts for why.
-const dataviewQueryCache   = new Map(); // "lang query" -> DataviewQueryResultDTO
-const dataviewQueryPending = new Set(); // "lang query" currently awaiting a response
+const dataviewQueryCache   = new Map(); // "lang query" -> DataviewQueryResultDTO
+const dataviewQueryPending = new Set(); // "lang query" currently awaiting a response
 const dataviewRebuildEffect = StateEffect.define();
 
-function dataviewCacheKey(lang, query) { return lang + ' ' + query; }
+function dataviewCacheKey(lang, query) { return lang + ' ' + query; }
 
 function requestDataviewQuery(lang, query) {
   const key = dataviewCacheKey(lang, query);
