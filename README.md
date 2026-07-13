@@ -165,6 +165,26 @@ reenvía la consulta y pinta el HTML de resultado que le devuelve. A diferencia 
 con Tasks, los checkboxes de un bloque `TASK` son de solo lectura por ahora (no hay toggle
 interactivo). Detalle técnico completo en `CLAUDE.md`.
 
+### `dv.view(...)` — scripts DataviewJS interactivos con DOM real (Kanban/Eisenhower embebidos)
+
+Un bloque ` ```dataviewjs ` cuyo código llama a `dv.view(nombre, input)` (la forma en que
+Obsidian carga y ejecuta otro script del vault, p. ej. un `tasks-timeline.js`) **no** pasa por
+`obsidianlike-dataview` — ese sandbox no tiene `dv.container` ni `app`, solo sirve para informes
+de solo lectura (`dv.table`/`dv.list`). En su lugar, Obsidian-like busca ese fichero `.js` en
+cualquier carpeta del vault, lo lee tal cual (sin modificarlo) y lo ejecuta con un `dv.container`
+real (un `<div>` de verdad dentro del editor) y un `app` que imita `app.vault.read/modify`,
+`app.workspace.getLeaf().openFile` y `app.metadataCache.getFirstLinkpathDest` — lo suficiente
+para que scripts que manipulan DOM directamente (arrastrar y soltar, filtros, zoom, un Kanban o
+una matriz Eisenhower de tareas completos) funcionen exactamente igual que en Obsidian, sin tocar
+una sola línea del script original. Incluye también un polyfill de las extensiones que Obsidian
+añade a `HTMLElement.prototype` y esos scripts dan por hechas (`createDiv`, `createEl`,
+`createSpan`, `appendText`, `empty`, `addClass`/`removeClass`/`toggleClass`...).
+
+Solo se detecta este caso cuando el bloque contiene literalmente `dv.view(` — cualquier otro
+bloque `dataviewjs` (uno que solo use `dv.table()`/`dv.list()` para un informe simple) sigue
+yendo por la ruta de `obsidianlike-dataview` de arriba, sin cambios. Detalle técnico completo en
+`CLAUDE.md`.
+
 ## Compatibilidad multiplataforma (Windows / macOS)
 
 La búsqueda del tema de Obsidian configurado (`obsidianLike.obsidianTheme`) es
@@ -178,9 +198,6 @@ se avisa con la ruta exacta comprobada en vez de fallar en silencio.
 - Sustituir el listado simple de notas por lectura real de frontmatter
   (puedes usar `gray-matter` vía npm, ya que no requiere red en tiempo de
   ejecución, solo en tiempo de instalación de dependencias).
-- Portar la lógica de tu sistema Kanban/Eisenhower (HTML/JS/CSS que ya
-  tienes) dentro de `getHtmlContent()` del webview, sustituyendo el
-  placeholder actual.
 - Motor de queries tipo Dataview sobre frontmatter: ya existe un motor de queries real para
   **tareas** (vía la integración de arriba), pero no para notas/frontmatter en general —
   seguiría siendo una pieza nueva y separada.
