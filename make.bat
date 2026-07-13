@@ -35,6 +35,12 @@ ECHO CODE 6
 call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidianlike-dataview
 call code --profile "Obsidian like" --install-extension obsidianlike-dataview-0.1.0.vsix
 
+cd ..\obsidianlike_dbfolder
+call npm run package
+ECHO CODE 7
+call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidianlike-dbfolder
+call code --profile "Obsidian like" --install-extension obsidianlike-dbfolder-0.1.0.vsix
+
 cd ..\obsidianlike
 ECHO Matas
 taskkill /IM code.exe /F
