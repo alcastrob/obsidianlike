@@ -206,26 +206,36 @@ const vsTheme = EditorView.theme({
     flexDirection: 'column',
     gap: '2px',
   },
+  // Deliberately normal inline flow, not flexbox — a `display:flex; flex-wrap:wrap` row wraps
+  // whole *items* onto a new flex line instead of wrapping a long item's own text at the word
+  // level (confirmed empirically: a flex item's hypothetical main size for the "does it fit on
+  // this line" check is its own full max-content width, not its wrapped/shrunk width), so a task
+  // with a long description ended up with the checkbox alone on one line and the entire
+  // description dropped to the next, even though the description text itself has plenty of
+  // spaces to wrap on normally. Plain inline flow — the checkbox as an inline-block, the
+  // description as ordinary inline text, tags/badges/dates/backlink/edit-button as inline-blocks —
+  // wraps exactly the way a checkbox next to a paragraph of text should: the checkbox stays
+  // glued to the first line, the description wraps word-by-word, and trailing badges flow right
+  // after the last word instead of being pushed to the container's far edge.
   '.cm-tasks-query-item': {
-    display: 'flex',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: '0.3em',
     lineHeight: '1.5',
   },
   '.cm-tasks-query-item.cm-task-done .cm-tasks-query-desc': {
     color: 'var(--text-muted, inherit)',
     textDecoration: 'line-through',
   },
-  '.cm-tasks-query-desc': { flex: '0 1 auto' },
   '.cm-tasks-query-badge': {
+    display: 'inline-block',
     opacity: '0.75',
     fontSize: '0.9em',
     whiteSpace: 'nowrap',
+    marginLeft: '0.3em',
   },
   '.cm-tasks-query-due, .cm-tasks-query-depends': {
+    display: 'inline-block',
     fontSize: '0.9em',
     whiteSpace: 'nowrap',
+    marginLeft: '0.3em',
   },
   '.cm-tasks-query-tag, .cm-tasks-query-id': {
     display: 'inline-block',
@@ -234,13 +244,16 @@ const vsTheme = EditorView.theme({
     fontSize: '0.85em',
     lineHeight: '1.6em',
     whiteSpace: 'nowrap',
+    marginLeft: '0.3em',
     background: 'var(--tag-background, var(--background-modifier-hover))',
     color: 'var(--tag-color, var(--text-normal, inherit))',
   },
   '.cm-tasks-query-backlink': {
+    display: 'inline-block',
     fontSize: '0.85em',
     opacity: '0.75',
     whiteSpace: 'nowrap',
+    marginLeft: '0.3em',
   },
   '.cm-task-query-edit-btn': {
     display: 'inline-block',
@@ -248,6 +261,7 @@ const vsTheme = EditorView.theme({
     opacity: '0.35',
     fontSize: '0.85em',
     verticalAlign: 'middle',
+    marginLeft: '0.3em',
   },
   '.cm-task-query-edit-btn:hover': {
     opacity: '1',
@@ -1017,7 +1031,11 @@ function renderTaskRow(t) {
 
   const desc = document.createElement('span');
   desc.className = 'cm-tasks-query-desc' + (t.isOverdue ? ' cm-task-overdue' : '');
-  desc.textContent = t.description || '';
+  // Reuses renderCell's inline-markdown handling (bold/italic/code/wiki-links) — the same
+  // helper table cells already use — so a `[[wikilink]]` in a task's description shows up as a
+  // real clickable link instead of literal brackets. renderCell HTML-escapes the raw text before
+  // doing anything else, so this is safe against injection despite using innerHTML.
+  desc.innerHTML = renderCell(t.description || '');
   row.appendChild(desc);
 
   // Tags, ID, and depends-on are only present from a rebuilt sibling "Tasks" extension —
