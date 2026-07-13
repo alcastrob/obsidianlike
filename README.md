@@ -5,14 +5,16 @@ Se instala localmente desde un `.vsix`, sin marketplace ni servidores externos.
 
 ## Autoguardado
 
-El editor guarda la nota en disco por su cuenta, sin depender de `files.autoSave`
-de VS Code: tras `obsidianLike.autoSaveDelay` milisegundos (3000 por defecto) sin
-más cambios, se guarda automáticamente. Al cerrar la pestaña de la nota, o al
-cerrar VS Code con notas sin guardar todavía, también se fuerza ese guardado en
-vez de esperar a que venza el temporizador. Se recomienda desactivar
-`files.autoSave` para evitar guardados duplicados (ya no hace falta, y en macOS
-llegaba a coincidir con la sincronización del editor y borrar texto que se
-estaba escribiendo en ese instante).
+El editor guarda la nota en disco por su cuenta: tras `obsidianLike.autoSaveDelay`
+milisegundos (3000 por defecto) sin más cambios, se guarda automáticamente. Al
+cerrar la pestaña de la nota, o al cerrar VS Code con notas sin guardar todavía,
+también se fuerza ese guardado en vez de esperar a que venza el temporizador —
+sin el diálogo de "¿Guardar cambios?", los cambios simplemente se guardan
+siempre. Para lograrlo, la extensión activa `files.autoSave` de VS Code
+(`afterDelay`) pero **solo para archivos markdown** (override de lenguaje,
+`[markdown]` en el `settings.json` del perfil "Obsidian like" — no afecta a
+otros tipos de archivo), ya que es la única forma soportada de que VS Code deje
+de preguntar antes de cerrar una pestaña con cambios.
 
 ## Resolución de imágenes (`![[archivo.png]]`)
 

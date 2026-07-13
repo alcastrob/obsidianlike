@@ -747,6 +747,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     }, 300);
 
     let pendingSaveResolve: ((content: string) => void) | undefined;
+    let pendingFlush: Promise<void> | undefined;
     let lastOwnContent: string = document.getText();
 
     const fullRange = () =>
@@ -865,23 +866,47 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
       vscode.workspace.onWillSaveTextDocument(e => {
         if (e.document.uri.toString() !== document.uri.toString()) { return; }
-        // Applies the fetched content through queueReplace (the same serialized
-        // path 'sync' uses) rather than returning a TextEdit to e.waitUntil
-        // directly — see the comment above queueReplace for why mixing the two
-        // application paths on the same document was the source of the race.
-        // e.waitUntil is still used, just to delay the actual disk write until
-        // our own queued edit (always [] here) has landed.
-        const contentPromise = new Promise<vscode.TextEdit[]>(resolve => {
-          pendingSaveResolve = (content: string) => {
-            pendingSaveResolve = undefined;
-            queueReplace(content).then(() => resolve([]), () => resolve([]));
-          };
-          webviewPanel.webview.postMessage({ type: 'get-content' });
-          setTimeout(() => {
-            if (pendingSaveResolve) { pendingSaveResolve = undefined; resolve([]); }
-          }, 5000);
-        });
-        e.waitUntil(contentPromise);
+        // document.save() can now be triggered from more than one place at
+        // once — this extension's own idle autosave timer, VS Code's native
+        // files.autoSave (kept enabled, markdown-scoped, purely to suppress
+        // its "save changes?" close-prompt — see syncMarkdownAutoSaveSettings
+        // below), or a manual Ctrl+S landing in between either of those. Each
+        // fires its own onWillSaveTextDocument. A single shared
+        // `pendingSaveResolve` variable can't handle two overlapping firings:
+        // the second one's assignment clobbers the first's callback, so the
+        // first firing's webview reply (still correlated only by "whatever
+        // pendingSaveResolve currently points to") ends up resolving the
+        // *second* firing's promise instead of its own, and the first
+        // firing's own 5s timeout can then null out pendingSaveResolve out
+        // from under the second firing too. `pendingFlush` fixes this by
+        // coalescing any overlapping firings onto the *same* in-flight
+        // get-content round trip — they all want the same thing (the
+        // webview's current content, applied to the document) and can safely
+        // share one answer.
+        if (!pendingFlush) {
+          pendingFlush = new Promise<void>(resolveFlush => {
+            let settled = false;
+            const finish = () => {
+              if (settled) { return; }
+              settled = true;
+              pendingSaveResolve = undefined;
+              pendingFlush = undefined;
+              resolveFlush();
+            };
+            // Applies the fetched content through queueReplace (the same
+            // serialized path 'sync' uses) rather than returning a TextEdit to
+            // e.waitUntil directly — see the comment above queueReplace for
+            // why mixing the two application paths on the same document was
+            // the source of an earlier race.
+            pendingSaveResolve = (content: string) => { queueReplace(content).then(finish, finish); };
+            webviewPanel.webview.postMessage({ type: 'get-content' });
+            setTimeout(finish, 5000);
+          });
+        }
+        // e.waitUntil only delays *this* firing's disk write until the shared
+        // flush lands (always [] — the edit, if any, was already applied
+        // through queueReplace above).
+        e.waitUntil(pendingFlush.then(() => []));
       }),
 
       webviewPanel.onDidChangeViewState(ev => {
@@ -1240,10 +1265,48 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
 // ── Extension activation ──────────────────────────────────────────────────────
 
+// VS Code's own "Do you want to save the changes you made to X?" prompt — shown
+// when closing a dirty tab, and again for any still-dirty tab when closing the
+// whole window — is suppressed by VS Code itself whenever files.autoSave is not
+// "off"; that's the documented, sanctioned lever, not something this extension
+// can override by intercepting the close command directly (there's no per-editor
+// or per-provider API for that). Scoped to markdown only ([markdown] language
+// override in the user's settings.json) so it doesn't change behavior for any
+// other file type the user edits.
+//
+// files.autoSaveDelay is deliberately set very high (not synced to
+// obsidianLike.autoSaveDelay) so VS Code's own "afterDelay" timer practically
+// never fires on its own — it's enabled purely for the close-prompt-suppression
+// side effect above, not to actually drive periodic saving (this extension's
+// own idle timer already does that). The dialog is suppressed by files.autoSave
+// simply *not being* "off", regardless of whether its own timer has ever
+// actually fired, so a delay this long doesn't defeat the purpose. Letting it
+// stay close to obsidianLike.autoSaveDelay (an earlier version of this synced
+// the two) meant both fired at nearly the same moment on every idle pause,
+// racing to trigger onWillSaveTextDocument concurrently — see pendingFlush in
+// resolveCustomTextEditor for why overlapping saves needed their own fix
+// regardless, but there's no reason to keep inviting the overlap here too.
+//
+// Only writes a setting if it doesn't already match, to avoid rewriting the
+// user's settings.json (and firing onDidChangeConfiguration) on every
+// activation.
+const NATIVE_AUTOSAVE_DELAY_MS = 24 * 60 * 60 * 1000; // 24h — effectively "never" on its own
+function syncMarkdownAutoSaveSettings() {
+  const filesCfg = vscode.workspace.getConfiguration('files', { languageId: 'markdown' });
+  if (filesCfg.get<string>('autoSave') !== 'afterDelay') {
+    void filesCfg.update('autoSave', 'afterDelay', vscode.ConfigurationTarget.Global, true);
+  }
+  if (filesCfg.get<number>('autoSaveDelay') !== NATIVE_AUTOSAVE_DELAY_MS) {
+    void filesCfg.update('autoSaveDelay', NATIVE_AUTOSAVE_DELAY_MS, vscode.ConfigurationTarget.Global, true);
+  }
+}
+
 export function activate(context: vscode.ExtensionContext) {
   extensionUri = context.extensionUri;
   extensionContext = context;
   const outputChannel = vscode.window.createOutputChannel('Obsidian-like');
+
+  syncMarkdownAutoSaveSettings();
 
   buildNoteIndex();
   const mdWatcher = vscode.workspace.createFileSystemWatcher('**/*.md');
