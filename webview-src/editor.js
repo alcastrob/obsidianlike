@@ -106,6 +106,55 @@ const vsTheme = EditorView.theme({
     display: 'inline-block', width: '1.2em',
     color: 'var(--text-muted, inherit)',
   },
+  // YAML frontmatter "Properties" panel (PropertiesWidget).
+  '.cm-properties': {
+    display: 'block',
+    margin: '4px 0 18px',
+    paddingBottom: '4px',
+    borderBottom: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.25)))',
+    fontSize: '0.88em',
+  },
+  '.cm-properties-title': {
+    fontWeight: '700', fontSize: '1.05em', marginBottom: '6px',
+  },
+  '.cm-properties-row': {
+    display: 'flex', alignItems: 'center', gap: '8px',
+    padding: '4px 0', borderTop: '1px solid var(--table-border-color, rgba(128,128,128,0.12))',
+  },
+  '.cm-properties-icon': {
+    width: '1.4em', textAlign: 'center', opacity: '0.6', flexShrink: '0',
+  },
+  '.cm-properties-key': {
+    minWidth: '110px', color: 'var(--text-muted, inherit)', flexShrink: '0',
+  },
+  '.cm-properties-value': { flex: '1', minWidth: '0' },
+  '.cm-properties-list': {
+    display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px',
+  },
+  '.cm-properties-pill': {
+    display: 'inline-flex', alignItems: 'center', gap: '4px',
+    background: 'var(--tag-background, rgba(120,180,120,0.15))',
+    color: 'var(--tag-color, var(--text-accent, #7fb37f))',
+    borderRadius: '12px', padding: '2px 6px 2px 10px', fontSize: '0.95em',
+  },
+  '.cm-properties-pill-remove': {
+    cursor: 'pointer', opacity: '0.6', padding: '0 4px', fontSize: '0.9em',
+  },
+  '.cm-properties-pill-remove:hover': { opacity: '1' },
+  '.cm-properties-add-input, .cm-properties-text-input, .cm-properties-new-key-input': {
+    background: 'transparent', border: 'none', borderBottom: '1px solid transparent',
+    color: 'inherit', font: 'inherit', padding: '2px 0', minWidth: '40px',
+    outline: 'none',
+  },
+  '.cm-properties-add-input:focus, .cm-properties-text-input:focus, .cm-properties-new-key-input:focus': {
+    borderBottomColor: 'var(--vscode-focusBorder, rgba(128,128,128,0.5))',
+  },
+  '.cm-properties-text-input': { width: '100%' },
+  '.cm-properties-add-row': {
+    padding: '6px 0 2px', cursor: 'text', opacity: '0.6', display: 'flex',
+  },
+  '.cm-properties-add-row:hover': { opacity: '0.9' },
+  '.cm-properties-add-label': { cursor: 'pointer' },
   // Task checkbox lines (- [ ] / - [x] ...), rendered by TaskCheckboxWidget.
   '.cm-task-line': { paddingLeft: '0' },
   '.cm-task-done': {
@@ -880,6 +929,294 @@ class TableWidget extends WidgetType {
   ignoreEvent() { return false; }
 }
 
+// ── YAML frontmatter → "Properties" panel ──────────────────────────────────────
+// Obsidian's Live Preview replaces a note's leading YAML frontmatter block with
+// an interactive "Propiedades" panel (tags as removable pills, "+ Añadir
+// propiedad", ...) rather than ever showing the raw "---\n...\n---" text —
+// editing happens through that panel's own controls, not by revealing markdown
+// syntax the way every other live-preview element in this file does.
+//
+// Hand-rolled, minimal parser rather than a real YAML library: this webview
+// bundle has no other npm dependencies, and only needs to round-trip
+// Obsidian's own handful of common property shapes (string, number, boolean,
+// list) — not arbitrary YAML. Anything the parser doesn't confidently
+// recognize (comments, nested maps, multi-line block scalars, anchors, ...)
+// makes parseFrontmatter return null, which leaves the block as plain,
+// uninterpreted text (livePreviewPlugin below just never enters this whole
+// code path) rather than risking silently mangling something it doesn't
+// understand on the first write-back.
+function unquoteYamlScalar(s) {
+  if (/^".*"$/.test(s) || /^'.*'$/.test(s)) return s.slice(1, -1);
+  return s;
+}
+
+function parseYamlScalar(raw) {
+  const s = raw.trim();
+  if (/^(true|false)$/i.test(s)) return { type: 'boolean', value: /^true$/i.test(s) };
+  if (/^-?\d+(\.\d+)?$/.test(s)) return { type: 'number', value: Number(s) };
+  if (/^\[.*\]$/.test(s)) {
+    const inner = s.slice(1, -1).trim();
+    const value = inner === '' ? [] : inner.split(',').map(v => unquoteYamlScalar(v.trim()));
+    return { type: 'list', value };
+  }
+  return { type: 'string', value: unquoteYamlScalar(s) };
+}
+
+// Returns { properties: [{key,type,value}], from, to } — `to` is the closing
+// "---" line's own end (its trailing newline, like every other line's, is left
+// untouched by callers) — or null if the document doesn't open with a
+// recognizable frontmatter block at all.
+function parseFrontmatter(state) {
+  if (state.doc.lines < 2 || state.doc.line(1).text.trim() !== '---') return null;
+  let closeLine = -1;
+  for (let ln = 2; ln <= state.doc.lines; ln++) {
+    if (state.doc.line(ln).text.trim() === '---') { closeLine = ln; break; }
+  }
+  if (closeLine === -1) return null;
+
+  const properties = [];
+  let ln = 2;
+  while (ln < closeLine) {
+    const text = state.doc.line(ln).text;
+    if (!text.trim()) { ln++; continue; }
+    // Anything not a plain "key:" / "key: value" line (comments, nested maps,
+    // block scalars, ...) bails out to null rather than guessing.
+    const m = /^([^:\n]+):(.*)$/.exec(text);
+    if (!m) return null;
+    const key = m[1].trim();
+    const rest = m[2].trim();
+    ln++;
+    if (rest === '') {
+      // Either an empty scalar, or the start of a "  - item" list block.
+      const items = [];
+      while (ln < closeLine) {
+        const im = /^  - (.*)$/.exec(state.doc.line(ln).text);
+        if (!im) break;
+        items.push(unquoteYamlScalar(im[1].trim()));
+        ln++;
+      }
+      properties.push(items.length > 0
+        ? { key, type: 'list', value: items }
+        : { key, type: 'string', value: '' });
+    } else {
+      properties.push({ key, ...parseYamlScalar(rest) });
+    }
+  }
+  return { properties, from: 0, to: state.doc.line(closeLine).to };
+}
+
+// Quotes a scalar only when needed to round-trip correctly (would otherwise be
+// mis-read back as a different type, or contains characters that break the
+// plain "key: value" line shape).
+function yamlScalarOut(value) {
+  const s = String(value);
+  if (s === '' || /^(true|false)$/i.test(s) || /^-?\d+(\.\d+)?$/.test(s) ||
+      /[:#]/.test(s) || /^\s|\s$/.test(s) || /^[[\]{}]/.test(s)) {
+    return `"${s.replace(/"/g, '\\"')}"`;
+  }
+  return s;
+}
+
+function serializeFrontmatter(properties) {
+  const lines = ['---'];
+  for (const p of properties) {
+    if (p.type === 'list') {
+      if (p.value.length === 0) {
+        lines.push(`${p.key}: []`);
+      } else {
+        lines.push(`${p.key}:`);
+        for (const item of p.value) lines.push(`  - ${yamlScalarOut(item)}`);
+      }
+    } else if (p.type === 'boolean') {
+      lines.push(`${p.key}: ${p.value ? 'true' : 'false'}`);
+    } else if (p.type === 'number') {
+      lines.push(`${p.key}: ${p.value}`);
+    } else {
+      lines.push(p.value === '' ? `${p.key}:` : `${p.key}: ${yamlScalarOut(p.value)}`);
+    }
+  }
+  lines.push('---');
+  return lines.join('\n');
+}
+
+const PROPERTY_TYPE_ICON = { list: '\u{1F3F7}', boolean: '☑', number: '#', string: 'Aa' };
+
+class PropertiesWidget extends WidgetType {
+  constructor(view, from, to, properties) {
+    super();
+    this.view = view;
+    this.from = from;
+    this.to = to;
+    this.properties = properties;
+  }
+  eq(other) {
+    return this.from === other.from && this.to === other.to &&
+      JSON.stringify(this.properties) === JSON.stringify(other.properties);
+  }
+  // Replaces the whole frontmatter block with newProps re-serialized. Tagged
+  // with a userEvent that deliberately does *not* start with "input"/"delete"
+  // so wikiLinkActivationTracker's isUserEvent('input') check (keyed off the
+  // *cursor's* position, unrelated to this panel) never mistakes it for an
+  // edit inside whatever wiki-link the document cursor happens to be sitting
+  // on elsewhere.
+  commit(newProps) {
+    this.view.dispatch({
+      changes: { from: this.from, to: this.to, insert: serializeFrontmatter(newProps) },
+      userEvent: 'properties.change',
+    });
+  }
+  toDOM() {
+    const box = document.createElement('div');
+    box.className = 'cm-properties';
+    box.contentEditable = 'false';
+
+    const title = document.createElement('div');
+    title.className = 'cm-properties-title';
+    title.textContent = 'Propiedades';
+    box.appendChild(title);
+
+    this.properties.forEach((prop, idx) => box.appendChild(this.renderRow(prop, idx)));
+    box.appendChild(this.renderAddRow());
+    return box;
+  }
+  renderRow(prop, idx) {
+    const row = document.createElement('div');
+    row.className = 'cm-properties-row';
+
+    const icon = document.createElement('span');
+    icon.className = 'cm-properties-icon';
+    icon.textContent = PROPERTY_TYPE_ICON[prop.type] || PROPERTY_TYPE_ICON.string;
+    row.appendChild(icon);
+
+    const key = document.createElement('span');
+    key.className = 'cm-properties-key';
+    key.textContent = prop.key;
+    row.appendChild(key);
+
+    const valueEl = document.createElement('div');
+    valueEl.className = 'cm-properties-value';
+
+    if (prop.type === 'list') {
+      valueEl.appendChild(this.renderListValue(prop, idx));
+    } else if (prop.type === 'boolean') {
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'cm-properties-checkbox';
+      cb.checked = prop.value;
+      cb.addEventListener('mousedown', e => e.stopPropagation());
+      cb.addEventListener('change', () => {
+        const next = this.properties.slice();
+        next[idx] = { ...prop, value: cb.checked };
+        this.commit(next);
+      });
+      valueEl.appendChild(cb);
+    } else {
+      const input = document.createElement('input');
+      input.type = prop.type === 'number' ? 'number' : 'text';
+      input.className = 'cm-properties-text-input';
+      input.value = String(prop.value);
+      input.addEventListener('mousedown', e => e.stopPropagation());
+      const commitValue = () => {
+        const raw = input.value;
+        const value = prop.type === 'number' ? (Number(raw) || 0) : raw;
+        if (value === prop.value) return;
+        const next = this.properties.slice();
+        next[idx] = { ...prop, value };
+        this.commit(next);
+      };
+      input.addEventListener('blur', commitValue);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+      });
+      valueEl.appendChild(input);
+    }
+    row.appendChild(valueEl);
+    return row;
+  }
+  renderListValue(prop, idx) {
+    const wrap = document.createElement('div');
+    wrap.className = 'cm-properties-list';
+    prop.value.forEach((item, itemIdx) => {
+      const pill = document.createElement('span');
+      pill.className = 'cm-properties-pill';
+      const text = document.createElement('span');
+      text.textContent = item;
+      pill.appendChild(text);
+      const remove = document.createElement('span');
+      remove.className = 'cm-properties-pill-remove';
+      remove.textContent = '×';
+      remove.title = 'Quitar';
+      remove.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+      remove.addEventListener('click', e => {
+        e.preventDefault(); e.stopPropagation();
+        const nextItems = prop.value.slice(0, itemIdx).concat(prop.value.slice(itemIdx + 1));
+        const next = this.properties.slice();
+        next[idx] = { ...prop, value: nextItems };
+        this.commit(next);
+      });
+      pill.appendChild(remove);
+      wrap.appendChild(pill);
+    });
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'cm-properties-add-input';
+    input.placeholder = '+';
+    input.addEventListener('mousedown', e => e.stopPropagation());
+    input.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ',') return;
+      e.preventDefault();
+      const value = input.value.trim();
+      if (!value) return;
+      const next = this.properties.slice();
+      next[idx] = { ...prop, value: prop.value.concat([value]) };
+      input.value = '';
+      this.commit(next);
+    });
+    wrap.appendChild(input);
+    return wrap;
+  }
+  renderAddRow() {
+    const row = document.createElement('div');
+    row.className = 'cm-properties-add-row';
+
+    const label = document.createElement('span');
+    label.className = 'cm-properties-add-label';
+    label.textContent = '+ Añadir propiedad';
+    row.appendChild(label);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'cm-properties-new-key-input';
+    input.placeholder = 'Nombre de la propiedad';
+    input.style.display = 'none';
+    input.addEventListener('mousedown', e => e.stopPropagation());
+    row.appendChild(input);
+
+    label.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    label.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      label.style.display = 'none';
+      input.style.display = '';
+      input.focus();
+    });
+    const cancel = () => { input.style.display = 'none'; label.style.display = ''; input.value = ''; };
+    input.addEventListener('blur', cancel);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); return; }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const key = input.value.trim();
+      if (!key) { cancel(); return; }
+      const next = this.properties.concat([{ key, type: 'string', value: '' }]);
+      cancel();
+      this.commit(next);
+    });
+    return row;
+  }
+  ignoreEvent() { return false; }
+}
+
 // ── Image widget ──────────────────────────────────────────────────────────────
 class ImageWidget extends WidgetType {
   constructor(src, alt, width, caption) {
@@ -1604,6 +1941,24 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
       // replacement below can skip them (the task checkbox widget already covers that span).
       const taskLines = new Set();
 
+      // ── YAML frontmatter → "Propiedades" panel ─────────────────────────────
+      // Computed unconditionally (not viewport-gated like the tree-walk below)
+      // since it only ever concerns the very start of the document, however
+      // far the user has since scrolled — matches how TableWidget/etc. handle
+      // their own single always-relevant widget position.
+      const fm = parseFrontmatter(state);
+      const fmCloseLine = fm ? state.doc.lineAt(fm.to).number : 0;
+      if (fm) {
+        const firstLine = state.doc.line(1);
+        decs.push({ from: firstLine.from, to: firstLine.to,
+          dec: Decoration.replace({ widget: new PropertiesWidget(view, fm.from, fm.to, fm.properties) }) });
+        for (let ln = 2; ln <= fmCloseLine; ln++) {
+          const line = state.doc.line(ln);
+          decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
+          lineDecs.push({ from: line.from, dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+        }
+      }
+
       syntaxTree(state).iterate({
         from: view.viewport.from,
         to:   view.viewport.to,
@@ -1612,6 +1967,16 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
         },
         enter(node) {
           const n = node.name;
+
+          // The frontmatter block (if any) is entirely handled above, as a
+          // single unit — none of lezer's normal parsing of its content
+          // (a "---" HorizontalRule, "tags:" as a Paragraph, "  - x" as a
+          // BulletList/ListItem, ...) should also decorate it, which would
+          // conflict with the full-line Decoration.replace above. Returning
+          // false here (rather than e.g. only for BulletList) also means the
+          // matching `leave` never fires for a skipped node, so listDepth
+          // bookkeeping for lists later in the *real* document stays balanced.
+          if (fmCloseLine > 0 && state.doc.lineAt(node.from).number <= fmCloseLine) { return false; }
 
           // ── Lists — indentation + spacing from the preceding block ────────
           if (n === 'BulletList' || n === 'OrderedList') {

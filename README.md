@@ -16,6 +16,20 @@ siempre. Para lograrlo, la extensión activa `files.autoSave` de VS Code
 otros tipos de archivo), ya que es la única forma soportada de que VS Code deje
 de preguntar antes de cerrar una pestaña con cambios.
 
+## Frontmatter YAML → panel "Propiedades"
+
+El bloque `---...---` al principio de la nota se muestra como un panel
+"Propiedades" interactivo, igual que en Obsidian, en vez de como texto YAML en
+crudo: las propiedades de tipo lista (como `tags`) aparecen como chips con una
+"×" para quitarlas y un campo para añadir más; las de texto/número como un
+campo editable; las booleanas como checkbox. "+ Añadir propiedad" crea una
+propiedad de texto nueva (para crear una propiedad de tipo lista desde cero, o
+renombrar una clave, hace falta editar el YAML directamente en modo fuente —
+comando "Obsidian-like: Alternar vista fuente / WYSIWYG"). Si el bloque
+usa una sintaxis YAML que el analizador no reconoce con seguridad (comentarios,
+mapas anidados, anclas...), se deja el texto en crudo tal cual en vez de
+arriesgarse a corromperlo al guardar.
+
 ## Resolución de imágenes (`![[archivo.png]]`)
 
 1. Se busca primero en la carpeta de adjuntos configurada (`obsidianLike.attachmentsLocation` /
