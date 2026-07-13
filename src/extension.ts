@@ -762,12 +762,39 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     // macOS as text visibly disappearing right when VS Code's own autosave fired
     // mid-typing; not reproduced reliably on Windows, consistent with a race
     // rather than a deterministic bug.
+    //
+    // `applyingOwnEdit` guards a second, narrower race this alone didn't close:
+    // onDidChangeTextDocument (below) decides whether a change is "ours" (skip)
+    // or external (forward as external-update) by comparing against
+    // `lastOwnContent` — but that variable used to be written *synchronously*,
+    // the instant a 'sync'/'content-for-save' message was received, while the
+    // WorkspaceEdit it describes was still only queued, not yet actually
+    // applied. If a second queued edit updated `lastOwnContent` to its own
+    // (newer) content before the *first* edit's applyEdit had actually landed,
+    // the change event for that first (now-stale-relative-to-lastOwnContent)
+    // edit no longer matched `lastOwnContent` — read as "an external change",
+    // sent to the webview as external-update, and silently reverted whatever
+    // newer content the user had already typed there. Reported as the last
+    // word or two typed disappearing, with the cursor jumping back to wherever
+    // it was when the save round-trip started. Setting `lastOwnContent` only
+    // *after* `applyEdit` resolves — in the same serialized order edits are
+    // queued and applied — keeps it from ever describing an edit that hasn't
+    // landed yet; `applyingOwnEdit` additionally makes onDidChangeTextDocument
+    // trust "this change came from our own queued edit" structurally instead
+    // of re-deriving it from a content comparison at all.
+    let applyingOwnEdit = false;
     let pendingApply: Thenable<unknown> = Promise.resolve();
     const queueReplace = (content: string): Thenable<unknown> => {
-      const run = pendingApply.then(() => {
+      const run = pendingApply.then(async () => {
         const edit = new vscode.WorkspaceEdit();
         edit.replace(document.uri, fullRange(), content);
-        return vscode.workspace.applyEdit(edit);
+        applyingOwnEdit = true;
+        try {
+          await vscode.workspace.applyEdit(edit);
+        } finally {
+          applyingOwnEdit = false;
+        }
+        lastOwnContent = content;
       });
       pendingApply = run.then(() => undefined, () => undefined);
       return run;
@@ -788,7 +815,6 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     };
 
     const applySync = (content: string) => {
-      lastOwnContent = content;
       queueReplace(content);
       // Own debounced autosave (obsidianLike.autoSaveDelay) instead of relying on
       // VS Code's native files.autoSave, which raced with this exact sync path.
@@ -826,6 +852,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
       vscode.workspace.onDidChangeTextDocument(e => {
         if (e.document.uri.toString() !== document.uri.toString()) { return; }
+        // A queueReplace-driven edit (regular 'sync' or the save round-trip
+        // below) landing — not an external change, regardless of what
+        // lastOwnContent currently holds. See the comment above queueReplace.
+        if (applyingOwnEdit) { return; }
         const newText = e.document.getText();
         const normalize = (s: string) => s.replace(/\r\n/g, '\n');
         if (normalize(newText) === normalize(lastOwnContent)) { return; }
@@ -844,7 +874,6 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         const contentPromise = new Promise<vscode.TextEdit[]>(resolve => {
           pendingSaveResolve = (content: string) => {
             pendingSaveResolve = undefined;
-            lastOwnContent = content;
             queueReplace(content).then(() => resolve([]), () => resolve([]));
           };
           webviewPanel.webview.postMessage({ type: 'get-content' });
