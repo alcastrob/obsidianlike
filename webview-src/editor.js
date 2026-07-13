@@ -2905,6 +2905,28 @@ function toggleSourceMode() {
   document.body.classList.toggle('source-mode', sourceMode);
 }
 
+// Smallest { from, to, insert } that turns `oldStr` into `newStr`, found by
+// trimming the matching prefix and suffix around whatever actually differs.
+// Used by 'external-update' below instead of always replacing the whole
+// document: CM6 maps the cursor through a change automatically (leaving it
+// untouched whenever it falls outside the changed span), but a from:0,
+// to:doc.length replace gives it nothing to map — every position sat inside
+// the fully-deleted range, so it collapses to line 1, column 1. This was very
+// visible on every autosave, since VS Code's own save participants (e.g.
+// files.insertFinalNewline/trimTrailingWhitespace, independent of anything
+// this extension controls) commonly touch the saved text slightly, which
+// triggers exactly one of these external-update round-trips per save.
+function minimalReplaceRange(oldStr, newStr) {
+  const maxStart = Math.min(oldStr.length, newStr.length);
+  let start = 0;
+  while (start < maxStart && oldStr[start] === newStr[start]) start++;
+  let oldEnd = oldStr.length, newEnd = newStr.length;
+  while (oldEnd > start && newEnd > start && oldStr[oldEnd - 1] === newStr[newEnd - 1]) {
+    oldEnd--; newEnd--;
+  }
+  return { from: start, to: oldEnd, insert: newStr.slice(start, newEnd) };
+}
+
 // ── Message handling ──────────────────────────────────────────────────────────
 window.addEventListener('message', ev => {
   const msg = ev.data;
@@ -2927,7 +2949,10 @@ window.addEventListener('message', ev => {
     case 'external-update': {
       const cur = view.state.doc.toString();
       if (msg.content !== cur) {
-        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: msg.content } });
+        // No explicit `selection` here on purpose — CM6 maps the current
+        // selection through `changes` by default, which is exactly what keeps
+        // the cursor in place (see minimalReplaceRange above).
+        view.dispatch({ changes: minimalReplaceRange(cur, msg.content) });
       }
       break;
     }
