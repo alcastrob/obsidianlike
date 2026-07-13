@@ -1077,6 +1077,7 @@ function requestDataviewQuery(lang, query) {
   HTMLElement.prototype.createSpan = function (info, callback) { return this.createEl('span', info, callback); };
   HTMLElement.prototype.empty = function () { while (this.firstChild) this.removeChild(this.firstChild); };
   HTMLElement.prototype.setText = function (text) { this.textContent = text; };
+  HTMLElement.prototype.appendText = function (text) { this.appendChild(document.createTextNode(text)); };
   HTMLElement.prototype.addClass = function (cls) { this.classList.add(cls); };
   HTMLElement.prototype.removeClass = function (cls) { this.classList.remove(cls); };
   HTMLElement.prototype.toggleClass = function (cls, force) { this.classList.toggle(cls, force); };
