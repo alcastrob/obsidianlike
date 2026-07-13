@@ -49,10 +49,16 @@ correctamente como directorio en Windows.
   editor), todos los `[[wikilinks]]` que apuntaban a ella en el resto de la bóveda se
   actualizan automáticamente — añadiendo o quitando la carpeta de desambiguación según
   corresponda a la nueva ubicación.
-- Modo fuente vs. vista previa: cada `[[wikilink]]` cambia a texto plano (corchetes
-  visibles, sin subrayado ni color de enlace, no clicable) solo mientras el cursor está
-  entre sus propios corchetes — si hay varios `[[enlaces]]` en la misma línea, el resto
-  se sigue mostrando renderizado normalmente aunque el cursor esté en esa línea.
+- Modo fuente vs. vista previa: un `[[wikilink]]` solo cambia a texto plano (corchetes
+  visibles, sin subrayado ni color de enlace, no clicable) cuando se **edita** con el
+  cursor dentro de sus corchetes (al escribir o borrar una letra) — moverse hasta ahí
+  con el cursor (flechas, incluidas subir/bajar) sin editar nada no lo activa, para que
+  navegar por el documento no cambie el renderizado ni haga aparecer el desplegable de
+  sugerencias de enlaces. Una vez activado por una edición, permanece en modo fuente
+  (incluso si luego solo mueves el cursor dentro del mismo enlace) hasta que el cursor
+  sale de sus corchetes externos, momento en el que vuelve a la vista normal. Si hay
+  varios `[[enlaces]]` en la misma línea, el resto se sigue mostrando renderizado
+  normalmente aunque uno esté activado.
 
 ## Transclusiones (`![[nota]]`, `![[carpeta/nota]]`, `![[nota#sección]]`)
 

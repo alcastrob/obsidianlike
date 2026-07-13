@@ -346,6 +346,52 @@ const vsTheme = EditorView.theme({
   '.cm-dataview-query .dv-calendar-day': {
     margin: '2px 0',
   },
+  // DataviewJsWidget (a ```dataviewjs``` block calling dv.view(...)) — unlike `.cm-dataview-
+  // query` above, this wraps a *live* script's own DOM (e.g. tasks-timeline.js's own embedded
+  // CSS/classes), so styling here stays minimal: just enough that the loading/error states
+  // read consistently with the rest of the editor before the loaded script's own styles apply.
+  '.cm-dataviewjs-app': {
+    display: 'block',
+    margin: '4px 0 10px',
+  },
+  '.cm-dataviewjs-loading': {
+    opacity: '0.55',
+    fontStyle: 'italic',
+    fontSize: '0.9em',
+    padding: '2px 0',
+  },
+  '.cm-dataviewjs-error': {
+    color: 'var(--text-error, #e06c75)',
+    fontSize: '0.9em',
+    padding: '4px 0',
+    whiteSpace: 'pre-wrap',
+  },
+  '.cm-dataviewjs-notice-container': {
+    position: 'fixed',
+    right: '16px',
+    bottom: '16px',
+    zIndex: '10000',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    pointerEvents: 'none',
+  },
+  '.cm-dataviewjs-notice': {
+    background: 'var(--background-secondary, #2a2a2a)',
+    color: 'var(--text-normal, inherit)',
+    border: '1px solid var(--background-modifier-border, rgba(128,128,128,0.3))',
+    borderRadius: '6px',
+    padding: '8px 12px',
+    fontSize: '0.9em',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+    opacity: '0',
+    transform: 'translateY(6px)',
+    transition: 'opacity 0.15s ease, transform 0.15s ease',
+  },
+  '.cm-dataviewjs-notice-visible': {
+    opacity: '1',
+    transform: 'translateY(0)',
+  },
   // Folded heading content
   '.cm-fold-hidden': {
     height: '0 !important', lineHeight: '0 !important',
@@ -745,16 +791,6 @@ function getActiveLines(state) {
   return set;
 }
 
-// Whether any selection range touches [from, to] (inclusive) — used where a
-// raw/rendered switch must key off the cursor being inside a specific token
-// (e.g. a `[[wiki-link]]`'s own brackets) rather than merely on the same line.
-function rangeIsActive(state, from, to) {
-  for (const r of state.selection.ranges) {
-    if (r.from <= to && r.to >= from) return true;
-  }
-  return false;
-}
-
 // ── Table widget ──────────────────────────────────────────────────────────────
 // Renders inline markdown (bold, italic, code, wiki-links) inside table cells.
 function renderCell(raw) {
@@ -991,6 +1027,266 @@ function requestDataviewQuery(lang, query) {
   vscode.postMessage({ type: 'run-dataview-query', lang, query });
 }
 
+// ── DataviewJS interactive engine (real DOM, `app`, `dv.view`) ─────────────────
+// A ```dataviewjs``` block whose code calls dv.view(...) needs a fundamentally different
+// execution model than DataviewQueryWidget above: it loads and runs *another* script (e.g.
+// tasks-timeline.js, straight from the vault, unmodified) against a real DOM container and
+// live vault I/O — not a one-shot "push some output nodes, render to static HTML" call.
+// obsidianlike-dataview's own dv sandbox (Node vm, no window) has no dv.container/dv.view/app
+// at all, so it can't run this — see DataviewJsWidget below, which claims this specific case
+// instead (detected via DV_VIEW_CALL_RE) while everything else still goes through
+// DataviewQueryWidget/obsidianlike-dataview exactly as before.
+
+// Obsidian injects these onto HTMLElement.prototype for every dataviewjs script; this webview
+// has no such thing normally (editor.js itself just uses plain document.createElement
+// throughout), so a faithful-to-Obsidian polyfill is installed once, globally, purely so
+// tasks-timeline.js (and any other vault script loaded this way) runs completely unmodified.
+(function installObsidianDomHelpers() {
+  if (HTMLElement.prototype.createEl) return; // idempotent, in case this ever runs twice
+  function applyDomElementInfo(el, info) {
+    if (info == null) return el;
+    if (typeof info === 'string') { if (info) el.className = info; return el; }
+    if (info.cls) el.className = Array.isArray(info.cls) ? info.cls.join(' ') : info.cls;
+    if (info.text !== undefined) {
+      if (info.text instanceof Node) el.appendChild(info.text);
+      else el.textContent = info.text;
+    }
+    if (info.attr) {
+      for (const key in info.attr) {
+        const v = info.attr[key];
+        if (v === null || v === undefined || v === false) continue;
+        el.setAttribute(key, v === true ? '' : String(v));
+      }
+    }
+    if (info.title) el.setAttribute('title', info.title);
+    if (info.value !== undefined) el.value = info.value;
+    if (info.type !== undefined) el.type = info.type;
+    if (info.href !== undefined) el.href = info.href;
+    if (info.placeholder !== undefined) el.placeholder = info.placeholder;
+    return el;
+  }
+  HTMLElement.prototype.createEl = function (tag, info, callback) {
+    const el = document.createElement(tag);
+    applyDomElementInfo(el, info);
+    if (info && typeof info === 'object' && info.prepend) { this.insertBefore(el, this.firstChild); }
+    else { this.appendChild(el); }
+    if (typeof callback === 'function') callback(el);
+    return el;
+  };
+  HTMLElement.prototype.createDiv = function (info, callback) { return this.createEl('div', info, callback); };
+  HTMLElement.prototype.createSpan = function (info, callback) { return this.createEl('span', info, callback); };
+  HTMLElement.prototype.empty = function () { while (this.firstChild) this.removeChild(this.firstChild); };
+  HTMLElement.prototype.setText = function (text) { this.textContent = text; };
+  HTMLElement.prototype.addClass = function (cls) { this.classList.add(cls); };
+  HTMLElement.prototype.removeClass = function (cls) { this.classList.remove(cls); };
+  HTMLElement.prototype.toggleClass = function (cls, force) { this.classList.toggle(cls, force); };
+  HTMLElement.prototype.hasClass = function (cls) { return this.classList.contains(cls); };
+})();
+
+const DV_VIEW_CALL_RE = /\bdv\s*\.\s*view\s*\(/;
+
+const dataviewScriptCache = new Map();   // script name -> { content, error }
+const dataviewScriptWaiters = new Map(); // script name -> Array<resolve>, while a request is in flight
+
+// Resolves once with { content, error } — dedupes concurrent requests for the same name (a
+// script calling dv.view() more than once, or several blocks loading the same script) onto a
+// single host round trip, same spirit as requestTasksQuery/requestDataviewQuery's pending sets.
+function requestDataviewScript(name) {
+  return new Promise(resolve => {
+    const cached = dataviewScriptCache.get(name);
+    if (cached) { resolve(cached); return; }
+    let waiters = dataviewScriptWaiters.get(name);
+    if (!waiters) { waiters = []; dataviewScriptWaiters.set(name, waiters); }
+    waiters.push(resolve);
+    if (waiters.length === 1) {
+      vscode.postMessage({ type: 'dataview-resolve-script', name });
+    }
+  });
+}
+
+const pendingDataviewFileRequests = new Map(); // id -> { resolve, reject }
+let nextDataviewRequestId = 1;
+
+function dvReadFile(path) {
+  return new Promise((resolve, reject) => {
+    const id = 'dvr' + (nextDataviewRequestId++);
+    pendingDataviewFileRequests.set(id, { resolve, reject });
+    vscode.postMessage({ type: 'dataview-read-file', id, path });
+  });
+}
+
+function dvWriteFile(path, content) {
+  return new Promise((resolve, reject) => {
+    const id = 'dvw' + (nextDataviewRequestId++);
+    pendingDataviewFileRequests.set(id, { resolve, reject });
+    vscode.postMessage({ type: 'dataview-write-file', id, path, content });
+  });
+}
+
+function dvBasename(path) {
+  const last = path.split('/').pop();
+  return last.endsWith('.md') ? last.slice(0, -3) : last;
+}
+
+// Stand-in for Obsidian's `app`, built from what this webview already has: `noteIndex` (kept
+// live by the 'note-index' message, see noteIndexRebuildEffect below) covers the synchronous
+// parts of the real API (getMarkdownFiles/getAbstractFileByPath/getFirstLinkpathDest); the
+// async parts (reading/writing a file's content, opening a note) round-trip to the extension
+// host. Deliberately does NOT cache file *content* anywhere — real Obsidian's app.vault.read()
+// always returns current content, and tasks-timeline.js's own "🔄 Refrescar" button depends on
+// that staying true without any extra cache-invalidation plumbing on this side.
+function buildDataviewApp() {
+  const noteStub = (entry) => {
+    const path = entry.dir ? entry.dir + '/' + entry.name + '.md' : entry.name + '.md';
+    return { path, basename: entry.name, extension: 'md' };
+  };
+  return {
+    vault: {
+      getMarkdownFiles() { return noteIndex.map(noteStub); },
+      getAbstractFileByPath(path) {
+        const entry = noteIndex.find(n => noteStub(n).path === path);
+        return entry ? noteStub(entry) : undefined;
+      },
+      async read(file) {
+        const result = await dvReadFile(file.path);
+        if (result.error) { throw new Error(result.error); }
+        return result.content;
+      },
+      async modify(file, content) {
+        const result = await dvWriteFile(file.path, content);
+        if (!result.ok) { throw new Error(result.error || 'No se pudo guardar el archivo'); }
+      },
+    },
+    workspace: {
+      getLeaf() {
+        // `view` is deliberately left undefined: VS Code's custom editor doesn't expose a CM6
+        // instance to the extension host the way Obsidian exposes `view.editor`, so a script's
+        // `if (view && view.editor) view.editor.setCursor(...)`-style cursor positioning after
+        // opening a file harmlessly no-ops instead of throwing.
+        return { view: undefined, async openFile(file) { vscode.postMessage({ type: 'dataview-open-note', path: file.path }); } };
+      },
+    },
+    metadataCache: {
+      // Real Obsidian's getFirstLinkpathDest is itself a synchronous lookup against an
+      // already-built vault index, so resolving against noteIndex directly (rather than a host
+      // round trip) matches both the required sync signature and the actual semantics.
+      getFirstLinkpathDest(linkpath) {
+        const clean = String(linkpath).split('#')[0].trim();
+        if (!clean) return null;
+        const wanted = (clean.endsWith('.md') ? clean : clean + '.md').toLowerCase();
+        for (const entry of noteIndex) {
+          const stub = noteStub(entry);
+          if (stub.path.toLowerCase() === wanted || stub.path.toLowerCase().endsWith('/' + wanted)) return stub;
+        }
+        const wantedBasename = dvBasename(wanted);
+        const match = noteIndex.find(n => n.name.toLowerCase() === wantedBasename);
+        return match ? noteStub(match) : null;
+      },
+    },
+  };
+}
+
+let dataviewNoticeContainer = null;
+function ensureDataviewNoticeContainer() {
+  if (dataviewNoticeContainer && document.body.contains(dataviewNoticeContainer)) return dataviewNoticeContainer;
+  dataviewNoticeContainer = document.body.createDiv('cm-dataviewjs-notice-container');
+  return dataviewNoticeContainer;
+}
+
+// Stand-in for Obsidian's global `Notice` — a floating toast inside the webview itself (closer
+// to Obsidian's actual look than a VS Code notification), and needs no host round trip.
+class DataviewNotice {
+  constructor(message, timeoutMs) {
+    const container = ensureDataviewNoticeContainer();
+    const el = container.createDiv({ cls: 'cm-dataviewjs-notice', text: String(message) });
+    requestAnimationFrame(() => el.classList.add('cm-dataviewjs-notice-visible'));
+    setTimeout(() => {
+      el.classList.remove('cm-dataviewjs-notice-visible');
+      setTimeout(() => el.remove(), 200);
+    }, timeoutMs || 4000);
+  }
+}
+
+// Runs one ```dataviewjs``` block's own top-level code (no `input` — matches Obsidian, where
+// only a script *loaded via* dv.view() receives one) against a fresh `dv`/`app`/`Notice`
+// environment. Fire-and-forget from DataviewJsWidget.toDOM()'s perspective: mutates `container`
+// in place once done (or on error) rather than returning anything, since toDOM() already
+// returned its wrapper element to CM6 before this settles.
+async function runDataviewJsBlock(code, container) {
+  const loading = container.createDiv({ cls: 'cm-dataviewjs-loading', text: 'Cargando…' });
+  const appAdapter = buildDataviewApp();
+  const dv = { container, view: (name, input) => dvView(name, input, container, appAdapter) };
+  try {
+    const run = new Function('dv', 'app', 'Notice', 'return (async () => {\n' + code + '\n})()');
+    await run(dv, appAdapter, DataviewNotice);
+    if (container.contains(loading)) { loading.remove(); }
+  } catch (err) {
+    container.empty();
+    container.createDiv({ cls: 'cm-dataviewjs-error', text: 'Error en dataviewjs: ' + (err && err.message ? err.message : String(err)) });
+  }
+}
+
+// dv.view(name, input): resolves and runs another script from the vault, exactly like
+// Obsidian — a fresh child container per call (so the loaded script owns its own DOM subtree,
+// never sharing one with a sibling dv.view() call), its own nested `dv` (a loaded script can
+// itself call dv.view() again, recursively), and `input` bound this time — unlike the outer
+// block, a *loaded* script does receive one.
+async function dvView(name, input, parentContainer, appAdapter) {
+  const childHost = parentContainer.createDiv();
+  const loading = childHost.createDiv({ cls: 'cm-dataviewjs-loading', text: `Cargando "${name}"…` });
+
+  const script = await requestDataviewScript(name);
+  if (childHost.contains(loading)) { loading.remove(); }
+
+  if (script.error) {
+    childHost.createDiv({ cls: 'cm-dataviewjs-error', text: `No se pudo cargar "${name}": ${script.error}` });
+    return;
+  }
+
+  const dv = { container: childHost, view: (n, i) => dvView(n, i, childHost, appAdapter) };
+  try {
+    const run = new Function('dv', 'app', 'input', 'Notice', 'return (async () => {\n' + script.content + '\n})()');
+    await run(dv, appAdapter, input, DataviewNotice);
+  } catch (err) {
+    childHost.empty();
+    childHost.createDiv({ cls: 'cm-dataviewjs-error', text: `Error ejecutando "${name}": ` + (err && err.message ? err.message : String(err)) });
+  }
+}
+
+// Single-line replacement widget for the opening ```dataviewjs fence when its code calls
+// dv.view(...). Unlike DataviewQueryWidget (stateless: rebuilds fresh HTML from a data blob
+// every time), the whole point here is a *persistent* live script instance — tasks-timeline.js
+// keeps its own zoom/filter/drag state across CM6 rebuilds — so eq() only ever compares the
+// block's raw source text, never anything about whether the script has finished loading. As
+// long as the text is unchanged, CM6 never calls toDOM() again and the running instance (and
+// its DOM) survives completely untouched across cursor moves, scrolls, and edits elsewhere in
+// the document.
+class DataviewJsWidget extends WidgetType {
+  constructor(code) { super(); this.code = code; }
+  eq(other) { return this.code === other.code; }
+  toDOM() {
+    const wrap = document.createElement('div');
+    wrap.className = 'cm-dataviewjs-app';
+    // `dv.container` is this inner host, never `wrap` itself: tasks-timeline.js builds its own
+    // "persistent container" as a *sibling* of the container it's given (a leftover of how it
+    // recycles Obsidian's dataviewjs blocks on reload), inserted via raw
+    // `parentNode.insertBefore(...)`. If `dv.container` were `wrap` (the node CM6 actually
+    // owns), that sibling would land *outside* CM6's managed subtree and become an orphan the
+    // day this widget is torn down (cursor entering the block reverts it to raw source).
+    // Nesting an inner host means that sibling still ends up inside `wrap` either way, so CM6's
+    // own attach/detach lifecycle covers it too.
+    const innerHost = document.createElement('div');
+    wrap.appendChild(innerHost);
+    runDataviewJsBlock(this.code, innerHost);
+    return wrap;
+  }
+  // Everything in here handles its own interaction (drag&drop, dropdowns, search, checkboxes) —
+  // unlike TasksQueryWidget (which only needs to protect one filter <input>), no click anywhere
+  // in this widget should ever move the document selection: that would make the next rebuild
+  // treat the block as "cursor inside" and revert it to raw source mid-interaction.
+  ignoreEvent() { return true; }
+}
+
 const TASK_PRIORITY_ICON = {
   Highest: '🔺', High: '⏫', Medium: '🔼', Low: '🔽', Lowest: '⏬',
 };
@@ -1030,7 +1326,11 @@ function renderTaskRow(t) {
   row.appendChild(cb);
 
   const desc = document.createElement('span');
-  desc.className = 'cm-tasks-query-desc' + (t.isOverdue ? ' cm-task-overdue' : '');
+  // Note: no `cm-task-overdue` here even when `t.isOverdue` — that class is reserved for the due
+  // date itself (below), matching every other surface in this codebase (the native VS Code
+  // editor's TaskDecorations, the Markdown Preview's due-date badge): only the date signifier
+  // turns red/bold, never the task's own description text.
+  desc.className = 'cm-tasks-query-desc';
   // Reuses renderCell's inline-markdown handling (bold/italic/code/wiki-links) — the same
   // helper table cells already use — so a `[[wikilink]]` in a task's description shows up as a
   // real clickable link instead of literal brackets. renderCell HTML-escapes the raw text before
@@ -1465,6 +1765,28 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               return false;
             }
 
+            if (info === 'dataviewjs') {
+              const codeTextNode = node.node.getChild('CodeText');
+              const scriptCode = codeTextNode ? state.doc.sliceString(codeTextNode.from, codeTextNode.to) : '';
+              // Only a dv.view(...) call needs the real-DOM/app engine (DataviewJsWidget) —
+              // everything else (dv.table/dv.list-only reporting scripts) still goes through
+              // DataviewQueryWidget/obsidianlike-dataview below exactly as before, unmodified.
+              if (DV_VIEW_CALL_RE.test(scriptCode)) {
+                try {
+                  decs.push({ from: fromLine.from, to: fromLine.to,
+                    dec: Decoration.replace({ widget: new DataviewJsWidget(scriptCode) }) });
+                  for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
+                    const line = state.doc.line(ln);
+                    decs.push({ from: line.from, to: line.to,
+                      dec: Decoration.replace({}) });
+                    lineDecs.push({ from: line.from,
+                      dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+                  }
+                } catch (_) {}
+                return false;
+              }
+            }
+
             if (info === 'dataview' || info === 'dql' || info === 'dataviewjs') {
               try {
                 const codeTextNode = node.node.getChild('CodeText');
@@ -1558,7 +1880,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           if (n === 'Link' && node.node.parent && node.node.parent.name !== 'Image' &&
               state.doc.sliceString(node.from - 1, node.from) === '[' &&
               state.doc.sliceString(node.to, node.to + 1) === ']' &&
-              rangeIsActive(state, node.from - 1, node.to + 1)) {
+              isLinkActivated(node.from - 1, node.to + 1)) {
             decs.push({ from: node.from, to: node.to, dec: Decoration.mark({ class: 'cm-wiki-link-raw' }) });
           }
 
@@ -1694,6 +2016,95 @@ function noteTargetExists(rawTarget) {
     (n.dir ? n.dir.split('/').pop() : '').toLowerCase() === hint);
 }
 
+// Also used by WikiSuggestView below — an unclosed "[[" ending exactly at the
+// cursor (still being typed, no closing "]]" yet).
+const WIKI_TRIGGER_RE = /\[\[([^\]\n]*)$/;
+
+// ── [[wiki-link]] "activation" — when a link should reveal its raw markdown ───
+// Obsidian-style live preview reveals a link's raw [[...]] the instant the
+// cursor sits anywhere inside it, including just passing through on cursor
+// navigation — which reads as flicker/noise rather than "I'm editing this
+// link" (worse for Up/Down specifically, since moveVerticalByLine's
+// column-preserving landing spot inside a link is essentially arbitrary, not
+// something the user aimed for). Instead, a link only reveals its raw form
+// once the user actually *edits* text (insert or delete) while the cursor is
+// inside it — landing there via pure navigation alone leaves it rendered.
+// Once activated by an edit, it *stays* raw — including through further pure
+// navigation within the same link — until the cursor moves outside its outer
+// brackets, at which point it reverts to normal rendering.
+//
+// `activeLinkFrom`/`activeLinkTo` is the currently-activated link's outer
+// span: position of the first "[" through one past the last "]" for an
+// existing [[note]], or through the cursor itself for a still-unclosed "[["
+// being typed. `activeLinkClosed` tells the two cases apart: `true` for an
+// existing, already-closed link being edited (only affects raw-vs-rendered
+// display); `false` for a genuinely in-progress, unclosed "[[note" (also what
+// gates WikiSuggestView's popup below — editing inside an already-closed link
+// never reopens it, matching how the popup already only ever targeted
+// *new*, unclosed links).
+let activeLinkFrom = null;
+let activeLinkTo = null;
+let activeLinkClosed = false;
+
+// Finds the [[...]] (closed) or "[[..." (unclosed, ending at the cursor) span
+// containing `pos`, mirroring the exact shapes wikiLinkPlugin and
+// WikiSuggestView's own trigger regex already recognize.
+function findLinkContextAt(state, pos) {
+  const sel = state.selection.main;
+  if (!sel.empty || sel.head !== pos) return null;
+  const line = state.doc.lineAt(pos);
+
+  const closedRe = /(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
+  let m;
+  while ((m = closedRe.exec(line.text)) !== null) {
+    const from = line.from + m.index;
+    const to = from + m[0].length;
+    if (pos >= from && pos <= to) return { from, to, closed: true };
+  }
+
+  const before = line.text.slice(0, pos - line.from);
+  const tm = WIKI_TRIGGER_RE.exec(before);
+  if (tm) return { from: line.from + tm.index, to: pos, closed: false };
+  return null;
+}
+
+// Plain side-effect ViewPlugin (no decorations) — must run *before*
+// wikiLinkPlugin/livePreviewPlugin in the extensions list (see createEditor)
+// so their own rebuild for this same transaction already sees the up-to-date
+// activation state, instead of lagging a transaction behind.
+const wikiLinkActivationTracker = ViewPlugin.fromClass(class {
+  update(u) {
+    // Keep a currently-activated span in sync with edits made elsewhere in the
+    // document (e.g. an external-update from autosave), so it doesn't drift or
+    // silently point at the wrong text.
+    if (activeLinkFrom != null && u.docChanged) {
+      activeLinkFrom = u.changes.mapPos(activeLinkFrom, -1);
+      activeLinkTo = u.changes.mapPos(activeLinkTo, 1);
+    }
+
+    const userEdited = u.docChanged &&
+      u.transactions.some(t => t.isUserEvent('input') || t.isUserEvent('delete'));
+    if (userEdited) {
+      const ctx = findLinkContextAt(u.state, u.state.selection.main.head);
+      if (ctx) { activeLinkFrom = ctx.from; activeLinkTo = ctx.to; activeLinkClosed = ctx.closed; }
+      else { activeLinkFrom = activeLinkTo = null; }
+      return;
+    }
+
+    // Pure navigation (or a non-user-input doc change): never *newly*
+    // activates — only clears an existing activation once the cursor leaves it.
+    if (!u.docChanged && !u.selectionSet) return;
+    if (activeLinkFrom != null) {
+      const pos = u.state.selection.main.head;
+      if (pos < activeLinkFrom || pos > activeLinkTo) { activeLinkFrom = activeLinkTo = null; }
+    }
+  }
+});
+
+function isLinkActivated(from, to) {
+  return activeLinkFrom === from && activeLinkTo === to;
+}
+
 const wikiLinkPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
@@ -1713,7 +2124,7 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
     while ((m = re.exec(str)) !== null) {
       const mFrom = vf + m.index;
       const mTo   = mFrom + m[0].length;
-      if (rangeIsActive(state, mFrom, mTo)) continue;
+      if (isLinkActivated(mFrom, mTo)) continue;
       const name  = m[1];
       const alias = m[2];
       const linkClass = 'cm-wiki-link' + (noteTargetExists(name) ? '' : ' cm-wiki-link-missing');
@@ -2140,7 +2551,6 @@ function requestHeadings(note) {
   });
 }
 
-const WIKI_TRIGGER_RE = /\[\[([^\]\n]*)$/;
 const WIKI_SUGGEST_MAX = 5;
 
 function escapeHtml(s) {
@@ -2220,7 +2630,16 @@ class WikiSuggestView {
     const before = line.text.slice(0, pos - line.from);
     const m = WIKI_TRIGGER_RE.exec(before);
     if (!m) return null;
-    return { pos, openBracketFrom: line.from + m.index, raw: m[1] };
+    const openBracketFrom = line.from + m.index;
+    // Only a genuinely unclosed "[[" the user is actively typing opens the
+    // popup — the cursor merely navigating into one, or an edit made inside an
+    // *already-closed* [[link]], must not (that only reveals the raw text, via
+    // isLinkActivated — see the "wiki-link activation" comment above
+    // wikiLinkPlugin). WIKI_TRIGGER_RE alone can't tell "still being typed"
+    // apart from "cursor happens to sit before the ']]' of an existing link",
+    // since it only looks at text *before* the cursor.
+    if (activeLinkClosed || activeLinkFrom !== openBracketFrom) return null;
+    return { pos, openBracketFrom, raw: m[1] };
   }
 
   recompute() {
@@ -2428,6 +2847,68 @@ const wikiSuggestKeymap = Prec.highest(keymap.of([
       if (!p.loading) p.accept();
       return true;
     } },
+]));
+
+// ── Line-based vertical cursor movement (replaces CM6's default Up/Down) ──────
+// CM6's own cursorLineDown/cursorLineUp move by *visual pixel position*: on the
+// first key of a vertical-move sequence it captures a "goal" x-coordinate from
+// the line's current on-screen styling, then reuses that goal for every further
+// press in the same sequence so the column lines up visually — that's normally
+// how a short line doesn't derail navigation through a long one. But markdown
+// marker hiding (livePreviewPlugin: `* ` shown raw only on the active line,
+// replaced by BulletWidget everywhere else) changes each line's on-screen width
+// depending on which line the cursor is currently on. Every arrow press changes
+// the active line, which changes decorations *before* the next press reuses the
+// stale goal x-coordinate — captured against styling that no longer matches
+// what's rendered. Confirmed as a known CodeMirror behavior, not a bug specific
+// to this codebase (discuss.codemirror.net/t/moving-of-cursor-with-different-
+// size-mark-decoration-and-replace-decoration-issues/4198 — a maintainer reply
+// there recommends exactly the fix below): a small bulleted list where each
+// line's marker toggles raw/hidden as the cursor passes through reproduced
+// visible skipping/backtracking on Down and Up, worse the further into the list
+// the cursor moved.
+//
+// Fix (per that thread): bypass goal-column/pixel tracking entirely and move by
+// plain document line number instead — line ± 1, same character *column*
+// (clamped to the target line's length), independent of anything rendered.
+// `vGoalCol` reimplements just enough of CM6's own goal-column persistence
+// (preserving the column through a *sequence* of consecutive vertical moves,
+// e.g. down through several short lines then back onto a long one) without
+// involving pixel/DOM measurement anywhere — `dispatchingVerticalMove` marks a
+// transaction as one of these moves so the reset below (in the main
+// updateListener) can tell "still mid vertical-move sequence" apart from any
+// other selection change, which should still clear the remembered column.
+let vGoalCol = null;
+let dispatchingVerticalMove = false;
+
+function moveVerticalByLine(view, dir, extend) {
+  const { state } = view;
+  const range = state.selection.main;
+  const curLine = state.doc.lineAt(range.head);
+  const col = vGoalCol != null ? vGoalCol : (range.head - curLine.from);
+
+  const targetLineNum = Math.min(Math.max(curLine.number + dir, 1), state.doc.lines);
+  const targetLine = state.doc.line(targetLineNum);
+  const newHead = targetLine.from + Math.min(col, targetLine.length);
+
+  vGoalCol = col;
+  dispatchingVerticalMove = true;
+  try {
+    view.dispatch({
+      selection: extend ? EditorSelection.range(range.anchor, newHead) : EditorSelection.cursor(newHead),
+      userEvent: 'select',
+    });
+  } finally {
+    dispatchingVerticalMove = false;
+  }
+  return true;
+}
+
+const verticalMoveKeymap = Prec.highest(keymap.of([
+  { key: 'ArrowDown', run: view => moveVerticalByLine(view, 1, false) },
+  { key: 'ArrowUp', run: view => moveVerticalByLine(view, -1, false) },
+  { key: 'Shift-ArrowDown', run: view => moveVerticalByLine(view, 1, true) },
+  { key: 'Shift-ArrowUp', run: view => moveVerticalByLine(view, -1, true) },
 ]));
 
 // ── Markdown shortcuts ────────────────────────────────────────────────────────
@@ -2800,12 +3281,33 @@ function createEditor(parent, content) {
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
+      // Must run before livePreviewPlugin/wikiLinkPlugin (next) so their own
+      // rebuild for this same transaction already sees the fresh activation
+      // state — see the comment above wikiLinkActivationTracker's definition.
+      wikiLinkActivationTracker,
       previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]),
       foldPlugin,
       linkClickHandler,
       hoverPreviewPlugin,
       wikiSuggestPlugin,
       wikiSuggestKeymap,
+      verticalMoveKeymap,
+      // CM6 doesn't set these on its contentEditable contentDOM by default, and
+      // leaving them unset is what silently disables the OS-level text features
+      // that key off them: macOS's own Text Replacement (System Settings ->
+      // Keyboard -> Text Replacement) only offers its substitution popup on an
+      // editable element that opts in via `autocorrect`; `spellcheck`/
+      // `autocapitalize` are the same category of native-input attribute
+      // (Obsidian's own CM6-based editor sets the equivalent). Not verified on
+      // real macOS hardware from here (development happens on Windows) — if
+      // substitutions still don't trigger after this, the next thing to check
+      // is whether CM6's own `beforeinput`/composition handling (which takes
+      // over from the browser's native contentEditable insertion path for
+      // every keystroke, by design, same as every other CM6-based editor) is
+      // intercepting the substitution event before WebKit/Chromium's macOS
+      // text-replacement subsystem gets a chance to act on it — that would be
+      // a much deeper, framework-level limitation, not a one-line fix.
+      EditorView.contentAttributes.of({ autocorrect: 'on', autocapitalize: 'sentences', spellcheck: 'true' }),
       keymap.of([
         { key: 'Mod-b', run: v => toggleWrap(v, '**') },
         { key: 'Mod-i', run: v => toggleWrap(v, '*')  },
@@ -2825,6 +3327,10 @@ function createEditor(parent, content) {
         if (u.selectionSet) {
           const line = u.state.doc.lineAt(u.state.selection.main.head).number - 1;
           vscode.postMessage({ type: 'cursor-position', line });
+          // Any selection change that didn't come from moveVerticalByLine itself
+          // ends that vertical-move sequence — same as CM6's own goal-column
+          // reset on non-vertical motion (typing, click, Home/End, ...).
+          if (!dispatchingVerticalMove) { vGoalCol = null; }
         }
         if (!u.docChanged) return;
         clearTimeout(syncTimer);
@@ -3079,6 +3585,26 @@ window.addEventListener('message', ev => {
       dataviewQueryCache.set(key, msg.result);
       dataviewQueryPending.delete(key);
       view.dispatch({ effects: dataviewRebuildEffect.of(null) });
+      break;
+    }
+    case 'dataview-script-result': {
+      // No rebuild dispatch here on purpose: DataviewJsWidget.eq() only compares the block's
+      // raw source text, never script-loaded state, so a CM6 rebuild wouldn't change which
+      // widget instance is on screen anyway — requestDataviewScript's own waiters (inside
+      // dvView, already running from toDOM()'s fire-and-forget call) are what actually resume.
+      const entry = { content: msg.content, error: msg.error };
+      dataviewScriptCache.set(msg.name, entry);
+      const waiters = dataviewScriptWaiters.get(msg.name);
+      if (waiters) {
+        dataviewScriptWaiters.delete(msg.name);
+        waiters.forEach(resolve => resolve(entry));
+      }
+      break;
+    }
+    case 'dataview-read-file-result':
+    case 'dataview-write-file-result': {
+      const pending = pendingDataviewFileRequests.get(msg.id);
+      if (pending) { pendingDataviewFileRequests.delete(msg.id); pending.resolve(msg); }
       break;
     }
     case 'transclusion-result':

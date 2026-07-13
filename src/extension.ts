@@ -1065,6 +1065,95 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             webviewPanel.webview.postMessage({ type: 'dataview-query-result', lang, query, result });
           })();
 
+        // ── DataviewJsWidget's `dv.view(...)` support (editor.js) ──────────────
+        // Separate from run-dataview-query above: a ```dataviewjs``` block that calls
+        // dv.view(name, input) runs a *real* vault script (e.g. tasks-timeline.js,
+        // unmodified) with a live DOM container and vault I/O — the sibling
+        // obsidianlike-dataview extension's sandbox has no dv.container/dv.view/app at
+        // all, so that case is handled entirely on this side instead. See the comment
+        // above DataviewJsWidget in editor.js.
+        } else if (msg.type === 'dataview-resolve-script') {
+          (async () => {
+            const name = (msg.name as string || '').trim();
+            if (!name) {
+              webviewPanel.webview.postMessage({ type: 'dataview-script-result', name, content: null, error: 'Nombre de script vacío.' });
+              return;
+            }
+            try {
+              // First match wins — same criterion resolveNoteUri already uses vault-wide.
+              const found = await vscode.workspace.findFiles(`**/${name}.js`, '**/node_modules/**', 1);
+              if (found.length === 0) {
+                webviewPanel.webview.postMessage({ type: 'dataview-script-result', name, content: null, error: `No se encontró "${name}.js" en el vault.` });
+                return;
+              }
+              const content = fs.readFileSync(found[0].fsPath, 'utf-8');
+              webviewPanel.webview.postMessage({ type: 'dataview-script-result', name, content, error: null });
+            } catch (err: any) {
+              webviewPanel.webview.postMessage({ type: 'dataview-script-result', name, content: null, error: String(err?.message || err) });
+            }
+          })();
+
+        } else if (msg.type === 'dataview-read-file') {
+          // Always reads fresh from disk — unlike dataview-resolve-script's content, this is
+          // deliberately never cached client-side: real Obsidian's app.vault.read() always
+          // returns current content, and tasks-timeline.js's own "🔄 Refrescar" button relies
+          // on that staying true without any extra plumbing on this side.
+          (async () => {
+            const id = msg.id as string;
+            try {
+              const folders = vscode.workspace.workspaceFolders;
+              if (!folders || folders.length === 0) { throw new Error('No hay carpeta de vault abierta.'); }
+              const uri = vscode.Uri.joinPath(folders[0].uri, msg.path as string);
+              const content = fs.readFileSync(uri.fsPath, 'utf-8');
+              webviewPanel.webview.postMessage({ type: 'dataview-read-file-result', id, content, error: null });
+            } catch (err: any) {
+              webviewPanel.webview.postMessage({ type: 'dataview-read-file-result', id, content: null, error: String(err?.message || err) });
+            }
+          })();
+
+        } else if (msg.type === 'dataview-write-file') {
+          (async () => {
+            const id = msg.id as string;
+            try {
+              const folders = vscode.workspace.workspaceFolders;
+              if (!folders || folders.length === 0) { throw new Error('No hay carpeta de vault abierta.'); }
+              const uri = vscode.Uri.joinPath(folders[0].uri, msg.path as string);
+              const doc = await vscode.workspace.openTextDocument(uri);
+              const edit = new vscode.WorkspaceEdit();
+              edit.replace(
+                uri,
+                new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)),
+                msg.content as string
+              );
+              await vscode.workspace.applyEdit(edit);
+              await doc.save();
+              webviewPanel.webview.postMessage({ type: 'dataview-write-file-result', id, ok: true });
+            } catch (err: any) {
+              webviewPanel.webview.postMessage({
+                type: 'dataview-write-file-result', id, ok: false, error: String(err?.message || err),
+              });
+            }
+          })();
+
+        } else if (msg.type === 'dataview-open-note') {
+          // `msg.path` is already a resolved vault-relative path (from the loaded script's own
+          // app.vault.getMarkdownFiles()/getFirstLinkpathDest, both backed by the client-side
+          // noteIndex) — no further resolution needed here, and — unlike navigateToTarget, used
+          // for wikilinks in the note's own prose — the note containing the dataviewjs block
+          // must stay open, so this never disposes webviewPanel.
+          (async () => {
+            const folders = vscode.workspace.workspaceFolders;
+            if (!folders || folders.length === 0) { return; }
+            const uri = vscode.Uri.joinPath(folders[0].uri, msg.path as string);
+            try {
+              await vscode.commands.executeCommand(
+                'vscode.openWith', uri, MarkdownDocumentProvider.viewType, vscode.ViewColumn.Active
+              );
+            } catch {
+              vscode.window.showWarningMessage(`Obsidian-like: no se pudo abrir "${msg.path}".`);
+            }
+          })();
+
         } else if (msg.type === 'toggle-task-at-location') {
           (async () => {
             try {
@@ -1181,8 +1270,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <!-- 'unsafe-eval' is required for DataviewJsWidget (editor.js) to run a dataviewjs
+       block's own text via new Function(...) -- same trust level as Obsidian itself already
+       gives that content, not a new exposure. -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; img-src ${cspSource} data: blob:; script-src ${cspSource} 'unsafe-inline'; style-src 'unsafe-inline';">
+        content="default-src 'none'; img-src ${cspSource} data: blob:; script-src ${cspSource} 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline';">
   <style>
     html, body {
       height: 100%; margin: 0; overflow: hidden;
