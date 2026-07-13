@@ -11,7 +11,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onCommand:vaultTool.openNoteAtLine"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "themes": [
@@ -73,6 +75,11 @@
           "type": "string",
           "default": "",
           "description": "Nombre del tema de Obsidian a aplicar. Carga .obsidian/themes/{nombre}/theme.css desde la carpeta raíz del vault."
+        },
+        "obsidianLike.autoSaveDelay": {
+          "type": "number",
+          "default": 3000,
+          "description": "Milisegundos de inactividad (sin cambios) tras los que la nota se guarda automáticamente en disco. Este autoguardado propio del editor sustituye a files.autoSave para las notas abiertas aquí, evitando el conflicto entre ambos que puede provocar pérdida de texto."
         }
       }
     },

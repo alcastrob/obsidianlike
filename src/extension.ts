@@ -374,6 +374,22 @@ async function navigateToTarget(
   setTimeout(() => { try { sourcePanel.dispose(); } catch {} }, 150);
 }
 
+// Public entry point for *other* extensions (e.g. angelCastro.obsidianlike-search) that
+// want a result to open in this extension's rendered custom editor instead of the plain
+// text editor, optionally landing on a specific 0-based line. Exposed as the
+// `vaultTool.openNoteAtLine` command (see activate() below) rather than an exported API
+// object, since webviews can't be handed across the extension-host process boundary
+// anyway — reuses the same openWith + delayed scroll-to-line message as
+// navigateToTarget above.
+async function openNoteAtLine(targetUri: vscode.Uri, line?: number): Promise<void> {
+  await vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType);
+  if (line == null) { return; }
+  const targetPanel = panelsByPath.get(targetUri.fsPath);
+  if (targetPanel) {
+    setTimeout(() => { try { targetPanel.webview.postMessage({ type: 'scroll-to-line', line }); } catch {} }, 350);
+  }
+}
+
 // ── Optional soft dependency: angelCastro.obsidian-like-tasks ─────────────────
 //
 // Two extensions' webviews can't call into each other (full isolation), so when the
@@ -733,15 +749,50 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     let pendingSaveResolve: ((content: string) => void) | undefined;
     let lastOwnContent: string = document.getText();
 
+    const fullRange = () =>
+      new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
+
+    // Serializes every full-document replace (both the regular debounced 'sync'
+    // from the webview and the fresher content fetched in onWillSaveTextDocument
+    // below) through a single promise chain, so they always apply in the order
+    // they were requested. Without this, a 'sync' that arrives while the
+    // onWillSaveTextDocument round-trip to the webview is still in flight could
+    // finish (and get applied) *before* that now-stale round-trip's own edit —
+    // silently overwriting newer keystrokes with older content. Reported on
+    // macOS as text visibly disappearing right when VS Code's own autosave fired
+    // mid-typing; not reproduced reliably on Windows, consistent with a race
+    // rather than a deterministic bug.
+    let pendingApply: Thenable<unknown> = Promise.resolve();
+    const queueReplace = (content: string): Thenable<unknown> => {
+      const run = pendingApply.then(() => {
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(document.uri, fullRange(), content);
+        return vscode.workspace.applyEdit(edit);
+      });
+      pendingApply = run.then(() => undefined, () => undefined);
+      return run;
+    };
+
+    const getAutoSaveDelay = (): number =>
+      Math.max(0, vscode.workspace.getConfiguration('obsidianLike').get<number>('autoSaveDelay', 3000));
+
+    let autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleAutoSave = () => {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = setTimeout(() => {
+        if (document.isDirty) {
+          document.save().then(undefined, err =>
+            vscode.window.showErrorMessage(`No se pudo autoguardar la nota: ${err}`));
+        }
+      }, getAutoSaveDelay());
+    };
+
     const applySync = (content: string) => {
       lastOwnContent = content;
-      const edit = new vscode.WorkspaceEdit();
-      edit.replace(
-        document.uri,
-        new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
-        content
-      );
-      vscode.workspace.applyEdit(edit);
+      queueReplace(content);
+      // Own debounced autosave (obsidianLike.autoSaveDelay) instead of relying on
+      // VS Code's native files.autoSave, which raced with this exact sync path.
+      scheduleAutoSave();
     };
 
     const subs: vscode.Disposable[] = [
@@ -784,17 +835,17 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
       vscode.workspace.onWillSaveTextDocument(e => {
         if (e.document.uri.toString() !== document.uri.toString()) { return; }
+        // Applies the fetched content through queueReplace (the same serialized
+        // path 'sync' uses) rather than returning a TextEdit to e.waitUntil
+        // directly — see the comment above queueReplace for why mixing the two
+        // application paths on the same document was the source of the race.
+        // e.waitUntil is still used, just to delay the actual disk write until
+        // our own queued edit (always [] here) has landed.
         const contentPromise = new Promise<vscode.TextEdit[]>(resolve => {
           pendingSaveResolve = (content: string) => {
             pendingSaveResolve = undefined;
             lastOwnContent = content;
-            resolve([vscode.TextEdit.replace(
-              new vscode.Range(
-                document.positionAt(0),
-                document.positionAt(document.getText().length)
-              ),
-              content
-            )]);
+            queueReplace(content).then(() => resolve([]), () => resolve([]));
           };
           webviewPanel.webview.postMessage({ type: 'get-content' });
           setTimeout(() => {
@@ -1037,7 +1088,23 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       }),
     ];
 
-    webviewPanel.onDidDispose(() => subs.forEach(s => s.dispose()));
+    webviewPanel.onDidDispose(() => {
+      clearTimeout(autoSaveTimer);
+      // Closing the tab shouldn't have to wait for the idle autosave delay to
+      // have already elapsed — flush whatever's already in the document model
+      // (the webview is gone by this point, so this can only save what the
+      // regular 'sync' debounce already applied, not anything typed in the
+      // last instant before close; see CLAUDE.md for that residual gap). Awaits
+      // pendingApply first so a 'sync' that was still in flight when the tab
+      // closed actually lands before the isDirty check below reads it.
+      pendingApply.then(() => {
+        if (document.isDirty) {
+          document.save().then(undefined, err =>
+            vscode.window.showErrorMessage(`No se pudo guardar la nota al cerrar: ${err}`));
+        }
+      });
+      subs.forEach(s => s.dispose());
+    });
   }
 
   private buildHtml(
@@ -1374,9 +1441,14 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  const openNoteAtLineCmd = vscode.commands.registerCommand(
+    'vaultTool.openNoteAtLine',
+    async (uri: vscode.Uri, line?: number) => { await openNoteAtLine(uri, line); }
+  );
+
   context.subscriptions.push(
     listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, editTaskAtCursorCmd,
-    openNoteQuickPickCmd, openNoteQuickPickNewTabCmd, openNoteQuickPickSideCmd
+    openNoteQuickPickCmd, openNoteQuickPickNewTabCmd, openNoteQuickPickSideCmd, openNoteAtLineCmd
   );
 }
 
@@ -1443,4 +1515,18 @@ async function openNoteFromQuickPick(fsPath: string, mode: OpenMode = 'replace')
   }
 }
 
-export function deactivate() {}
+// Best-effort flush when VS Code itself is closing: saves every document that
+// currently has an obsidian-like panel open and unsaved changes, instead of
+// relying solely on each panel's own idle autosave timer having already fired.
+// VS Code awaits the returned promise (up to its own shutdown timeout) before
+// tearing down the extension host, but the webviews may already be gone by the
+// time this runs — onWillSaveTextDocument's get-content round-trip will then
+// just time out after 5s and fall back to whatever the last 'sync' had already
+// applied, same residual gap as the onDidDispose flush above.
+export function deactivate(): Thenable<void> {
+  const openPaths = new Set(panelsByPath.keys());
+  const saves = vscode.workspace.textDocuments
+    .filter(doc => openPaths.has(doc.uri.fsPath) && doc.isDirty)
+    .map(doc => doc.save());
+  return Promise.all(saves).then(() => undefined);
+}

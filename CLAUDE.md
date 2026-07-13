@@ -63,6 +63,18 @@ Then reload the VS Code window (Ctrl+Shift+P → "Developer: Reload Window").
 - Handles `onWillSaveTextDocument`: sends `get-content` to webview, awaits `content-for-save` response (5s timeout).
 - Handles `onDidChangeTextDocument`: sends `external-update` to webview when the file changes outside the webview.
 
+### Autosave (`obsidianLike.autoSaveDelay`) and the sync/save race it replaced
+
+The webview's own `sync` message (400ms debounce after the last keystroke, unchanged — see `EditorView.updateListener` in `editor.js`) always applies to the `vscode.TextDocument` model via `WorkspaceEdit`, keeping the in-memory document current for other consumers (Git decorations, `get-transclusion`'s "unsaved edits in another open tab are reflected" read via `openTextDocument`, etc.). That alone does **not** write to disk. Historically this repo relied on VS Code's own `files.autoSave` to do that part, but on macOS the two raced: `applySync`'s `vscode.workspace.applyEdit` (fired by the regular 400ms sync) and the `onWillSaveTextDocument` participant's own edit (fetched async from the webview via `get-content`/`content-for-save`, then applied as a `TextEdit` returned to `e.waitUntil`) were **two independent full-document-replace operations**, each going through a different VS Code internal pipeline (`workspace.applyEdit` vs. the save-participant `e.waitUntil` edit-application), with no ordering guarantee between them. If a `sync` carrying newer content happened to land *before* a still-in-flight, now-stale `content-for-save` reply got applied, the stale reply's edit landed last and silently overwrote the newer keystrokes — visible as text disappearing right as autosave fired mid-typing. Not reliably reproduced on Windows, consistent with a genuine race rather than a deterministic bug.
+
+Fix: both paths now go through the exact same primitive, in the exact order their content was requested.
+- `queueReplace(content)` — a promise chain (`pendingApply`) that serializes every full-document `WorkspaceEdit.replace` behind whichever one was queued before it. `fullRange()` (`document.positionAt(0)` .. `document.positionAt(document.getText().length)`) is computed **inside** the queued callback, i.e. once it's actually this replace's turn — not up front — so it always targets the document's real current length regardless of how many other queued replaces already landed ahead of it.
+- `applySync(content)` calls `queueReplace(content)` (fire-and-forget, same as the old direct `applyEdit` call it replaced) and then `scheduleAutoSave()`.
+- `onWillSaveTextDocument`'s `pendingSaveResolve` callback also calls `queueReplace(content)` instead of returning a `TextEdit[]` to `e.waitUntil` directly — `e.waitUntil` still gets a promise (resolving to `[]`, since the edit was already applied through the queue), just now only used to *delay the disk write* until that queued replace has actually landed. Because both the regular `sync` path and the save-participant path push onto the *same* `pendingApply` chain, whichever one's content was requested from the webview later is guaranteed to apply later too — arrival order at the host (a single postMessage channel, FIFO) now fully determines final content, eliminating the cross-pipeline race.
+- **Autosave itself**: `getAutoSaveDelay()` reads `obsidianLike.autoSaveDelay` (default 3000ms). `scheduleAutoSave()` (called at the end of every `applySync`) resets a per-panel `autoSaveTimer`; when it fires with no further edits, `document.save()` is called if `document.isDirty` — this is the extension's own idle-based autosave, independent of `files.autoSave`. `document.save()` still goes through the now-race-free `onWillSaveTextDocument` above, so it also picks up any last few hundred ms of typing the 400ms `sync` debounce hasn't flushed yet.
+- **Flush on tab close**: `webviewPanel.onDidDispose` clears `autoSaveTimer` and calls `document.save()` immediately if `document.isDirty`, rather than waiting for the idle delay to have already elapsed. By this point the webview itself is gone, so this can only persist whatever the last `sync` already applied to the document model — content typed in the last instant before close, not yet flushed by that 400ms debounce, is a residual gap this can't close (there is no "about to dispose, please flush" hook for a `CustomTextEditorProvider`'s webview).
+- **Flush on VS Code closing**: `deactivate()` (`src/extension.ts`, end of file) saves every document under `panelsByPath` that's still `isDirty`, returning the combined promise so VS Code waits for it (up to its own shutdown timeout) before tearing down the extension host. Same residual gap as above if the webviews are already gone by the time this runs — `onWillSaveTextDocument`'s `get-content` round-trip just times out after 5s and falls back to whatever was already in the model.
+
 ### Why theme CSS is sent via postMessage, not inlined in HTML
 
 Obsidian themes (e.g. Border) embed SVG data URLs in CSS properties like `-webkit-mask-image`. Those SVGs contain `<style>...</style>` tags, which prematurely close the `<style id="__obsidian-theme">` HTML element. The fix: leave the style element empty in HTML, send CSS via `postMessage({ type: 'theme-css', css })`, apply with `element.textContent = css` (bypasses the HTML parser entirely).
@@ -71,7 +83,7 @@ Obsidian themes (e.g. Border) embed SVG data URLs in CSS properties like `-webki
 
 | Message | Action |
 |---|---|
-| `sync` | Apply `content` to VS Code document via `applyEdit` (debounced autosave path) |
+| `sync` | Apply `content` to VS Code document via the serialized `queueReplace` (see "Autosave" above), then reset the `obsidianLike.autoSaveDelay` idle timer |
 | `content-for-save` | Resolves the pending `onWillSave` promise |
 | `rename` | Validates new name, calls `WorkspaceEdit.renameFile()` — link fixup happens via the `onDidRenameFiles` listener that fires from this, see below, not from this handler directly |
 | `open-note` | `navigateToTarget(name, ..., createIfMissing: true)` — resolves the wiki-link target (optionally `note#section`) and opens it with `vscode.openWith` in the same column, scrolling to the heading if a section was given (see below for resolution/creation rules) |
@@ -486,6 +498,7 @@ QuickPick also has no footer slot the way Obsidian's dialog shows one below the 
 | `obsidianLike.attachmentsLocation` | `"vault"` | Where to look for `![[images]]` |
 | `obsidianLike.attachmentsFolder` | `"attachments"` | Subfolder name or specific path |
 | `obsidianLike.obsidianTheme` | `""` | Theme name (loads `.obsidian/themes/{name}/theme.css`) |
+| `obsidianLike.autoSaveDelay` | `3000` | Idle ms before the extension's own autosave writes to disk — see "Autosave" above |
 
 ## Known issues / future work
 

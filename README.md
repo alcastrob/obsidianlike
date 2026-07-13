@@ -3,6 +3,17 @@
 Extensión de VS Code / Windsurf que actúa como vault local tipo Obsidian.
 Se instala localmente desde un `.vsix`, sin marketplace ni servidores externos.
 
+## Autoguardado
+
+El editor guarda la nota en disco por su cuenta, sin depender de `files.autoSave`
+de VS Code: tras `obsidianLike.autoSaveDelay` milisegundos (3000 por defecto) sin
+más cambios, se guarda automáticamente. Al cerrar la pestaña de la nota, o al
+cerrar VS Code con notas sin guardar todavía, también se fuerza ese guardado en
+vez de esperar a que venza el temporizador. Se recomienda desactivar
+`files.autoSave` para evitar guardados duplicados (ya no hace falta, y en macOS
+llegaba a coincidir con la sincronización del editor y borrar texto que se
+estaba escribiendo en ese instante).
+
 ## Resolución de imágenes (`![[archivo.png]]`)
 
 1. Se busca primero en la carpeta de adjuntos configurada (`obsidianLike.attachmentsLocation` /
