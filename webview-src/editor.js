@@ -2927,6 +2927,27 @@ function minimalReplaceRange(oldStr, newStr) {
   return { from: start, to: oldEnd, insert: newStr.slice(start, newEnd) };
 }
 
+// Absolute offset for (1-based lineNumber, 0-based col) within `text`, clamping
+// both to whatever `text` actually contains. Used to re-anchor the cursor by
+// line/column after an 'external-update' rather than trusting CM6's default
+// selection-mapping through the change — that mapping only does the right
+// thing when the cursor sits *outside* the changed span. A save participant
+// like files.trimTrailingWhitespace can touch many scattered lines in one
+// save (every line that had trailing spaces — common in markdown, which uses
+// a trailing double-space for a line break), which widens minimalReplaceRange's
+// span to cover most of the document and very likely swallows the cursor's
+// position inside it. That kind of change essentially never adds or removes
+// *lines* though, so "same line, same column, clamped" survives it correctly
+// even when the raw character-offset diff doesn't.
+function posFromLineCol(text, lineNumber, col) {
+  const lines = text.split('\n');
+  const li = Math.min(Math.max(lineNumber, 1), lines.length) - 1;
+  const c = Math.min(Math.max(col, 0), lines[li].length);
+  let pos = 0;
+  for (let i = 0; i < li; i++) pos += lines[i].length + 1; // +1 for the '\n'
+  return pos + c;
+}
+
 // ── Message handling ──────────────────────────────────────────────────────────
 window.addEventListener('message', ev => {
   const msg = ev.data;
@@ -2949,10 +2970,14 @@ window.addEventListener('message', ev => {
     case 'external-update': {
       const cur = view.state.doc.toString();
       if (msg.content !== cur) {
-        // No explicit `selection` here on purpose — CM6 maps the current
-        // selection through `changes` by default, which is exactly what keeps
-        // the cursor in place (see minimalReplaceRange above).
-        view.dispatch({ changes: minimalReplaceRange(cur, msg.content) });
+        const oldPos = view.state.selection.main.head;
+        const oldLine = view.state.doc.lineAt(oldPos);
+        const col = oldPos - oldLine.from;
+        const newPos = posFromLineCol(msg.content, oldLine.number, col);
+        view.dispatch({
+          changes: minimalReplaceRange(cur, msg.content),
+          selection: EditorSelection.single(Math.min(newPos, msg.content.length)),
+        });
       }
       break;
     }
