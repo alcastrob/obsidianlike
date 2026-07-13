@@ -1194,9 +1194,16 @@ function renderTasksQueryResult(container, result) {
     filterInput.addEventListener('input', () => {
       const q = filterInput.value.trim().toLowerCase();
       listWrap.querySelectorAll('.cm-tasks-query-item').forEach(row => {
+        // `t.description` (what `.cm-tasks-query-desc` shows) has its `#tags` already stripped
+        // out by the engine — they're rendered separately as `.cm-tasks-query-tag` pills — so
+        // filtering on the description text alone could never match a hashtag. Folding the
+        // tag pills' own text in means both "#urgent" and "urgent" (with or without the "#")
+        // match a task tagged `#urgent`, since the pill's textContent already includes the "#".
         const desc = row.querySelector('.cm-tasks-query-desc');
-        const text = desc ? desc.textContent.toLowerCase() : '';
-        row.classList.toggle('cm-tasks-query-hidden', q !== '' && !text.includes(q));
+        const tagEls = row.querySelectorAll('.cm-tasks-query-tag');
+        const text = (desc ? desc.textContent : '') + ' ' +
+          Array.from(tagEls).map(el => el.textContent).join(' ');
+        row.classList.toggle('cm-tasks-query-hidden', q !== '' && !text.toLowerCase().includes(q));
       });
       listWrap.querySelectorAll('.cm-tasks-query-group-title').forEach(h => {
         const list = h.nextElementSibling;
