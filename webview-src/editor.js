@@ -859,7 +859,18 @@ function getActiveLines(state) {
 
 // ── Table widget ──────────────────────────────────────────────────────────────
 // Renders inline markdown (bold, italic, code, wiki-links) inside table cells.
-function renderCell(raw) {
+// `basePath` (optional, workspace-relative — e.g. a task's own `t.path`) is the file the *raw*
+// text actually came from, when that's not the currently-open document. `[[wikilink]]` resolution
+// on the host side (`resolveNoteUri` in extension.ts) has always assumed "the note containing the
+// link" means the open document — true for a wikilink typed directly into it, but wrong for text
+// rendered here on behalf of *another* file (a tasks-query row's description is the running
+// example: the open document is the note holding the ```tasks``` block, not the task's own note,
+// which can be anywhere else in the vault). Without `basePath`, a same-directory guess against the
+// wrong directory can miss, and — worse — since "not found" means "create a new blank file", a
+// perfectly valid link elsewhere in the vault would get shadowed by an empty file created next to
+// the query instead of ever opening the real target. `data-wiki-base` carries that hint through to
+// the click handler, which forwards it to the host as `open-note`'s `basePath` field.
+function renderCell(raw, basePath) {
   // HTML-escape first to prevent injection
   let s = raw
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -873,8 +884,9 @@ function renderCell(raw) {
   s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
   s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
   // Wiki-links [[target]] or [[target|alias]]
+  const baseAttr = basePath ? ` data-wiki-base="${String(basePath).replace(/"/g, '&quot;')}"` : '';
   s = s.replace(/(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_, tgt, alias) =>
-    `<span data-wiki="${tgt}" style="color:var(--link-color,var(--vscode-textLink-foreground,#4a9eff));` +
+    `<span data-wiki="${tgt}"${baseAttr} style="color:var(--link-color,var(--vscode-textLink-foreground,#4a9eff));` +
     `text-decoration:underline;cursor:pointer;">${alias || tgt}</span>`
   );
   // Restore inline code
@@ -1689,8 +1701,11 @@ function renderTaskRow(t) {
   // Reuses renderCell's inline-markdown handling (bold/italic/code/wiki-links) — the same
   // helper table cells already use — so a `[[wikilink]]` in a task's description shows up as a
   // real clickable link instead of literal brackets. renderCell HTML-escapes the raw text before
-  // doing anything else, so this is safe against injection despite using innerHTML.
-  desc.innerHTML = renderCell(t.description || '');
+  // doing anything else, so this is safe against injection despite using innerHTML. `t.path` is
+  // passed as the base path (see renderCell's own comment) — a query result can come from any
+  // file in the vault, so a `[[wikilink]]` inside its description must resolve relative to *that*
+  // file, not the document the ```tasks``` block itself lives in.
+  desc.innerHTML = renderCell(t.description || '', t.path);
   row.appendChild(desc);
 
   // Tags, ID, and depends-on are only present from a rebuilt sibling "Tasks" extension —
@@ -3468,7 +3483,10 @@ const linkClickHandler = EditorView.domEventHandlers({
     const tableWiki = e.target.closest('[data-wiki]');
     if (tableWiki) {
       e.preventDefault();
-      vscode.postMessage({ type: 'open-note', name: tableWiki.dataset.wiki });
+      // `data-wiki-base` (see renderCell) is only set for wikilinks rendered on behalf of another
+      // file (e.g. a tasks-query row's description) — forwarded so the host resolves/creates
+      // relative to *that* file's directory instead of always defaulting to the open document's.
+      vscode.postMessage({ type: 'open-note', name: tableWiki.dataset.wiki, basePath: tableWiki.dataset.wikiBase });
       return true;
     }
     const mdLink = e.target.closest('.cm-md-link');

@@ -335,10 +335,16 @@ async function navigateToTarget(
   raw: string,
   currentDocUri: vscode.Uri,
   sourcePanel: vscode.WebviewPanel,
-  createIfMissing: boolean
+  createIfMissing: boolean,
+  // Absolute directory to resolve/create relative to, overriding the open document's own
+  // directory — needed when `raw` isn't a link the user typed into the open document at all, but
+  // text rendered on that document's behalf for *another* file (a tasks-query row's description,
+  // see `data-wiki-base`/renderCell in editor.js). Without this, a wikilink inside such text would
+  // resolve (or, worse, get silently created as a blank file) relative to the wrong note entirely.
+  baseDirOverride?: string
 ): Promise<void> {
   const { notePart, section } = splitTarget(raw);
-  const currentDir = path.dirname(currentDocUri.fsPath);
+  const currentDir = baseDirOverride ?? path.dirname(currentDocUri.fsPath);
   let targetUri = await resolveNoteUri(notePart, currentDir);
 
   if (!targetUri) {
@@ -436,8 +442,9 @@ interface TasksExtensionApi {
   toggleTaskLine(lineText: string): string[];
   // Added alongside ```tasks``` query-block rendering. Declared optional so this
   // still degrades gracefully against an older build of the Tasks extension that
-  // only exposes the single-checkbox API above.
-  renderTasksQuery?(queryText: string): TasksQueryResultDTO;
+  // only exposes the single-checkbox API above. `queryFilePath` (also optional, for the same
+  // older-build reason) expands `{{query.file.path}}` inside the query text.
+  renderTasksQuery?(queryText: string, queryFilePath?: string): TasksQueryResultDTO;
   toggleTaskAtLocation?(path: string, line: number): Promise<void>;
   // Opens the Tasks extension's own "Create or edit Task" webview dialog for the
   // task at (path, line) and applies the result. Used by `vaultTool.editTaskAtCursor`
@@ -958,7 +965,16 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
         } else if (msg.type === 'open-note') {
           const raw = (msg.name as string || '').trim();
-          if (raw) { void navigateToTarget(raw, document.uri, webviewPanel, true); }
+          // `basePath` (see `data-wiki-base` in editor.js) is workspace-relative — e.g. a task's
+          // own `t.path` from a tasks-query row — resolve it to the absolute directory `raw`
+          // should actually be looked up/created relative to, instead of always defaulting to
+          // the open document's own directory (wrong for a link that isn't part of this document
+          // at all).
+          const basePathRel = (msg.basePath as string | undefined)?.trim();
+          const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          const baseDirOverride =
+            basePathRel && vaultRoot ? path.dirname(path.join(vaultRoot, basePathRel)) : undefined;
+          if (raw) { void navigateToTarget(raw, document.uri, webviewPanel, true, baseDirOverride); }
 
         } else if (msg.type === 'open-transclusion') {
           // Same navigation as open-note, except a transclusion pointing at a note
@@ -1050,8 +1066,14 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         } else if (msg.type === 'run-tasks-query') {
           (async () => {
             const tasksApi = await getTasksApi();
+            // Workspace-relative path of *this* panel's own document — lets `{{query.file.path}}`
+            // inside the query (typically `path does not include {{query.file.path}}`, to exclude
+            // the query's own note from its results) actually expand instead of surviving as
+            // literal text. Optional third arg, so this still degrades gracefully against an
+            // older build of the sibling extension that doesn't accept it yet.
+            const queryFilePath = vscode.workspace.asRelativePath(document.uri, false);
             const result: TasksQueryResultDTO = tasksApi?.renderTasksQuery
-              ? tasksApi.renderTasksQuery(msg.query as string)
+              ? tasksApi.renderTasksQuery(msg.query as string, queryFilePath)
               : { items: [], groups: null, unrecognizedLines: [] };
             webviewPanel.webview.postMessage({ type: 'tasks-query-result', query: msg.query, result });
           })();
