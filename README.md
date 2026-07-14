@@ -3,6 +3,40 @@
 Extensión de VS Code / Windsurf que actúa como vault local tipo Obsidian.
 Se instala localmente desde un `.vsix`, sin marketplace ni servidores externos.
 
+## Seguridad: sin llamadas de red externas
+
+Auditado (2026-07-14) revisando `src/extension.ts`, `webview-src/editor.js`, los
+artefactos compilados (`out/extension.js`, `out/editor.bundle.js`), `package.json`
+y los temas empaquetados, buscando `fetch`/`XMLHttpRequest`/`http`/`https`/
+`WebSocket`/`EventSource`/telemetría/analítica. **No se encontró ninguna llamada
+de red automática ni ningún SDK de telemetría o diagnóstico.**
+
+- El único punto que toca una URL es `vscode.env.openExternal(...)`
+  (`src/extension.ts`), y solo se dispara desde el handler del mensaje
+  `open-url` — que a su vez solo se envía al hacer **clic** en un enlace
+  `[texto](url)` o una URL suelta dentro de una nota. Es decir: abre el
+  navegador del sistema únicamente cuando el usuario clica un enlace, igual
+  que cualquier visor de Markdown.
+- El CSP del webview (`default-src 'none'; img-src ${cspSource} data: blob:;
+  script-src ${cspSource} 'unsafe-inline' 'unsafe-eval'; style-src
+  'unsafe-inline';`) no incluye `connect-src`, así que hereda `default-src
+  'none'` — cualquier `fetch`/`XMLHttpRequest`/`WebSocket` quedaría bloqueado
+  por el propio navegador embebido aunque se colara código que lo intentara.
+  `img-src` tampoco permite `https:`/`http:` genérico, solo el origen propio
+  del webview, `data:` y `blob:` — ni una imagen remota referenciada por un
+  tema de Obsidian cargado localmente podría cargarse.
+- Dependencias en tiempo de ejecución (`package.json` → `dependencies`):
+  únicamente paquetes de CodeMirror (`@codemirror/*`, `@lezer/highlight`) y
+  `marked` — ninguno hace peticiones de red. `marked` y
+  `@codemirror/autocomplete` están declarados pero no se importan en ningún
+  archivo (dependencias muertas, sin riesgo pero pendientes de limpieza).
+  `devDependencies` (typescript, esbuild, vsce) no se empaquetan en el `.vsix`.
+
+Esta revisión cubre únicamente este repositorio. Las extensiones hermanas
+(`obsidianlike_tasks`, `_calendar`, `_search`, `_dataview`, `_dbfolder`,
+`_clearunusedimages`, ver `make.bat`) viven en repos separados y no están
+auditadas aquí.
+
 ## Autoguardado
 
 El editor guarda la nota en disco por su cuenta: tras `obsidianLike.autoSaveDelay`
