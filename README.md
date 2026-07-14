@@ -14,7 +14,8 @@ de red automática ni ningún SDK de telemetría o diagnóstico.**
 - El único punto que toca una URL es `vscode.env.openExternal(...)`
   (`src/extension.ts`), y solo se dispara desde el handler del mensaje
   `open-url` — que a su vez solo se envía al hacer **clic** en un enlace
-  `[texto](url)` o una URL suelta dentro de una nota. Es decir: abre el
+  markdown estándar (texto entre corchetes seguido de la URL entre
+  paréntesis) o una URL suelta dentro de una nota. Es decir: abre el
   navegador del sistema únicamente cuando el usuario clica un enlace, igual
   que cualquier visor de Markdown.
 - El CSP del webview (`default-src 'none'; img-src ${cspSource} data: blob:;
@@ -151,6 +152,17 @@ antes de que llegue al webview (ver detalle en `CLAUDE.md`, sección "Drag &
 drop"; no confirmado como 100% fiable). El camino garantizado: clic derecho
 sobre uno o varios archivos en el explorador de VS Code → "Obsidian-like:
 Insertar como adjunto en la nota activa".
+
+## Navegación vertical del cursor (flechas arriba/abajo)
+
+Subir/bajar con el cursor se mueve por **fila visual en pantalla**, no por línea
+de fichero — un párrafo largo que ocupa varias líneas en pantalla (con el ajuste
+de línea activado) navega fila a fila dentro de él, en vez de saltar directamente
+a la siguiente línea real del documento. Necesitó una implementación propia
+porque los marcadores markdown que este editor oculta/muestra según en qué línea
+está el cursor (viñetas, wikilinks...) confunden el algoritmo por píxeles nativo
+de CodeMirror cuando cambia de línea activa entre pulsaciones — ver `CLAUDE.md`
+para el detalle técnico completo.
 
 ## Código inline y bloques de código
 

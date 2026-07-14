@@ -3251,13 +3251,41 @@ function moveVerticalByLine(view, dir, extend) {
   const { state } = view;
   const range = state.selection.main;
   const curLine = state.doc.lineAt(range.head);
-  const col = vGoalCol != null ? vGoalCol : (range.head - curLine.from);
 
-  const targetLineNum = Math.min(Math.max(curLine.number + dir, 1), state.doc.lines);
-  const targetLine = state.doc.line(targetLineNum);
-  const newHead = targetLine.from + Math.min(col, targetLine.length);
+  // EditorView.lineWrapping means a single *document* line with no embedded
+  // newline (a long paragraph) can still span several on-screen rows. Moving
+  // by document-line-number alone (below) would skip straight over those
+  // extra rows to the next real line — e.g. landing on the blank line after
+  // a long paragraph instead of the paragraph's own second visual row.
+  // CM6's own pixel-based view.moveVertically() *does* handle this correctly,
+  // but only reusing it for a single, freshly-computed step that turns out to
+  // stay on the *same* document line: calling it fresh (no persisted
+  // goalColumn passed in, unlike CM6's own cursorLineDown/Up, which is what
+  // this whole custom keymap replaced) means there's no stale cross-press
+  // goal to go wrong, and moving between wrap-rows of one line never crosses
+  // into a differently-decorated line either, so the corruption described
+  // above this function's binding can't happen for this particular step.
+  const pixelCandidate = view.moveVertically(EditorSelection.cursor(range.head), dir > 0);
+  const staysOnSameLine = state.doc.lineAt(pixelCandidate.head).number === curLine.number;
 
-  vGoalCol = col;
+  let newHead;
+  if (staysOnSameLine) {
+    // Still within the same wrapped document line — trust the pixel step,
+    // and deliberately leave vGoalCol untouched (this isn't a line-to-line
+    // jump, so it has no bearing on that column-preservation mechanism).
+    newHead = pixelCandidate.head;
+  } else {
+    // Actually crossing into a different document line (the common case,
+    // and also what a wrapped line's *last*/*first* visual row hits next) —
+    // exactly where the pixel/goal-column approach breaks, per the comment
+    // above; jump by line number + character column instead, immune to it.
+    const col = vGoalCol != null ? vGoalCol : (range.head - curLine.from);
+    const targetLineNum = Math.min(Math.max(curLine.number + dir, 1), state.doc.lines);
+    const targetLine = state.doc.line(targetLineNum);
+    newHead = targetLine.from + Math.min(col, targetLine.length);
+    vGoalCol = col;
+  }
+
   dispatchingVerticalMove = true;
   try {
     view.dispatch({
