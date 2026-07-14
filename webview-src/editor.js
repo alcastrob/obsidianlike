@@ -201,10 +201,27 @@ const vsTheme = EditorView.theme({
     fontWeight: 'bold',
   },
   // ```tasks``` query block rendering (see TasksQueryWidget).
+  // "Full-bleed" break-out of `.cm-content`'s 780px reading-width column (see its `maxWidth`
+  // above) — appropriate for prose, but a task listing has many columns (tags, id, priority,
+  // dates, backlink, edit button) that benefit from the pane's actual full width instead of being
+  // squeezed into the narrow prose column and wrapping far more than necessary. `width: 100vw` +
+  // `margin-left: calc(50% - 50vw)` is the standard break-out-of-a-centered-container recipe: the
+  // "50%" is relative to the (narrow) parent, the "50vw" to the actual viewport, so the element
+  // ends up exactly viewport-wide regardless of how narrow an ancestor constrains its own box.
+  // Confirmed empirically (a throwaway page mirroring this exact structure, rendered in headless
+  // Chrome) that this doesn't introduce a stray horizontal scrollbar. `paddingLeft`/`Right` restore
+  // the same 28px inset `.cm-content`'s own padding gives everything else, so the listing still
+  // lines up visually with the prose text above/below it instead of touching the pane's edges.
   '.cm-tasks-query': {
     display: 'block',
     margin: '4px 0 10px',
     padding: '2px 0',
+    maxWidth: 'none',
+    width: '100vw',
+    boxSizing: 'border-box',
+    marginLeft: 'calc(50% - 50vw)',
+    paddingLeft: '28px',
+    paddingRight: '28px',
   },
   '.cm-tasks-query-loading, .cm-tasks-query-empty': {
     opacity: '0.55',
