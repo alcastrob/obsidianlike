@@ -207,37 +207,28 @@ const vsTheme = EditorView.theme({
     color: 'var(--text-error, #e06c75)',
     fontWeight: 'bold',
   },
-  // ```tasks``` query block rendering (see TasksQueryWidget).
-  // "Full-bleed, capped" break-out of `.cm-content`'s 780px reading-width column (see its
-  // `maxWidth` above) — appropriate for prose, but a task listing has many columns (tags, id,
-  // priority, dates, backlink, edit button) that benefit from more than that narrow column. A
-  // first version broke out to a literal `100vw` unconditionally, which fixed the wrapping problem
-  // but, on a wide pane, left the listing running edge-to-edge with no visible margin at all —
-  // every *other* element on the page still sits in the centred 780px column with large empty
-  // space on both sides, so a listing touching the pane's actual edges reads as "the page's own
-  // margins disappeared", not as an intentional design choice. `width: min(100vw, 1200px)` +
-  // `margin-left: calc(50% - min(50vw, 600px))` keeps the same full-bleed behavior (and the same
-  // "50% of narrow parent minus 50% of viewport" break-out math) up to a generous 1200px cap, then
-  // re-centers within that cap on anything wider — comfortably more room than 780px for long
-  // descriptions/many badges on any realistic pane, while still leaving a visible margin on a wide
-  // one. Note this cap is *not* what fixes long-description wrapping in the first place — that's
-  // `.cm-tasks-query-item` being plain inline flow rather than flexbox (see its own comment below);
-  // this element could be capped at 780px too and long text would still wrap correctly, just with
-  // less room before it needs to. Confirmed empirically (a throwaway page mirroring this exact
-  // structure, rendered in headless Chrome at both a wide and a narrower-than-780px pane width)
-  // that this doesn't introduce a stray horizontal scrollbar in either case. `paddingLeft`/`Right`
-  // restore the same 28px inset `.cm-content`'s own padding gives everything else, so the listing
-  // still lines up visually with the prose text above/below it instead of touching its own edges.
+  // ```tasks``` query block rendering (see TasksQueryWidget). Deliberately *not* broken out of
+  // `.cm-content`'s own 780px reading-width column/28px padding (see its `maxWidth`/`padding`
+  // above) — an earlier version tried a "full-bleed, capped" break-out via `100vw`-relative
+  // `calc()` to give a many-column task row (tags, id, priority, dates, backlink, edit button)
+  // more room than plain prose, on the theory that `.cm-content`'s own centred-column math
+  // (`margin-left: calc(50% - min(50vw, 600px))`, mirroring `margin: 0 auto` + a max-width) would
+  // carry over cleanly to a child of it. In practice it didn't: reported as this listing's side
+  // margins vanishing entirely (flush against the pane's edges) while every other element on the
+  // page kept its normal margin — i.e. exactly the "page's own margins disappeared" outcome that
+  // break-out was supposed to avoid, just via a different bug than the first (uncapped) attempt.
+  // Simplest correct fix, and what was actually asked for: don't fight the layout at all. A
+  // normal-flow block with no explicit width naturally fills its parent `.cm-line`'s content box,
+  // which *is* `.cm-content`'s own (780px-capped, 28px-padded, auto-centred) box — the same one
+  // every paragraph on the page already renders in — so this reads with *exactly* the same left/
+  // right margin as normal text, at any pane width, with no special-casing to get wrong. Long
+  // descriptions/titles still wrap correctly at this width — that's `.cm-tasks-query-item` being
+  // plain inline flow rather than flexbox (see its own comment below), unrelated to how wide this
+  // container is.
   '.cm-tasks-query': {
     display: 'block',
     margin: '4px 0 10px',
     padding: '2px 0',
-    maxWidth: 'none',
-    width: 'min(100vw, 1200px)',
-    boxSizing: 'border-box',
-    marginLeft: 'calc(50% - min(50vw, 600px))',
-    paddingLeft: '28px',
-    paddingRight: '28px',
   },
   '.cm-tasks-query-loading, .cm-tasks-query-empty': {
     opacity: '0.55',
@@ -2110,6 +2101,17 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             const indentEm = depth * 1.5 + markerW;
             const firstLineStyle = `padding-left:${indentEm}em;text-indent:-${markerW}em`;
             const contLineStyle = `padding-left:${indentEm}em`;
+            // Task checkbox lines read flush with the surrounding prose's left margin
+            // instead of indented like a regular list item — a checklist isn't "a sublist
+            // of the document", Obsidian's own Tasks plugin renders a top-level one the
+            // same way. Shifts the whole indent formula left by exactly one nesting level
+            // (`depth - 1` instead of `depth`) rather than hardcoding 0, so a *nested* task
+            // (depth 2+ — a subtask under another task, or under a plain bullet) still
+            // reads one level deeper than its parent; only the true top level (depth 1)
+            // lands at 0.
+            const taskIndentEm = (depth - 1) * 1.5 + markerW;
+            const taskFirstLineStyle = `padding-left:${taskIndentEm}em;text-indent:-${markerW}em`;
+            const taskContLineStyle = `padding-left:${taskIndentEm}em`;
 
             // ── Task checkbox lines ──────────────────────────────────────────
             // Detected via plain-text regex (not AST) per the line text, so this
@@ -2124,7 +2126,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               lineDecs.push({ from: lineStart,
                 dec: Decoration.line({
                   class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass} cm-task-line${isDone ? ' cm-task-done' : ''}`,
-                  attributes: { style: firstLineStyle },
+                  attributes: { style: taskFirstLineStyle },
                 }) });
 
               const cbM = TASK_CHECKBOX_RE.exec(line.text);
@@ -2166,11 +2168,12 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             const contentNode = node.node.getChild('Paragraph') || node.node.getChild('Task');
             if (contentNode) {
               const contentToLine = state.doc.lineAt(Math.min(contentNode.to, state.doc.length)).number;
+              const activeContLineStyle = taskM ? taskContLineStyle : contLineStyle;
               for (let ln = line.number + 1; ln <= contentToLine; ln++) {
                 const contLine = state.doc.line(ln);
                 lineDecs.push({ from: contLine.from,
                   dec: Decoration.line({ class: `HyperMD-list-line cm-list-line cm-list-continuation ${depthClass}`,
-                                          attributes: { style: contLineStyle } }) });
+                                          attributes: { style: activeContLineStyle } }) });
               }
             }
 

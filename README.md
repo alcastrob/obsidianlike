@@ -187,16 +187,19 @@ también sirve para plegar/desplegar la sección. Detalle técnico completo en
 
 Las líneas de checkbox se reconocen y renderizan como en Obsidian: checkbox real (clicable),
 tachado al completar, fecha vencida en rojo, con el mismo tamaño/alineación para los iconos de
-estado no estándar (en curso, en espera, delegada, cancelada) que para el checkbox nativo. Con el
-cursor sobre la línea de la tarea, el atajo `Shift+Alt+E` (comando `vaultTool.editTaskAtCursor`)
-abre el diálogo "Create or edit Task" de la extensión de Tasks, ya relleno con los datos de esa
-tarea concreta.
+estado no estándar (en curso, en espera, delegada, cancelada) que para el checkbox nativo. Una
+tarea suelta en el nivel superior del documento se alinea con el mismo margen izquierdo que el
+texto normal — no aparece indentada como una sublista, salvo que esté anidada bajo otra tarea o
+bajo una lista, en cuyo caso conserva su nivel de anidamiento relativo. Con el cursor sobre la
+línea de la tarea, el atajo `Shift+Alt+E` (comando `vaultTool.editTaskAtCursor`) abre el diálogo
+"Create or edit Task" de la extensión de Tasks, ya relleno con los datos de esa tarea concreta.
 
 Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el plugin Tasks de Obsidian —
 `not done`, `group by`, filtros con expresiones JS, etc.) se renderizan como una lista de tareas
-real dentro del propio editor: cada fila muestra checkbox, tags como pills, ID, prioridad,
-dependencias, fechas y un backlink clicable a la nota (con el encabezado bajo el que está la
-tarea, si tiene uno) — con un botón ✏️ propio para editar esa tarea concreta sin salir del
+real dentro del propio editor, en la misma columna de ancho de lectura (y con el mismo margen
+izquierdo/derecho) que el resto de la nota: cada fila muestra checkbox, tags como pills, ID,
+prioridad, dependencias, fechas y un backlink clicable a la nota (con el encabezado bajo el que
+está la tarea, si tiene uno) — con un botón ✏️ propio para editar esa tarea concreta sin salir del
 listado. Encima del listado hay un filtro de texto por descripción, y debajo un contador de
 tareas mostradas, igual que en Obsidian.
 
