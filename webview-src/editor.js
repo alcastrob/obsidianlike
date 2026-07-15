@@ -88,10 +88,14 @@ const vsTheme = EditorView.theme({
   // even though it links nowhere. See the .cm-plain-brackets detection in
   // livePreviewPlugin below for how "not a real link, not a wiki-link" is told
   // apart from an actual `[text](url)` (left untouched, still blue/clickable).
+  // font-size deliberately isn't reset here — it's set per-instance as an
+  // inline style instead (plainBracketFontSizeStyle, in livePreviewPlugin),
+  // since the "just inherit" this rule used to apply here also flattened a
+  // heading's font-size back down to the paragraph default whenever the
+  // bracket happened to sit inside one. See that function's comment.
   '.cm-wiki-link-raw, .cm-wiki-link-raw *, .cm-plain-brackets, .cm-plain-brackets *': {
     color: 'inherit !important',
     textDecoration: 'none !important',
-    fontSize: 'inherit !important',
     cursor: 'text !important',
   },
   '.cm-md-link': {
@@ -923,16 +927,29 @@ function renderCell(raw, basePath) {
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
   s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
-  // Standard markdown links [text](url) — shows only the link text (clickable), not the text
-  // *and* the raw destination URL as separate visible content. Reuses the `.cm-md-link` class
-  // (and `data-url` attribute) the CM6-native `mdLinkPlugin` already renders links with elsewhere
-  // in the document — same CSS, and `linkClickHandler`'s existing `.closest('.cm-md-link')`
-  // branches (mousedown guard + `open-url` click handler) pick these up with no new wiring,
-  // since they just do generic DOM traversal regardless of how the element was created. Must run
-  // *before* the wiki-link regex below: `[[Note]]` has no parens after it so this pattern
-  // (which requires a `(` immediately after the closing `]`) can't match it, but running link
-  // detection first avoids any risk of matching inside wiki-links' own generated HTML instead.
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, url) => `<span class="cm-md-link" data-url="${url}">${text}</span>`);
+  // Standard markdown links [text](url), *and* a bare `https://...` URL with no [text]() around
+  // it at all (e.g. a task description someone just pasted a link into) — both render as the
+  // same clickable span, showing only the link text (or, for a bare URL, the URL itself — there's
+  // no separate "text" to prefer) rather than the text *and* the raw destination URL as separate
+  // visible content. Reuses the `.cm-md-link` class (and `data-url` attribute) the CM6-native
+  // `mdLinkPlugin` already renders links with elsewhere in the document — same CSS, and
+  // `linkClickHandler`'s existing `.closest('.cm-md-link')` branches (mousedown guard + `open-url`
+  // click handler) pick these up with no new wiring, since they just do generic DOM traversal
+  // regardless of how the element was created. One combined regex (alternation) rather than two
+  // separate passes: a bare-URL pass run *after* this one would otherwise re-match the URL sitting
+  // inside an already-rendered `[text](url)` span's `data-url` attribute text; alternation avoids
+  // that by construction, since only one branch can win at a given position and `[text](url)`'s
+  // own `[` always starts before its `(url)` portion would. Must run *before* the wiki-link regex
+  // below: `[[Note]]` has no parens after it so the `[text](url)` branch can't match it, but
+  // running link detection first avoids any risk of matching inside wiki-links' own generated HTML
+  // instead. The bare-URL branch mirrors `findUrlAtPos`'s own fallback regex (main editor), so
+  // "renders as a link here" and "is clickable there" agree on the same URL span.
+  s = s.replace(
+    /\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s)"'\]>]+)/g,
+    (_, text, url, bareUrl) => bareUrl
+      ? `<span class="cm-md-link" data-url="${bareUrl}">${bareUrl}</span>`
+      : `<span class="cm-md-link" data-url="${url}">${text}</span>`
+  );
   // Wiki-links [[target]] or [[target|alias]]
   const baseAttr = basePath ? ` data-wiki-base="${String(basePath).replace(/"/g, '&quot;')}"` : '';
   s = s.replace(/(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_, tgt, alias) =>
@@ -1810,14 +1827,28 @@ function renderTaskRow(t) {
   // Backlink to the file (and heading, if the task sits under one) the task was found in —
   // clickable like any other wikilink, reusing the `[data-wiki]` pattern the table-cell
   // wikilink handler already understands (see `linkClickHandler` below) rather than adding a
-  // new message type.
+  // new message type. Deliberately does NOT carry the `.cm-wiki-link` class real in-document
+  // wikilinks use for styling: `linkClickHandler`'s `isWikiLinkEl` intercepts *any* element with
+  // that class (checked by class alone, walking up from the click target) before the `[data-wiki]`
+  // branch below ever runs, and reads `dataset.target` — which this span never sets, only
+  // `dataset.wiki` — falling back to the element's own *display* text ("File > Heading") as the
+  // literal wikilink target. That's not a valid note name, so `resolveNoteUri` never finds it and
+  // silently creates a blank file named e.g. "20260619 > Insights clave.md" instead of opening
+  // "20260619.md" and scrolling to the heading. Styled with the exact same inline `style` string
+  // `renderCell`'s own wiki-link rendering uses, instead of the class, so it still reads/behaves
+  // like a link without ever matching `isWikiLinkEl`. `data-wiki-base` is set to the task's own
+  // `t.path` (the file this backlink points at, and the file the heading search is scoped to) —
+  // harmless since it trivially resolves to itself, but keeps this consistent with every other
+  // task-related wikilink in this codebase, and correctly tie-breaks toward the right file if
+  // another note elsewhere in the vault happens to share this one's name.
   const noteName = (t.path || '').replace(/\.md$/i, '').split('/').pop();
   if (noteName) {
     const back = document.createElement('span');
     back.className = 'cm-tasks-query-backlink';
     const link = document.createElement('span');
-    link.className = 'cm-wiki-link';
     link.dataset.wiki = t.heading ? `${noteName}#${t.heading}` : noteName;
+    link.dataset.wikiBase = t.path;
+    link.style.cssText = 'color:var(--link-color,var(--vscode-textLink-foreground,#4a9eff));text-decoration:underline;cursor:pointer;';
     link.textContent = t.heading ? `${noteName} > ${t.heading}` : noteName;
     back.append('(', link, ')');
     row.appendChild(back);
@@ -1994,6 +2025,43 @@ class DataviewQueryWidget extends WidgetType {
     }
     return wrap;
   }
+}
+
+// Matches .cm-header-N's own font-size defaults exactly (see vsTheme) — used
+// to give .cm-wiki-link-raw/.cm-plain-brackets the *correct* size when the
+// bracket sits inside a heading, instead of just resetting to `inherit`
+// (which collapsed it to the surrounding paragraph size — see the comment
+// where this is used, below).
+const HEADING_SIZE_DEFAULT = { 1: '1.75em', 2: '1.4em', 3: '1.15em', 4: '1.1em', 5: '1em', 6: '0.95em' };
+function headingLevelOf(node) {
+  let cur = node.node.parent;
+  while (cur) {
+    const m = /^ATXHeading([1-6])$/.exec(cur.name);
+    if (m) return +m[1];
+    cur = cur.parent;
+  }
+  return null;
+}
+// Inline `style` (not a class) so it reliably wins regardless of stylesheet
+// order or !important ties, same reasoning as the list hanging-indent fix
+// above headingLevelOf's own caller. Needed because .cm-wiki-link-raw/
+// .cm-plain-brackets reset color/text-decoration/cursor with !important on
+// `.selector, .selector *` (to beat mdHighlight's own generated classes on
+// the *nested* span for those properties — see the comment on that rule) —
+// but mdHighlight's own tags.heading1..6 rule also lands on that same nested
+// span when the bracket sits inside a heading (confirmed: highlightTree
+// combines multiple active tags' classes onto one span, e.g.
+// "cm-header cm-header-1 tok-link tok-processingInstruction" together, not
+// separate sibling spans), and its font-size *isn't* !important — so an
+// earlier version of this that also reset font-size via that same
+// `!important` class rule was silently flattening a heading's font size back
+// down to the paragraph default, since `!important` unconditionally beats a
+// non-!important rule regardless of which element actually carries it.
+function plainBracketFontSizeStyle(node) {
+  const level = headingLevelOf(node);
+  return level
+    ? `font-size: var(--h${level}-size, ${HEADING_SIZE_DEFAULT[level]}) !important`
+    : 'font-size: inherit !important';
 }
 
 // ── Live-preview plugin ───────────────────────────────────────────────────────
@@ -2392,7 +2460,10 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               state.doc.sliceString(node.from - 1, node.from) === '[' &&
               state.doc.sliceString(node.to, node.to + 1) === ']' &&
               isLinkActivated(node.from - 1, node.to + 1)) {
-            decs.push({ from: node.from, to: node.to, dec: Decoration.mark({ class: 'cm-wiki-link-raw' }) });
+            decs.push({ from: node.from, to: node.to, dec: Decoration.mark({
+              class: 'cm-wiki-link-raw',
+              attributes: { style: plainBracketFontSizeStyle(node) },
+            }) });
           }
 
           // ── Bare `[text]` with no `(url)` after it — same false-positive
@@ -2419,7 +2490,10 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
                 state.doc.sliceString(node.to, node.to + 1) === ']') &&
               state.doc.sliceString(node.to - 1, node.to) !== ')' &&
               !(!activeLinkClosed && activeLinkFrom === node.from - 1)) {
-            decs.push({ from: node.from, to: node.to, dec: Decoration.mark({ class: 'cm-plain-brackets' }) });
+            decs.push({ from: node.from, to: node.to, dec: Decoration.mark({
+              class: 'cm-plain-brackets',
+              attributes: { style: plainBracketFontSizeStyle(node) },
+            }) });
           }
 
           if (active.has(ln)) return;
@@ -2518,6 +2592,24 @@ const mdLinkPlugin = ViewPlugin.fromClass(class {
       const url  = m[2].trim();
       all.push({ from: mFrom, to: mTo,
         dec: Decoration.replace({ widget: new MdLinkWidget(text, url) }) });
+    }
+    // Bare `https://...` URLs — e.g. dropped straight into a task's description with no
+    // `[text](url)` around them — get the same clickable styling instead of sitting there as
+    // plain, unstyled text. Same regex `findUrlAtPos` already uses as its syntax-tree fallback
+    // for click detection, so "does this look like a link" and "does clicking here open a link"
+    // agree on the same span. Unlike the widget above, this is a plain `Decoration.mark` (no
+    // widget, nothing to hide) — there's no markdown syntax to reveal/collapse for a bare URL,
+    // the URL text itself is exactly what should stay visible, so it doesn't need the
+    // active-line exclusion `[text](url)` uses either. The final overlap-skip below already
+    // keeps this from double-styling a URL that's actually a `[text](url)` destination: that
+    // match's own `from` (`[`) always sorts before this one's `from` (`http`, further inside
+    // the same construct), so it claims the range first.
+    const urlRe = /https?:\/\/[^\s)"'\]>]+/g;
+    while ((m = urlRe.exec(str)) !== null) {
+      const mFrom = vf + m.index;
+      const mTo   = mFrom + m[0].length;
+      all.push({ from: mFrom, to: mTo,
+        dec: Decoration.mark({ class: 'cm-md-link', attributes: { 'data-url': m[0] } }) });
     }
     all.sort((a, b) => a.from - b.from || a.to - b.to);
     const builder = new RangeSetBuilder();

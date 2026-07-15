@@ -200,6 +200,8 @@ texto normal — no aparece indentada como una sublista, salvo que esté anidada
 bajo una lista, en cuyo caso conserva su nivel de anidamiento relativo. Con el cursor sobre la
 línea de la tarea, el atajo `Shift+Alt+E` (comando `vaultTool.editTaskAtCursor`) abre el diálogo
 "Create or edit Task" de la extensión de Tasks, ya relleno con los datos de esa tarea concreta.
+Una dirección `https://`/`http://` suelta dentro del texto de la tarea (sin un enlace markdown
+explícito alrededor) se convierte en un enlace clicable igual que uno explícito.
 
 Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el plugin Tasks de Obsidian —
 `not done`, `group by`, filtros con expresiones JS, etc.) se renderizan como una lista de tareas
@@ -208,7 +210,8 @@ izquierdo/derecho) que el resto de la nota: cada fila muestra checkbox, tags com
 prioridad, dependencias, fechas y un backlink clicable a la nota (con el encabezado bajo el que
 está la tarea, si tiene uno) — con un botón ✏️ propio para editar esa tarea concreta sin salir del
 listado. Encima del listado hay un filtro de texto por descripción, y debajo un contador de
-tareas mostradas, igual que en Obsidian.
+tareas mostradas, igual que en Obsidian. Igual que en una tarea suelta, una URL suelta dentro de
+la descripción también se muestra como enlace clicable.
 
 Esto funciona como **dependencia opcional** de la extensión hermana `angelCastro.obsidian-like-tasks`
 (repo `obsidianlike_tasks`): si no está instalada, los checkboxes siguen funcionando con un toggle
