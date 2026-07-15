@@ -78,7 +78,17 @@ const vsTheme = EditorView.theme({
   // not checked in): the DOM comes out as
   // `<span class="cm-wiki-link-raw"><span class="tok-link tok-processingInstruction">[</span>...`
   // i.e. genuinely nested, not a single flat span with combined classes.
-  '.cm-wiki-link-raw, .cm-wiki-link-raw *': {
+  // Also used by .cm-plain-brackets — a bare `[text]` with no `(url)` after it
+  // (and not a [[wiki-link]]'s own inner brackets, handled separately by
+  // .cm-wiki-link-raw above) gets the exact same reset, for the exact same
+  // reason: lezer-markdown parses *any* `[...]` shape as a shortcut-reference
+  // Link node regardless of whether a matching reference definition exists
+  // anywhere in the document, so mdHighlight's unconditional tags.link/
+  // tags.processingInstruction styling colors it and makes it look clickable
+  // even though it links nowhere. See the .cm-plain-brackets detection in
+  // livePreviewPlugin below for how "not a real link, not a wiki-link" is told
+  // apart from an actual `[text](url)` (left untouched, still blue/clickable).
+  '.cm-wiki-link-raw, .cm-wiki-link-raw *, .cm-plain-brackets, .cm-plain-brackets *': {
     color: 'inherit !important',
     textDecoration: 'none !important',
     fontSize: 'inherit !important',
@@ -90,11 +100,8 @@ const vsTheme = EditorView.theme({
     textUnderlineOffset: '2px',
     cursor: 'pointer',
   },
-  // Collapsed table rows (lines 2..N replaced by empty + height:0)
-  '.cm-table-row-hidden': {
-    height: '0 !important', lineHeight: '0 !important',
-    overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
-  },
+  // Collapsed table rows (lines 2..N replaced by empty + height:0) — full
+  // zeroing rule lives at the end of this stylesheet, see the comment there.
   // List item lines — indentation per nesting depth + spacing before the first item.
   '.cm-list-line': { paddingLeft: '0' },
   '.cm-list-depth-1': { paddingLeft: '1.5em' },
@@ -467,12 +474,8 @@ const vsTheme = EditorView.theme({
     opacity: '1',
     transform: 'translateY(0)',
   },
-  // Folded heading content
-  '.cm-fold-hidden': {
-    height: '0 !important', lineHeight: '0 !important',
-    overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
-    visibility: 'hidden',
-  },
+  // Folded heading content — full zeroing rule lives at the end of this
+  // stylesheet, see the comment there.
   // Heading fold indicator — mirrors Obsidian's .cm-fold-indicator structure.
   // Obsidian only reveals this (and the Border theme's H1/H2/H3 icon reskin
   // for it) while the pointer is over the heading line; otherwise it's fully
@@ -725,11 +728,10 @@ const vsTheme = EditorView.theme({
   // The ```/``` fence lines themselves: collapsed to zero height (not just
   // text-hidden) when not the active line, so — matching Obsidian — they don't
   // leave behind an empty, padded line above/below the block. Same technique as
-  // .cm-table-row-hidden/.cm-fold-hidden.
-  '.cm-code-fence-hidden': {
-    height: '0 !important', lineHeight: '0 !important',
-    overflow: 'hidden', padding: '0 !important', minHeight: '0 !important',
-  },
+  // .cm-table-row-hidden/.cm-fold-hidden — full zeroing rule lives at the end
+  // of this stylesheet, see the comment there (also explains why: this class
+  // and .cm-code-block-first/-last below, which sets non-zero margin/border/
+  // padding with !important of its own, can end up on the very same line).
   '.cm-code-block-first': {
     borderTop: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
     borderRadius: '6px 6px 0 0 !important',
@@ -780,6 +782,33 @@ const vsTheme = EditorView.theme({
   '.cm-tooltip-autocomplete ul li[aria-selected="true"]': {
     background: 'var(--vscode-editorSuggestWidget-selectedBackground, #094771)',
     color: 'var(--vscode-editorSuggestWidget-selectedForeground, #fff)',
+  },
+
+  // ── Zero-height collapsed lines — deliberately declared LAST ─────────────────
+  // .cm-table-row-hidden (collapsed table/```tasks```/frontmatter lines),
+  // .cm-code-fence-hidden (collapsed ``` fence lines) and .cm-fold-hidden
+  // (collapsed folded-heading content) all mean the same thing: this line must
+  // occupy zero visual space. CM6 combines Decoration.line() classes from
+  // *different* extensions onto the same line's class attribute, so a single
+  // line can easily end up with one of these *and* some other box-styling
+  // class at once — most commonly a folded heading section that contains a
+  // fenced code block, where .cm-code-block-first/-last (above) sets non-zero
+  // margin/border/padding of its own, also with !important. Same-specificity
+  // !important ties go to whichever rule is declared *later* in the
+  // stylesheet — these three used to live much earlier (grouped next to the
+  // decoration logic they support), which let that margin/border/padding leak
+  // through on an otherwise-collapsed line. A single leftover margin is a few
+  // px; a folded section containing several such blocks in a long document
+  // compounded into a very visible (reported: several hundred px) blank gap.
+  // Fixed by moving the zeroing here (after every rule it might need to beat)
+  // and covering every box-model property that could leak through this way,
+  // not just the ones a specific bug report happened to trace — margin/
+  // border/border-radius/box-shadow included, not just height/padding.
+  '.cm-table-row-hidden, .cm-code-fence-hidden, .cm-fold-hidden': {
+    height: '0 !important', lineHeight: '0 !important', minHeight: '0 !important',
+    padding: '0 !important', margin: '0 !important', border: 'none !important',
+    borderRadius: '0 !important', boxShadow: 'none !important',
+    overflow: 'hidden', visibility: 'hidden',
   },
 });
 
@@ -1996,6 +2025,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
       const lineDecs = [];  // { from, dec }   — line.from only, to=from
       let listDepth = 0;
       let awaitingFirstItem = false;
+      const listTypeStack = []; // 'BulletList' | 'OrderedList' per current nesting level
       // Line numbers recognised as task-checkbox lines, so the plain ListMark→BulletWidget
       // replacement below can skip them (the task checkbox widget already covers that span).
       const taskLines = new Set();
@@ -2022,7 +2052,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
         from: view.viewport.from,
         to:   view.viewport.to,
         leave(node) {
-          if (node.name === 'BulletList' || node.name === 'OrderedList') { listDepth--; }
+          if (node.name === 'BulletList' || node.name === 'OrderedList') { listDepth--; listTypeStack.pop(); }
         },
         enter(node) {
           const n = node.name;
@@ -2041,13 +2071,45 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           if (n === 'BulletList' || n === 'OrderedList') {
             if (listDepth === 0) { awaitingFirstItem = true; }
             listDepth++;
+            listTypeStack.push(n);
             return; // descend into ListItem children
           }
           if (n === 'ListItem') {
             const line = state.doc.lineAt(node.from);
             const lineStart = line.from;
-            const depthClass = `cm-list-depth-${Math.min(listDepth, 4)}`;
+            const depth = Math.min(listDepth, 4);
+            const depthClass = `cm-list-depth-${depth}`;
             const firstClass = awaitingFirstItem ? ' cm-list-first' : '';
+
+            // ── Hanging indent ────────────────────────────────────────────────
+            // A list item's own marker (bullet or number) is inline content
+            // that only ever appears on the item's *first* source line — a
+            // second (or later) line, whether from the paragraph soft-wrapping
+            // on screen (EditorView.lineWrapping) or an actual multi-line
+            // source (2-space-indented or CommonMark "lazy" continuation, no
+            // indent at all), has nothing rendered before its text and must
+            // still align with where the *text* starts, not the marker.
+            // Plain padding-left alone can't do that (it pushes every visual
+            // row of a block by the same amount, so the wrapped/continuation
+            // rows ended up flush with the marker's own position instead of
+            // past it) — needs the CSS hanging-indent pair instead: push the
+            // whole block in by (nesting indent + marker width), then pull
+            // just the *first* line back out by the marker width alone via
+            // text-indent (which, per CSS, only ever affects a block's own
+            // first line, never how far in wrapped continuation rows start).
+            // Set as an inline style (wins over any CSS class regardless of
+            // stylesheet order) rather than baked into the cm-list-depth-N
+            // classes below, since the marker width differs by list type:
+            // BulletWidget always renders at a fixed 1.2em (.cm-list-bullet),
+            // but an ordered marker is raw, variable-width text ("1." vs
+            // "10." vs "100.") — never replaced by a widget at all (see the
+            // ListMark handling below) — so exact alignment isn't achievable
+            // for every digit count; 2em is just wide enough for the common
+            // 1-2 digit case without visually crowding the text.
+            const markerW = listTypeStack[listTypeStack.length - 1] === 'OrderedList' ? 2 : 1.2;
+            const indentEm = depth * 1.5 + markerW;
+            const firstLineStyle = `padding-left:${indentEm}em;text-indent:-${markerW}em`;
+            const contLineStyle = `padding-left:${indentEm}em`;
 
             // ── Task checkbox lines ──────────────────────────────────────────
             // Detected via plain-text regex (not AST) per the line text, so this
@@ -2061,7 +2123,8 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               const isDone = /[xX-]/.test(statusChar);
               lineDecs.push({ from: lineStart,
                 dec: Decoration.line({
-                  class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass} cm-task-line${isDone ? ' cm-task-done' : ''}`
+                  class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass} cm-task-line${isDone ? ' cm-task-done' : ''}`,
+                  attributes: { style: firstLineStyle },
                 }) });
 
               const cbM = TASK_CHECKBOX_RE.exec(line.text);
@@ -2089,8 +2152,28 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               }
             } else {
               lineDecs.push({ from: lineStart,
-                dec: Decoration.line({ class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass}` }) });
+                dec: Decoration.line({ class: `HyperMD-list-line cm-list-line ${depthClass}${firstClass}`,
+                                        attributes: { style: firstLineStyle } }) });
             }
+
+            // Continuation lines: the item's *own* paragraph (GFM Task items
+            // wrap their content in a Task node instead — see the syntax tree
+            // this was checked against) spanning more than one source line.
+            // Deliberately reads this node's own direct child rather than
+            // node.to, which would also reach into any *nested* sub-list that
+            // follows — that content gets its own (deeper) indent when its
+            // own ListItem is visited separately, not this depth's.
+            const contentNode = node.node.getChild('Paragraph') || node.node.getChild('Task');
+            if (contentNode) {
+              const contentToLine = state.doc.lineAt(Math.min(contentNode.to, state.doc.length)).number;
+              for (let ln = line.number + 1; ln <= contentToLine; ln++) {
+                const contLine = state.doc.line(ln);
+                lineDecs.push({ from: contLine.from,
+                  dec: Decoration.line({ class: `HyperMD-list-line cm-list-line cm-list-continuation ${depthClass}`,
+                                          attributes: { style: contLineStyle } }) });
+              }
+            }
+
             awaitingFirstItem = false;
             // Don't return false — ListMark/Paragraph/nested lists still need processing
           }
@@ -2307,6 +2390,33 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               state.doc.sliceString(node.to, node.to + 1) === ']' &&
               isLinkActivated(node.from - 1, node.to + 1)) {
             decs.push({ from: node.from, to: node.to, dec: Decoration.mark({ class: 'cm-wiki-link-raw' }) });
+          }
+
+          // ── Bare `[text]` with no `(url)` after it — same false-positive
+          // coloring as the wiki-link case above, for the same reason
+          // (lezer-markdown parses *any* `[...]` shape as a shortcut-reference
+          // Link node, whether or not a matching reference definition exists
+          // anywhere in the document), but unconditional rather than gated to
+          // the active/edited line — a bare bracket isn't raw syntax waiting to
+          // be revealed, it's just plain text that happens to parse the same
+          // way, so it should never look like a link. Two other Link shapes
+          // are deliberately excluded: this link's own [[wiki-link]] inner
+          // brackets (just above — mutually exclusive with the check below,
+          // since that requires being preceded by "[" and followed by "]",
+          // which this explicitly rules out), and a genuine `[text](url)`,
+          // whose own Link node span extends through the closing ")" (see the
+          // syntax tree dump this was verified against: `[text]` alone spans
+          // just its own brackets, `[text](url)` swallows the parenthesized
+          // URL into the *same* node instead of leaving it a sibling). The
+          // last condition avoids a one-keystroke flicker while actively
+          // typing a not-yet-closed "[[note" — its momentary single-bracket
+          // parse would otherwise transiently match this too.
+          if (n === 'Link' && node.node.parent && node.node.parent.name !== 'Image' &&
+              !(state.doc.sliceString(node.from - 1, node.from) === '[' &&
+                state.doc.sliceString(node.to, node.to + 1) === ']') &&
+              state.doc.sliceString(node.to - 1, node.to) !== ')' &&
+              !(!activeLinkClosed && activeLinkFrom === node.from - 1)) {
+            decs.push({ from: node.from, to: node.to, dec: Decoration.mark({ class: 'cm-plain-brackets' }) });
           }
 
           if (active.has(ln)) return;
