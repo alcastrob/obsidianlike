@@ -201,25 +201,34 @@ const vsTheme = EditorView.theme({
     fontWeight: 'bold',
   },
   // ```tasks``` query block rendering (see TasksQueryWidget).
-  // "Full-bleed" break-out of `.cm-content`'s 780px reading-width column (see its `maxWidth`
-  // above) — appropriate for prose, but a task listing has many columns (tags, id, priority,
-  // dates, backlink, edit button) that benefit from the pane's actual full width instead of being
-  // squeezed into the narrow prose column and wrapping far more than necessary. `width: 100vw` +
-  // `margin-left: calc(50% - 50vw)` is the standard break-out-of-a-centered-container recipe: the
-  // "50%" is relative to the (narrow) parent, the "50vw" to the actual viewport, so the element
-  // ends up exactly viewport-wide regardless of how narrow an ancestor constrains its own box.
-  // Confirmed empirically (a throwaway page mirroring this exact structure, rendered in headless
-  // Chrome) that this doesn't introduce a stray horizontal scrollbar. `paddingLeft`/`Right` restore
-  // the same 28px inset `.cm-content`'s own padding gives everything else, so the listing still
-  // lines up visually with the prose text above/below it instead of touching the pane's edges.
+  // "Full-bleed, capped" break-out of `.cm-content`'s 780px reading-width column (see its
+  // `maxWidth` above) — appropriate for prose, but a task listing has many columns (tags, id,
+  // priority, dates, backlink, edit button) that benefit from more than that narrow column. A
+  // first version broke out to a literal `100vw` unconditionally, which fixed the wrapping problem
+  // but, on a wide pane, left the listing running edge-to-edge with no visible margin at all —
+  // every *other* element on the page still sits in the centred 780px column with large empty
+  // space on both sides, so a listing touching the pane's actual edges reads as "the page's own
+  // margins disappeared", not as an intentional design choice. `width: min(100vw, 1200px)` +
+  // `margin-left: calc(50% - min(50vw, 600px))` keeps the same full-bleed behavior (and the same
+  // "50% of narrow parent minus 50% of viewport" break-out math) up to a generous 1200px cap, then
+  // re-centers within that cap on anything wider — comfortably more room than 780px for long
+  // descriptions/many badges on any realistic pane, while still leaving a visible margin on a wide
+  // one. Note this cap is *not* what fixes long-description wrapping in the first place — that's
+  // `.cm-tasks-query-item` being plain inline flow rather than flexbox (see its own comment below);
+  // this element could be capped at 780px too and long text would still wrap correctly, just with
+  // less room before it needs to. Confirmed empirically (a throwaway page mirroring this exact
+  // structure, rendered in headless Chrome at both a wide and a narrower-than-780px pane width)
+  // that this doesn't introduce a stray horizontal scrollbar in either case. `paddingLeft`/`Right`
+  // restore the same 28px inset `.cm-content`'s own padding gives everything else, so the listing
+  // still lines up visually with the prose text above/below it instead of touching its own edges.
   '.cm-tasks-query': {
     display: 'block',
     margin: '4px 0 10px',
     padding: '2px 0',
     maxWidth: 'none',
-    width: '100vw',
+    width: 'min(100vw, 1200px)',
     boxSizing: 'border-box',
-    marginLeft: 'calc(50% - 50vw)',
+    marginLeft: 'calc(50% - min(50vw, 600px))',
     paddingLeft: '28px',
     paddingRight: '28px',
   },
@@ -878,11 +887,32 @@ function renderCell(raw, basePath) {
   // Protect inline code from further processing
   const codes = [];
   s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return `\x00C${codes.length - 1}\x00`; });
+  // #tags — same regex as the engine's own TaskRegularExpressions.hashTags (start-of-string or
+  // preceded by whitespace, anything but the negated punctuation set), rendered as a pill *in
+  // place* rather than stripped out. Run early (before links/wiki-links generate their own HTML)
+  // so it only ever sees plain text, and its "preceded by whitespace" requirement already keeps
+  // it from matching a `#fragment` inside a URL (preceded by a non-whitespace path character, not
+  // whitespace or start-of-string). Reuses `.cm-tasks-query-tag`'s pill styling — originally
+  // written for the tasks-query row's separate end-of-row tag list, now doing double duty since
+  // that separate list is gone (see renderTaskRow below).
+  s = s.replace(/(^|\s)#([^\s!@#$%^&*(),.?":{}|<>]+)/g, (_, prefix, tag) =>
+    `${prefix}<span class="cm-tasks-query-tag">#${tag}</span>`
+  );
   // Bold-italic → bold → italic (order matters: ** before *)
   s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
   s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+  // Standard markdown links [text](url) — shows only the link text (clickable), not the text
+  // *and* the raw destination URL as separate visible content. Reuses the `.cm-md-link` class
+  // (and `data-url` attribute) the CM6-native `mdLinkPlugin` already renders links with elsewhere
+  // in the document — same CSS, and `linkClickHandler`'s existing `.closest('.cm-md-link')`
+  // branches (mousedown guard + `open-url` click handler) pick these up with no new wiring,
+  // since they just do generic DOM traversal regardless of how the element was created. Must run
+  // *before* the wiki-link regex below: `[[Note]]` has no parens after it so this pattern
+  // (which requires a `(` immediately after the closing `]`) can't match it, but running link
+  // detection first avoids any risk of matching inside wiki-links' own generated HTML instead.
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, url) => `<span class="cm-md-link" data-url="${url}">${text}</span>`);
   // Wiki-links [[target]] or [[target|alias]]
   const baseAttr = basePath ? ` data-wiki-base="${String(basePath).replace(/"/g, '&quot;')}"` : '';
   s = s.replace(/(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_, tgt, alias) =>
@@ -1698,25 +1728,22 @@ function renderTaskRow(t) {
   // editor's TaskDecorations, the Markdown Preview's due-date badge): only the date signifier
   // turns red/bold, never the task's own description text.
   desc.className = 'cm-tasks-query-desc';
-  // Reuses renderCell's inline-markdown handling (bold/italic/code/wiki-links) — the same
-  // helper table cells already use — so a `[[wikilink]]` in a task's description shows up as a
-  // real clickable link instead of literal brackets. renderCell HTML-escapes the raw text before
-  // doing anything else, so this is safe against injection despite using innerHTML. `t.path` is
-  // passed as the base path (see renderCell's own comment) — a query result can come from any
+  // Reuses renderCell's inline-markdown handling (bold/italic/code/links/wiki-links/#tags) — the
+  // same helper table cells already use — so e.g. a `[[wikilink]]` in a task's description shows
+  // up as a real clickable link instead of literal brackets. renderCell HTML-escapes the raw text
+  // before doing anything else, so this is safe against injection despite using innerHTML. `t.path`
+  // is passed as the base path (see renderCell's own comment) — a query result can come from any
   // file in the vault, so a `[[wikilink]]` inside its description must resolve relative to *that*
-  // file, not the document the ```tasks``` block itself lives in.
+  // file, not the document the ```tasks``` block itself lives in. `t.description` (not
+  // `descriptionWithoutTags`) keeps any `#tags` exactly where they appear in the task's own text —
+  // renderCell renders them as pills in place, rather than this function stripping them out and
+  // re-appending them after the description like an earlier version did, which reordered a task
+  // like "Hacer cosas #a y otras cosas #b" into "Hacer cosas y otras cosas #a #b".
   desc.innerHTML = renderCell(t.description || '', t.path);
   row.appendChild(desc);
 
-  // Tags, ID, and depends-on are only present from a rebuilt sibling "Tasks" extension —
-  // `tags` degrades to `[]` and `id`/`dependsOn` to `undefined` against an older build, same
-  // pattern as `statusSymbol` above.
-  for (const tag of t.tags || []) {
-    const tg = document.createElement('span');
-    tg.className = 'cm-tasks-query-tag';
-    tg.textContent = tag;
-    row.appendChild(tg);
-  }
+  // ID and depends-on are only present from a rebuilt sibling "Tasks" extension — they degrade to
+  // `undefined` against an older build, same pattern as `statusSymbol` above.
   if (t.id) {
     const idEl = document.createElement('span');
     idEl.className = 'cm-tasks-query-id';
@@ -2949,7 +2976,8 @@ function requestHeadings(note) {
   });
 }
 
-const WIKI_SUGGEST_MAX = 5;
+const WIKI_SUGGEST_MAX = 5; // visible rows in the popup at once — see the sliding window in paint()
+const WIKI_SUGGEST_SCAN_MAX = 50; // underlying matches kept before windowing, just a sanity cap
 
 function escapeHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -2966,9 +2994,12 @@ function highlightMatch(text, query) {
     escapeHtml(text.slice(idx + query.length));
 }
 
-// Top WIKI_SUGGEST_MAX notes whose name contains `query` (case-insensitive),
-// closest/earliest match first — "empiecen o contengan" from the spec, i.e. a
-// name starting with the query sorts before one merely containing it.
+// Notes whose name contains `query` (case-insensitive), closest/earliest match
+// first — "empiecen o contengan" from the spec, i.e. a name starting with the
+// query sorts before one merely containing it. Capped to WIKI_SUGGEST_SCAN_MAX
+// (not the much smaller WIKI_SUGGEST_MAX, which is just the popup's visible
+// window — see the sliding window in paint()), so a query matching many notes
+// can still be reached by scrolling instead of being invisibly truncated.
 function matchNotes(query) {
   const q = query.toLowerCase();
   const scored = [];
@@ -2977,7 +3008,7 @@ function matchNotes(query) {
     if (idx !== -1) scored.push({ n, idx });
   }
   scored.sort((a, b) => a.idx - b.idx || a.n.name.localeCompare(b.n.name));
-  return scored.slice(0, WIKI_SUGGEST_MAX).map(s => ({ type: 'note', name: s.n.name, dir: s.n.dir }));
+  return scored.slice(0, WIKI_SUGGEST_SCAN_MAX).map(s => ({ type: 'note', name: s.n.name, dir: s.n.dir }));
 }
 
 class WikiSuggestView {
@@ -3057,7 +3088,7 @@ class WikiSuggestView {
       this.query = ctx.raw;
       this.notePart = '';
       this.loading = false;
-      this.items = this.query ? matchNotes(this.query) : noteHistory.slice(0, WIKI_SUGGEST_MAX).map(n => ({ type: 'note', name: n.name, dir: n.dir }));
+      this.items = this.query ? matchNotes(this.query) : noteHistory.slice(0, WIKI_SUGGEST_SCAN_MAX).map(n => ({ type: 'note', name: n.name, dir: n.dir }));
       this.selected = 0;
       this.open = true;
       this.render();
@@ -3082,7 +3113,7 @@ class WikiSuggestView {
       const q = wantQuery.toLowerCase();
       this.items = headings
         .filter(h => h.text.toLowerCase().includes(q))
-        .slice(0, WIKI_SUGGEST_MAX)
+        .slice(0, WIKI_SUGGEST_SCAN_MAX)
         .map(h => ({ type: 'heading', level: h.level, text: h.text }));
       this.loading = false;
       this.selected = 0;
@@ -3191,10 +3222,22 @@ class WikiSuggestView {
       empty.textContent = 'No se encontraron resultados';
       list.appendChild(empty);
     } else {
-      this.items.forEach((it, i) => {
+      // Sliding window: only WIKI_SUGGEST_MAX rows are ever rendered, but with
+      // more matches than that, the window follows `selected` — windowStart =
+      // selected - (WIKI_SUGGEST_MAX - 1), clamped to the list's bounds. That
+      // alone reproduces "pin the selected row to the last visible slot once
+      // scrolled past the first page, in either direction" with no extra
+      // scroll-direction state: e.g. selected=6 (0-based, the 7th match) always
+      // renders window [2,6] regardless of whether Up or Down just got you
+      // there, matching the earlier item reappearing at the top the same way
+      // pressing Up through a normal dropdown would.
+      const windowStart = this.items.length <= WIKI_SUGGEST_MAX ? 0 :
+        Math.max(0, Math.min(this.selected - (WIKI_SUGGEST_MAX - 1), this.items.length - WIKI_SUGGEST_MAX));
+      this.items.slice(windowStart, windowStart + WIKI_SUGGEST_MAX).forEach((it, i) => {
+        const absIndex = windowStart + i;
         const row = document.createElement('div');
-        row.className = 'cm-wls-item' + (i === this.selected ? ' is-selected' : '');
-        row.dataset.index = String(i);
+        row.className = 'cm-wls-item' + (absIndex === this.selected ? ' is-selected' : '');
+        row.dataset.index = String(absIndex);
         const title = document.createElement('div');
         title.className = 'cm-wls-title';
         title.innerHTML = this.rowTitle(it);
