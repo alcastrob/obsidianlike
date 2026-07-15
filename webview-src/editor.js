@@ -2064,6 +2064,39 @@ function plainBracketFontSizeStyle(node) {
     : 'font-size: inherit !important';
 }
 
+// Decoration.line() spec that makes a line take zero visual space — used
+// everywhere a whole line needs to disappear: folded heading content,
+// collapsed table rows/```tasks```/frontmatter lines, collapsed ``` fence
+// lines. The matching CSS class (`.cm-table-row-hidden, .cm-code-fence-hidden,
+// .cm-fold-hidden`, at the very end of vsTheme) already zeroes every relevant
+// box-model property with `!important` — but that still isn't a *guaranteed*
+// win: an Obsidian theme's own CSS loads *after* this whole stylesheet (via
+// the theme-css postMessage, into its own later <style> tag — see "Why theme
+// CSS is sent via postMessage"), so a theme rule using `!important` on the
+// same property via a more general selector (e.g. a blanket `.cm-line` rule,
+// or something targeting headers specifically) can still win purely on
+// source order — same category of problem already called out for
+// `.cm-code-block`'s own background/border, which just accepts the risk
+// ("!important + hope the theme doesn't also reach for it here"). This is a
+// stronger fix, for the specific properties that must reliably collapse to
+// zero: an *inline* style beats any class-based rule regardless of
+// `!important`, because specificity is compared before falling back to
+// source order within the same importance tier, and no external stylesheet —
+// loaded whenever, by whatever selector — can out-specificity a declaration
+// on the element itself. Reported: a folded heading's blank-line gap
+// persisting even after the CSS class fix, on a theme that apparently reaches
+// for the same properties this needs zeroed.
+function hiddenLineDeco(cls) {
+  return Decoration.line({
+    class: cls,
+    attributes: {
+      style: 'height:0 !important;line-height:0 !important;min-height:0 !important;' +
+             'padding:0 !important;margin:0 !important;border:none !important;' +
+             'border-radius:0 !important;box-shadow:none !important;overflow:hidden;visibility:hidden',
+    },
+  });
+}
+
 // ── Live-preview plugin ───────────────────────────────────────────────────────
 const livePreviewPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
@@ -2102,8 +2135,11 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           dec: Decoration.replace({ widget: new PropertiesWidget(view, fm.from, fm.to, fm.properties) }) });
         for (let ln = 2; ln <= fmCloseLine; ln++) {
           const line = state.doc.line(ln);
-          decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
-          lineDecs.push({ from: line.from, dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+          // Blank line guard: see the long comment on this same pattern at the
+          // Table case below for why an empty line must never also get a
+          // zero-length Decoration.replace at the same point as its line decoration.
+          if (line.to > line.from) decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
+          lineDecs.push({ from: line.from, dec: hiddenLineDeco('cm-table-row-hidden') });
         }
       }
 
@@ -2271,13 +2307,33 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
                 // First line replaced by the rendered widget (single-line, safe)
                 decs.push({ from: fromLine.from, to: fromLine.to,
                   dec: Decoration.replace({ widget: new TableWidget(src) }) });
-                // Remaining lines: replace content + collapse via line decoration
+                // Remaining lines: replace content + collapse via line decoration.
+                // A BLANK line must skip the Decoration.replace({}) push entirely —
+                // pushing it anyway (as every one of these call sites originally did)
+                // seeds the merge below with two zero-length decorations at the exact
+                // same (from, to) point (the replace's span degenerates to zero width
+                // on an empty line, landing on the same point as the line decoration's
+                // own from===to point). RangeSetBuilder silently keeps only one of a
+                // pair of decorations added at an identical point — confirmed with a
+                // real EditorView in jsdom (throwaway script, not checked in): the
+                // line decoration (and therefore its height:0 CSS) never reached the
+                // DOM for blank lines, while non-blank lines in the very same block
+                // collapsed correctly, since their replace span was non-zero-width and
+                // sorted to a different point than the line decoration. This was the
+                // actual root cause of "folding a heading leaves a blank-space gap"
+                // (reported against foldPlugin, which has the identical fix, below) —
+                // two earlier fix attempts aimed at the wrong layer (CSS specificity,
+                // then inline styles) because the line decoration's CSS was correct,
+                // it just never got attached to blank lines' DOM elements at all. Since
+                // Decoration.replace({}) over a zero-length span replaces nothing
+                // anyway, skipping the push for blank lines loses no behavior.
                 for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
                   const line = state.doc.line(ln);
-                  decs.push({ from: line.from, to: line.to,
-                    dec: Decoration.replace({}) });
+                  if (line.to > line.from) {
+                    decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
+                  }
                   lineDecs.push({ from: line.from,
-                    dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+                    dec: hiddenLineDeco('cm-table-row-hidden') });
                 }
               }
             } catch (_) {}
@@ -2333,12 +2389,14 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
 
                 decs.push({ from: fromLine.from, to: fromLine.to,
                   dec: Decoration.replace({ widget: new TasksQueryWidget(queryText, cached) }) });
+                // Blank-line guard — see the comment on the Table case above.
                 for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
                   const line = state.doc.line(ln);
-                  decs.push({ from: line.from, to: line.to,
-                    dec: Decoration.replace({}) });
+                  if (line.to > line.from) {
+                    decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
+                  }
                   lineDecs.push({ from: line.from,
-                    dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+                    dec: hiddenLineDeco('cm-table-row-hidden') });
                 }
               } catch (_) {}
               return false;
@@ -2354,12 +2412,14 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
                 try {
                   decs.push({ from: fromLine.from, to: fromLine.to,
                     dec: Decoration.replace({ widget: new DataviewJsWidget(scriptCode) }) });
+                  // Blank-line guard — see the comment on the Table case above.
                   for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
                     const line = state.doc.line(ln);
-                    decs.push({ from: line.from, to: line.to,
-                      dec: Decoration.replace({}) });
+                    if (line.to > line.from) {
+                      decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
+                    }
                     lineDecs.push({ from: line.from,
-                      dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+                      dec: hiddenLineDeco('cm-table-row-hidden') });
                   }
                 } catch (_) {}
                 return false;
@@ -2379,12 +2439,14 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
 
                 decs.push({ from: fromLine.from, to: fromLine.to,
                   dec: Decoration.replace({ widget: new DataviewQueryWidget(info, queryText, cached) }) });
+                // Blank-line guard — see the comment on the Table case above.
                 for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
                   const line = state.doc.line(ln);
-                  decs.push({ from: line.from, to: line.to,
-                    dec: Decoration.replace({}) });
+                  if (line.to > line.from) {
+                    decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
+                  }
                   lineDecs.push({ from: line.from,
-                    dec: Decoration.line({ class: 'cm-table-row-hidden' }) });
+                    dec: hiddenLineDeco('cm-table-row-hidden') });
                 }
               } catch (_) {}
               return false;
@@ -2405,7 +2467,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
                 // CodeInfo language text (e.g. "js" from ```js).
                 decs.push({ from: fenceLine.from, to: fenceLine.to, dec: Decoration.replace({}) });
                 lineDecs.push({ from: fenceLine.from,
-                  dec: Decoration.line({ class: 'cm-code-fence-hidden' }) });
+                  dec: hiddenLineDeco('cm-code-fence-hidden') });
               }
 
               const contentFromLn = fromLine.number + 1;
@@ -3579,7 +3641,22 @@ function moveVerticalByLine(view, dir, extend) {
     // exactly where the pixel/goal-column approach breaks, per the comment
     // above; jump by line number + character column instead, immune to it.
     const col = vGoalCol != null ? vGoalCol : (range.head - curLine.from);
-    const targetLineNum = Math.min(Math.max(curLine.number + dir, 1), state.doc.lines);
+    let targetLineNum = curLine.number + dir;
+    // Skip clean over a folded heading's content instead of landing inside
+    // it. foldAtomicRanges (see its own comment) covers CM6's own built-in
+    // navigation and mouse-click paths, but this function deliberately
+    // bypasses CM6's built-in vertical motion for cross-line moves (that's
+    // the whole reason it exists — see above), so it doesn't inherit that
+    // protection for free and needs the same check done here directly,
+    // against the same computeFoldedSpans single source of truth.
+    for (const span of computeFoldedSpans(state)) {
+      const spanFromLine = state.doc.lineAt(span.from).number;
+      const spanToLine = state.doc.lineAt(span.to).number;
+      if (targetLineNum >= spanFromLine && targetLineNum <= spanToLine) {
+        targetLineNum = dir > 0 ? spanToLine + 1 : spanFromLine - 1;
+      }
+    }
+    targetLineNum = Math.min(Math.max(targetLineNum, 1), state.doc.lines);
     const targetLine = state.doc.line(targetLineNum);
     newHead = targetLine.from + Math.min(col, targetLine.length);
     vGoalCol = col;
@@ -3884,6 +3961,33 @@ function collectHeadings(state) {
   return hs;
 }
 
+// Character-position spans of every currently-folded heading's *content*
+// (from just after the heading's own line through wherever that fold ends —
+// the next heading at the same or a shallower level, or end of document).
+// Factored out of foldPlugin's own _build() (which still uses it, unchanged,
+// for the per-line hide decorations) so the exact same computation can also
+// back an atomicRanges provider and moveVerticalByLine's own fold-aware line
+// jump — see the comments on both, below, for why folded content needing
+// real cursor-navigation protection (not just visual height:0 hiding) turned
+// out to need three separate consumers of this one source of truth, not one.
+function computeFoldedSpans(state, headings) {
+  headings = headings || collectHeadings(state);
+  const spans = [];
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (!foldedSet.has(h.lineFrom)) continue;
+    let foldEnd = state.doc.length;
+    for (let j = i + 1; j < headings.length; j++) {
+      if (headings[j].level <= h.level) {
+        foldEnd = headings[j].lineFrom > 0 ? headings[j].lineFrom - 1 : 0;
+        break;
+      }
+    }
+    if (foldEnd > h.lineTo) { spans.push({ from: h.lineTo + 1, to: foldEnd }); }
+  }
+  return spans;
+}
+
 const foldPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
@@ -3909,37 +4013,37 @@ const foldPlugin = ViewPlugin.fromClass(class {
       const headings = collectHeadings(state);
       const all = [], lineDecs = [];
 
-      for (let i = 0; i < headings.length; i++) {
-        const h = headings[i];
-        const folded = foldedSet.has(h.lineFrom);
-
+      for (const h of headings) {
         // Fold toggle widget — only for heading lines in viewport
         if (h.lineTo >= vf && h.lineFrom <= vt) {
           all.push({ from: h.lineFrom, to: h.lineFrom,
-            dec: Decoration.widget({ widget: new FoldToggle(h.lineFrom, folded), side: -1 }) });
+            dec: Decoration.widget({ widget: new FoldToggle(h.lineFrom, foldedSet.has(h.lineFrom)), side: -1 }) });
         }
+      }
 
-        if (!folded) continue;
-
-        // Find end of folded range: next heading at same or higher level
-        let foldEnd = state.doc.length;
-        for (let j = i + 1; j < headings.length; j++) {
-          if (headings[j].level <= h.level) {
-            foldEnd = headings[j].lineFrom > 0 ? headings[j].lineFrom - 1 : 0;
-            break;
-          }
-        }
-
-        // Collapse every line after the heading up to foldEnd
-        if (foldEnd > h.lineTo) {
-          const startLn = state.doc.lineAt(h.lineTo + 1).number;
-          const endLn   = state.doc.lineAt(foldEnd).number;
-          for (let ln = startLn; ln <= endLn; ln++) {
-            const line = state.doc.line(ln);
+      // Collapse every line within each currently-folded span.
+      // Blank-line guard — this was the actual root cause of the reported
+      // "folding a heading leaves a visible blank-space gap" bug (see the long
+      // comment on the Table case in livePreviewPlugin's own _build, above,
+      // for the full RangeSetBuilder diagnosis): a blank line's own
+      // Decoration.replace({}) push degenerates to a zero-length span at the
+      // exact same point as its Decoration.line hidden-line decoration, and
+      // only one of two decorations added at an identical point survives —
+      // silently dropping the line decoration (and its height:0 CSS) for
+      // every blank line in the folded span, while non-blank lines collapsed
+      // correctly. Confirmed with a real EditorView in jsdom (throwaway
+      // script, not checked in). Skipping the push for blank lines loses no
+      // behavior, since replacing a zero-length span is already a no-op.
+      for (const { from, to } of computeFoldedSpans(state, headings)) {
+        const startLn = state.doc.lineAt(from).number;
+        const endLn   = state.doc.lineAt(to).number;
+        for (let ln = startLn; ln <= endLn; ln++) {
+          const line = state.doc.line(ln);
+          if (line.to > line.from) {
             all.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
-            lineDecs.push({ from: line.from,
-              dec: Decoration.line({ class: 'cm-fold-hidden' }) });
           }
+          lineDecs.push({ from: line.from,
+            dec: hiddenLineDeco('cm-fold-hidden') });
         }
       }
 
@@ -3963,6 +4067,33 @@ const foldPlugin = ViewPlugin.fromClass(class {
   }
 }, { decorations: v => v.decorations });
 
+// Makes folded content a real cursor-navigation barrier, not just visually
+// height:0 — reported bug: the "collapsed" gap between a folded heading and
+// the next one was still fully navigable (click into it, arrow through it,
+// select and copy/delete it) purely because `.cm-fold-hidden`'s CSS zeroing
+// only ever hid *rendering*; the document positions themselves, including
+// every blank line separating paragraphs under the folded heading, were
+// still perfectly ordinary, selectable positions as far as CM6's own cursor
+// model was concerned. `EditorView.atomicRanges` is CM6's sanctioned fix for
+// exactly this: ranges registered here get skipped over by moveByChar/
+// moveVertically-based navigation (Home/End, arrow keys *routed through
+// CM6's own commands*) and by mouse-click/drag-selection placement (verified
+// by reading @codemirror/view's own source: pointer-driven selection changes
+// are explicitly passed through skipAtomsForSelection). What this does *not*
+// cover is moveVerticalByLine's own Up/Down handling below, which — for the
+// exact same decoration-driven goal-column corruption reasons documented on
+// that function — deliberately bypasses CM6's built-in vertical motion for
+// cross-line moves instead of using it, so it can't inherit atomicRanges
+// protection for free; it has its own fold-skipping logic instead, using
+// this same computeFoldedSpans.
+const foldAtomicRanges = EditorView.atomicRanges.of(view => {
+  const builder = new RangeSetBuilder();
+  for (const { from, to } of computeFoldedSpans(view.state)) {
+    if (to > from) { try { builder.add(from, to, Decoration.replace({})); } catch (_) {} }
+  }
+  return builder.finish();
+});
+
 // ── Source mode (Compartment) ─────────────────────────────────────────────────
 const previewCompartment = new Compartment();
 let sourceMode = false;
@@ -3983,6 +4114,7 @@ function createEditor(parent, content) {
       wikiLinkActivationTracker,
       previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]),
       foldPlugin,
+      foldAtomicRanges,
       linkClickHandler,
       hoverPreviewPlugin,
       wikiSuggestPlugin,
