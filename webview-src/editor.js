@@ -3375,7 +3375,26 @@ class WikiSuggestView {
     dom.appendChild(footer);
 
     dom.style.left = Math.max(0, coords.left - editorRect.left) + 'px';
-    dom.style.top = (coords.bottom - editorRect.top + 4) + 'px';
+
+    // Flip upward (draw from above the cursor's line, growing up) when there
+    // isn't enough room to draw downward without spilling past the visible
+    // editor pane — reported when the cursor sits near the tab's bottom edge,
+    // where the popup could end up partially or entirely clipped/off-screen.
+    // dom.offsetHeight forces a synchronous reflow to get the popup's real,
+    // just-built height — safe to read here (unlike inside a ViewPlugin's own
+    // update(), see WikiSuggestView's class comment) since this write()
+    // callback is exactly the phase CM6's own requestMeasure cycle sets aside
+    // for touching the DOM, and it's this popup's own detached subtree being
+    // measured, not any layout CM6 itself owns.
+    const GAP = 4;
+    const popupHeight = dom.offsetHeight;
+    const spaceBelow = editorRect.bottom - coords.bottom;
+    const spaceAbove = coords.top - editorRect.top;
+    if (popupHeight + GAP > spaceBelow && spaceAbove > spaceBelow) {
+      dom.style.top = (coords.top - editorRect.top - popupHeight - GAP) + 'px';
+    } else {
+      dom.style.top = (coords.bottom - editorRect.top + GAP) + 'px';
+    }
   }
 }
 
