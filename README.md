@@ -81,16 +81,23 @@ correctamente como directorio en Windows.
 
 ## Resolución y creación de wikilinks (`[[Nota]]`)
 
-- Sin ruta de desambiguación (`[[Nota]]`): se prioriza una nota con ese nombre en el
-  mismo directorio que la nota que contiene el enlace; si no existe, se busca en toda
-  la bóveda.
-- Con ruta de desambiguación (`[[carpeta/Nota]]`): se busca `Nota.md` cuyo directorio
-  padre inmediato se llame `carpeta` (no hace falta que sea la ruta completa).
+- La búsqueda es siempre **por toda la bóveda primero**, nunca limitada al directorio
+  de la nota que contiene el enlace ni a uno indicado como pista — eso incluye un
+  enlace dentro de una tarea listada por un bloque ` ```tasks `, cuyo destino puede
+  estar en cualquier directorio, sin relación con la nota que muestra el listado ni con
+  la nota donde vive esa tarea en concreto.
+- Sin ruta de desambiguación (`[[Nota]]`): si solo hay una nota con ese nombre en toda
+  la bóveda, es esa. Si hay varias, se prioriza la del mismo directorio que la nota que
+  contiene el enlace; si ninguna coincide, se usa la primera encontrada.
+- Con ruta de desambiguación (`[[carpeta/Nota]]`): si hay varias notas con ese nombre,
+  se prioriza la que esté dentro de un directorio llamado `carpeta` (no hace falta que
+  sea la ruta completa) — la ruta solo desempata entre varias, no limita la búsqueda a
+  ese directorio.
 - Con sección (`[[Nota#Encabezado]]`): al hacer clic, abre la nota y hace scroll hasta
   ese encabezado (de cualquier nivel, no solo `#`).
-- Si no se encuentra en ningún caso, se crea la nota en blanco: dentro del directorio
-  `carpeta` (creándolo si no existe) dentro del directorio actual, o directamente en
-  el directorio actual si no había ruta de desambiguación.
+- Solo si no existe **ninguna** nota con ese nombre en toda la bóveda se crea una en
+  blanco: dentro del directorio `carpeta` (creándolo si no existe) dentro del directorio
+  actual, o directamente en el directorio actual si no había ruta de desambiguación.
 - Autocompletado al escribir `[[`: busca notas por nombre; al añadir `#`, cambia a
   buscar encabezados de esa nota concreta, en el mismo orden en que aparecen en el
   documento.

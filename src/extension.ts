@@ -163,9 +163,10 @@ function getThemeCss(): string {
 //   - Not every `[[Note]]`/`[[folder/Note]]` naming the moved file's old name
 //     necessarily resolved to *this* file — another note could share that name
 //     elsewhere in the vault. `resolvesToOldTarget` replays `resolveNoteUri`'s
-//     exact same-directory-first / directory-hint resolution rules against a
-//     snapshot of the vault from just before the move (the current file list
-//     with the moved file's new path swapped back to its old one) to check.
+//     exact vault-wide-first / directory-hint-as-tiebreak resolution rules
+//     against a snapshot of the vault from just before the move (the current
+//     file list with the moved file's new path swapped back to its old one) to
+//     check.
 //   - Once a link is confirmed to target the moved file, its notePart is
 //     rewritten using the *new* location: no directory hint if the linking note
 //     and the moved note now share a directory, otherwise the moved note's new
@@ -183,21 +184,21 @@ function resolvesToOldTarget(
   const { noteName, dirHint } = splitDirHint(notePart);
   if (path.basename(oldFsPath, '.md').toLowerCase() !== noteName.toLowerCase()) { return false; }
 
-  if (!dirHint) {
-    const sameDirCandidate = path.join(linkingDir, noteName + '.md');
-    if (oldFileList.some(f => f.toLowerCase() === sameDirCandidate.toLowerCase())) {
-      return sameDirCandidate.toLowerCase() === oldFsPath.toLowerCase();
-    }
-    const candidates = oldFileList
-      .filter(f => path.basename(f, '.md').toLowerCase() === noteName.toLowerCase())
-      .sort();
-    return candidates.length > 0 && candidates[0].toLowerCase() === oldFsPath.toLowerCase();
+  const candidates = oldFileList.filter(f => path.basename(f, '.md').toLowerCase() === noteName.toLowerCase());
+  if (candidates.length === 0) { return false; }
+  if (candidates.length === 1) { return candidates[0].toLowerCase() === oldFsPath.toLowerCase(); }
+
+  // Multiple same-named notes existed pre-move — same tie-break order as resolveNoteUri:
+  // directory hint first, then same-directory-as-the-link, then a deterministic (sorted)
+  // first match, since there's no real `findFiles` order to replay against a static list.
+  if (dirHint) {
+    const dirMatch = candidates.find(f => path.basename(path.dirname(f)).toLowerCase() === dirHint.toLowerCase());
+    if (dirMatch) { return dirMatch.toLowerCase() === oldFsPath.toLowerCase(); }
   }
-  const candidates = oldFileList.filter(f =>
-    path.basename(f, '.md').toLowerCase() === noteName.toLowerCase() &&
-    path.basename(path.dirname(f)).toLowerCase() === dirHint.toLowerCase()
-  );
-  return candidates.some(f => f.toLowerCase() === oldFsPath.toLowerCase());
+  const sameDirMatch = candidates.find(f => path.dirname(f).toLowerCase() === linkingDir.toLowerCase());
+  if (sameDirMatch) { return sameDirMatch.toLowerCase() === oldFsPath.toLowerCase(); }
+  const sorted = [...candidates].sort();
+  return sorted[0].toLowerCase() === oldFsPath.toLowerCase();
 }
 
 const WIKI_TARGET_RE = /(!?)\[\[([^\]]+)\]\]/g;
@@ -295,18 +296,40 @@ function splitDirHint(notePart: string): { noteName: string; dirHint: string | n
   return { noteName, dirHint };
 }
 
+// Escapes glob metacharacters `findFiles`'s pattern would otherwise treat specially
+// (`[...]` character class, `{...}` brace expansion) so a literal note name containing
+// them (e.g. "Proyecto [2024]") is matched as plain text instead of silently failing to
+// match anything (or matching the wrong thing). `(`/`)`/`*`/`?` are deliberately left
+// alone — not special in a bare glob without a preceding extglob prefix (`@`/`!`/`+`), so
+// escaping them would be needless, and a real `*`/`?` in a note name is vanishingly rare
+// compared to brackets, which are common in project/date-tagged note names.
+function escapeGlob(name: string): string {
+  return name.replace(/[[\]{}]/g, '\\$&');
+}
+
+// Resolves a `[[wiki-link]]` target the same way Obsidian itself does: by filename,
+// searched across the *entire* vault, never scoped to just `currentDir` or a directory
+// hint — those only ever break a tie when more than one note shares the name, exactly
+// mirroring how `[[folder/Note]]` disambiguates in Obsidian rather than restricting the
+// search to that folder. A note that lives in some third, unrelated directory (neither
+// `currentDir` nor any dirHint) must still resolve here — this is what a "task listing
+// in note A links to a task in note B, whose own [[wikilink]] points at note C" click
+// needs, since the earlier `data-wiki-base` fix only got `currentDir` right (the task's
+// own note, B), not the vault-wide search this function does regardless of it.
 async function resolveNoteUri(notePart: string, currentDir: string): Promise<vscode.Uri | undefined> {
   const { noteName, dirHint } = splitDirHint(notePart);
-  if (!dirHint) {
-    // No disambiguation: prefer a note in the same directory as the link.
-    const sameDirCandidate = path.join(currentDir, noteName + '.md');
-    if (fs.existsSync(sameDirCandidate)) { return vscode.Uri.file(sameDirCandidate); }
-    const found = await vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**');
-    return found[0];
+  const found = await vscode.workspace.findFiles(`**/${escapeGlob(noteName)}.md`, '**/node_modules/**');
+  if (found.length === 0) { return undefined; }
+  if (found.length === 1) { return found[0]; }
+  // Multiple notes share this name — prefer an explicit directory hint first (Obsidian's
+  // own disambiguation mechanism), then a note in the same directory as the link, then
+  // just the first match rather than reporting "not found" over an arbitrary tie.
+  if (dirHint) {
+    const dirMatch = found.find(u => path.basename(path.dirname(u.fsPath)).toLowerCase() === dirHint.toLowerCase());
+    if (dirMatch) { return dirMatch; }
   }
-  // Disambiguation path given: match by the target's parent directory name.
-  const found = await vscode.workspace.findFiles(`**/${noteName}.md`, '**/node_modules/**');
-  return found.find(u => path.basename(path.dirname(u.fsPath)).toLowerCase() === dirHint.toLowerCase());
+  const sameDirMatch = found.find(u => path.dirname(u.fsPath) === currentDir);
+  return sameDirMatch ?? found[0];
 }
 
 // ATX headings only (# .. ######), skipping fenced code blocks so a "#" inside a
