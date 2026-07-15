@@ -617,6 +617,16 @@ const panelsByPath: Map<string, vscode.WebviewPanel> = new Map();
 // this cache is the only way `vaultTool.editTaskAtCursor` (below) can know which line to hand
 // off without re-implementing cursor tracking on the host side.
 const panelCursorLine: Map<vscode.WebviewPanel, number> = new Map();
+// Same idea, for `view.scrollDOM.scrollTop` (updated on every CM6 scroll — see editor.js).
+// Opening the "Create or edit Task" dialog (`showTaskEditDialog` in the Tasks extension) as a
+// `ViewColumn.Beside` tab steals focus from this panel for as long as it's open; on a long note,
+// that round trip was observed to leave the panel scrolled back to the top once the dialog
+// closed (both on Apply and on Cancel — even Cancel, which never touches the document, still
+// showed it, so the cause is the focus/visibility change itself, not the resulting edit).
+// Restoring the last-known scrollTop explicitly after the dialog closes (`edit-task-at-location`
+// and `vaultTool.editTaskAtCursor` below) fixes this regardless of the exact underlying
+// mechanism, the same defensive way `panelCursorLine` sidesteps not having a real `TextEditor`.
+const panelScrollTop: Map<vscode.WebviewPanel, number> = new Map();
 
 async function buildNoteIndex(): Promise<void> {
   try {
@@ -723,6 +733,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       if (i !== -1) { activePanels.splice(i, 1); }
       if (panelsByPath.get(document.uri.fsPath) === webviewPanel) { panelsByPath.delete(document.uri.fsPath); }
       panelCursorLine.delete(webviewPanel);
+      panelScrollTop.delete(webviewPanel);
     });
 
     const imgMap    = getImageMap(webviewPanel.webview, document.uri);
@@ -928,6 +939,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
         } else if (msg.type === 'cursor-position') {
           panelCursorLine.set(webviewPanel, msg.line as number);
+
+        } else if (msg.type === 'scroll-position') {
+          panelScrollTop.set(webviewPanel, msg.scrollTop as number);
 
         } else if (msg.type === 'sync') {
           applySync(msg.content as string);
@@ -1192,6 +1206,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           // result can point at any file in the vault, so there's no "current cursor" to fall
           // back on here; the row already carries the exact (path, line) to edit.
           (async () => {
+            // See the comment on `panelScrollTop` above: this panel (the one showing the note
+            // with the query block, which may or may not be the same note as the edited task)
+            // loses focus for as long as the dialog is open and was observed to come back
+            // scrolled to the top — save/restore around the call regardless of outcome.
+            const scrollTop = panelScrollTop.get(webviewPanel);
             try {
               const tasksApi = await getTasksApi();
               if (!tasksApi?.editTaskAtLocation) {
@@ -1203,6 +1222,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
               await tasksApi.editTaskAtLocation(msg.path as string, msg.line as number);
             } catch (err) {
               vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
+            } finally {
+              if (scrollTop != null) {
+                webviewPanel.webview.postMessage({ type: 'restore-scroll', scrollTop });
+              }
             }
           })();
 
@@ -1532,6 +1555,10 @@ export function activate(context: vscode.ExtensionContext) {
     const line = panelCursorLine.get(panel);
     if (!docPath || line == null) { return; }
 
+    // See the comment on `panelScrollTop` above: this panel loses focus for as long as the
+    // dialog is open (`ViewColumn.Beside`, `preserveFocus: false`) and was observed to come back
+    // scrolled to the top — save/restore around the call regardless of outcome (Apply/Cancel).
+    const scrollTop = panelScrollTop.get(panel);
     try {
       const tasksApi = await getTasksApi();
       if (!tasksApi?.editTaskAtLocation) {
@@ -1543,6 +1570,10 @@ export function activate(context: vscode.ExtensionContext) {
       await tasksApi.editTaskAtLocation(vscode.workspace.asRelativePath(vscode.Uri.file(docPath), false), line);
     } catch (err) {
       vscode.window.showErrorMessage(`No se pudo editar la tarea: ${err}`);
+    } finally {
+      if (scrollTop != null) {
+        panel.webview.postMessage({ type: 'restore-scroll', scrollTop });
+      }
     }
   });
 

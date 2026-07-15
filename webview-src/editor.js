@@ -3877,6 +3877,21 @@ const view = createEditor(container, init.content || '');
 currentView = view;
 view.focus();
 
+// Reported to the extension host (throttled via rAF) so `vaultTool.editTaskAtCursor` and the
+// tasks-query row edit button can restore it after the "Create or edit Task" dialog closes —
+// opening that dialog steals focus from this panel for as long as it's open (`ViewColumn.Beside`,
+// `preserveFocus: false`), and was observed to leave this view scrolled back to the top once it
+// closed, on both Apply and Cancel. See the `panelScrollTop` comment in extension.ts.
+let scrollReportScheduled = false;
+view.scrollDOM.addEventListener('scroll', () => {
+  if (scrollReportScheduled) return;
+  scrollReportScheduled = true;
+  requestAnimationFrame(() => {
+    scrollReportScheduled = false;
+    vscode.postMessage({ type: 'scroll-position', scrollTop: view.scrollDOM.scrollTop });
+  });
+});
+
 // CM6 measures line-height/character metrics once, early, using whatever font is
 // actually resolved at that moment. If the real font (custom `markdownFont`, or
 // one pulled in by the Obsidian theme CSS) finishes loading afterward, that cached
@@ -4090,6 +4105,14 @@ window.addEventListener('message', ev => {
       if (resolve) { pendingHeadingRequests.delete(msg.id); resolve(msg.headings || []); }
       break;
     }
+    case 'restore-scroll':
+      // Double rAF: this message can arrive right as the panel regains focus/visibility after the
+      // task-edit dialog closes, and a single frame wasn't always enough to land after whatever
+      // internal layout/scroll recalculation was resetting scrollTop in the first place.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => { view.scrollDOM.scrollTop = msg.scrollTop; });
+      });
+      break;
     case 'scroll-to-line': {
       const ln = Math.min(Math.max(1, (msg.line || 0) + 1), view.state.doc.lines);
       const line = view.state.doc.line(ln);
