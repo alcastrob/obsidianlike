@@ -258,6 +258,24 @@ bloque `dataviewjs` (uno que solo use `dv.table()`/`dv.list()` para un informe s
 yendo por la ruta de `obsidianlike-dataview` de arriba, sin cambios. Detalle técnico completo en
 `CLAUDE.md`.
 
+### Ordenar y filtrar una tabla `dataview` al estilo Excel
+
+Cualquier tabla renderizada por un bloque ` ```dataview `/` ```dql ` (`TABLE ...`) se puede
+ordenar y filtrar directamente en el editor, sin tocar la consulta:
+
+- **Ordenar**: clic en el texto de una columna para ordenar ascendente, otro clic para
+  descendente, un tercero para volver al orden original. Detecta números automáticamente (`2`
+  antes que `10`, no alfabéticamente).
+- **Filtrar**: el botón `▾` junto a cada columna abre un desplegable con un buscador y una
+  casilla por cada valor distinto de esa columna (con "Seleccionar todo") — igual que el
+  autofiltro de Excel/Google Sheets, incluyendo que la lista de valores de una columna se
+  actualiza según los filtros ya aplicados en las demás.
+
+Es puramente visual: no cambia ni vuelve a ejecutar la consulta DQL, así que es instantáneo y
+funciona igual sin conexión con `obsidianlike-dataview`. Al llegar un resultado nuevo (la nota
+cambió, u otra nota del vault que afecta a la consulta) el orden/filtro se reinicia — no se
+intenta reaplicar sobre datos distintos.
+
 ## Compatibilidad multiplataforma (Windows / macOS)
 
 La búsqueda del tema de Obsidian configurado (`obsidianLike.obsidianTheme`) es
