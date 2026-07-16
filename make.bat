@@ -41,6 +41,12 @@ ECHO CODE 7
 call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidianlike-dbfolder
 call code --profile "Obsidian like" --install-extension obsidianlike-dbfolder-0.1.0.vsix
 
+cd ..\obsidianlike_imageToolkit
+call npm run package
+ECHO CODE 8
+call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidianlike-imagetoolkit
+call code --profile "Obsidian like" --install-extension obsidianlike-imagetoolkit-0.0.1.vsix
+
 cd ..\obsidianlike
 ECHO Matas
 taskkill /IM code.exe /F

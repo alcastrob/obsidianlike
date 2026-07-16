@@ -65,6 +65,12 @@ usa una sintaxis YAML que el analizador no reconoce con seguridad (comentarios,
 mapas anidados, anclas...), se deja el texto en crudo tal cual en vez de
 arriesgarse a corromperlo al guardar.
 
+El panel se muestra pegado a la parte de arriba de la nota (sin el hueco que deja el resto de
+notas por el margen superior del editor). El cursor no se puede colocar dentro del frontmatter de
+ninguna forma — ni haciendo clic sobre él ni con las flechas subir/bajar desde la primera línea de
+contenido real — ya que la edición pasa siempre por los controles del propio panel, nunca por el
+texto YAML subyacente en vista previa.
+
 ## Resolución de imágenes (`![[archivo.png]]`)
 
 1. Se busca primero en la carpeta de adjuntos configurada (`obsidianLike.attachmentsLocation` /
@@ -115,6 +121,19 @@ correctamente como directorio en Windows.
   sale de sus corchetes externos, momento en el que vuelve a la vista normal. Si hay
   varios `[[enlaces]]` en la misma línea, el resto se sigue mostrando renderizado
   normalmente aunque uno esté activado.
+
+## Enlaces a `.docx`, `.xlsx` y `.pdf`
+
+Un wikilink a un fichero de estos tres tipos (`[[informe.docx]]`, `[[presupuesto.xlsx]]`,
+`[[manual.pdf]]`) no intenta abrirse como una nota: al hacer clic, se busca el fichero por toda la
+bóveda (mismas reglas de desambiguación con `carpeta/` que un wikilink normal) y se abre con la
+aplicación que tenga configurada el sistema operativo — Word, Excel, el lector de PDF que sea, lo
+que corresponda. Si el fichero no aparece en la bóveda, se muestra un aviso en vez de crear nada
+(a diferencia de un `[[wikilink]]` normal, no tiene sentido crear un `.docx` en blanco).
+
+Un `![[...]]` (embed) de uno de estos tres tipos se muestra como una caja pequeña con el nombre del
+fichero, clicable de la misma forma — no como texto incrustado, ya que no hay nada de markdown que
+renderizar.
 
 ## Transclusiones (`![[nota]]`, `![[carpeta/nota]]`, `![[nota#sección]]`)
 
@@ -221,6 +240,23 @@ la lógica de parseo/recurrencia/queries/edición vive ahí — Obsidian-like so
 reenvía los clics (`toggle-task`/`toggle-task-at-location` para el checkbox,
 `edit-task-at-location` para el botón de editar de una fila). Detalle técnico completo en
 `CLAUDE.md`.
+
+## Tablas Markdown
+
+Una tabla ` | así | ` se renderiza como una tabla real, y se edita directamente sobre ella: haz
+clic en cualquier celda y escribe — no hace falta ver ni tocar los `|` de la sintaxis en ningún
+momento. `Tab`/`Mayús+Tab` mueven el cursor a la celda siguiente/anterior; `Intro` baja a la misma
+columna en la fila de abajo. Tabular más allá de la última celda de la última fila (o pulsar Intro
+en la última fila) añade una fila nueva en blanco automáticamente, para poder seguir rellenando la
+tabla sin salir del teclado.
+
+Clic derecho sobre una celda abre un menú para añadir/eliminar la fila o columna bajo el cursor;
+clic derecho en cualquier otro punto del editor ofrece crear una tabla nueva. Este menú propio
+sustituye al menú contextual nativo de VS Code dentro del editor (no hay forma de añadir un ítem al
+menú nativo desde un webview), así que también incluye Cortar/Copiar/Pegar para no perder esas
+opciones — los atajos de teclado (`Ctrl+C`/`X`/`V`) siguen funcionando igual que siempre, esto es
+solo para cuando se usa el botón derecho. No hay barra de herramientas para esto — es, igual que en
+Obsidian, el único punto de entrada para gestionar filas y columnas.
 
 ## Dataview (` ```dataview ` / ` ```dql ` / ` ```dataviewjs `) — integración con "Obsidian-like Dataview"
 

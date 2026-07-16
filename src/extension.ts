@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFile } from 'child_process';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -347,6 +348,55 @@ async function resolveNoteUri(notePart: string, currentDir: string): Promise<vsc
   return sameDirMatch ?? found[0];
 }
 
+// Same shape as resolveNoteUri, for a `[[file.docx]]`/`[[file.xlsx]]`/`[[file.pdf]]`
+// wiki-link/embed target (see EXTERNAL_FILE_EXT in editor.js) — the one
+// difference is the glob pattern searches for `notePart` *as-is*, with no
+// `.md` appended, since the target already names the real file including its
+// own extension.
+async function resolveExternalFileUri(notePart: string, currentDir: string): Promise<vscode.Uri | undefined> {
+  const { noteName, dirHint } = splitDirHint(notePart);
+  const found = await vscode.workspace.findFiles(`**/${escapeGlob(noteName)}`, '**/node_modules/**');
+  if (found.length === 0) { return undefined; }
+  if (found.length === 1) { return found[0]; }
+  if (dirHint) {
+    const dirMatch = found.find(u => path.basename(path.dirname(u.fsPath)).toLowerCase() === dirHint.toLowerCase());
+    if (dirMatch) { return dirMatch; }
+  }
+  const sameDirMatch = found.find(u => path.dirname(u.fsPath) === currentDir);
+  return sameDirMatch ?? found[0];
+}
+
+// Opens a local file with whatever the OS has registered as its default
+// application. `vscode.env.openExternal(Uri.file(...))` — the "correct",
+// documented way to do this — was tried first, but reported (both for a
+// .pdf and a .docx target, on Windows) as failing with "El sistema no puede
+// encontrar el archivo especificado (0x2)" even though the resolved path was
+// genuinely correct and openable directly from Explorer; a known reliability
+// gap in how `openExternal` hands a local file:// URI off to the OS shell on
+// some Windows configurations, not a bug in this extension's own path
+// resolution. Spawning the OS's native "open" mechanism directly is the
+// standard, more reliable workaround for this exact scenario in Electron-
+// based tooling. `execFile` (not `exec`) is deliberate — arguments are
+// passed as an array, never concatenated into a shell command string, so a
+// filename containing spaces or shell-metacharacters (quotes, `&`, `%`, ...)
+// can't corrupt the command or be (mis)interpreted by a shell at all.
+function openFileWithOsDefaultApp(fsPath: string): void {
+  const fail = (err: Error) =>
+    vscode.window.showErrorMessage(`No se pudo abrir "${path.basename(fsPath)}": ${err.message}`);
+  if (process.platform === 'win32') {
+    // "start" is a cmd.exe built-in, not its own executable, so cmd.exe is
+    // the process actually spawned; start's own argument convention treats
+    // the first quoted argument as a window title, hence the empty "" — a
+    // real path there instead would be misread as the title and the actual
+    // path as a *second*, ignored argument if it contains spaces.
+    execFile('cmd.exe', ['/c', 'start', '""', fsPath], (err) => { if (err) fail(err); });
+  } else if (process.platform === 'darwin') {
+    execFile('open', [fsPath], (err) => { if (err) fail(err); });
+  } else {
+    execFile('xdg-open', [fsPath], (err) => { if (err) fail(err); });
+  }
+}
+
 // ATX headings only (# .. ######), skipping fenced code blocks so a "#" inside a
 // code sample isn't mistaken for a heading. `line` is the 0-based document line
 // number, directly usable with `TextDocument.lineAt()` / the webview's scroll-to-line.
@@ -627,6 +677,107 @@ async function ensureSubscribedToDataviewChanges(retriesLeft = 5): Promise<void>
   });
 }
 
+// ── Image Toolkit soft dependency ────────────────────────────────────────────
+// Same soft-dependency shape as Tasks/Dataview above, but with one structural
+// difference: those two hand back a value the *host* renders into HTML/DTOs
+// itself. This sibling ("angelCastro.obsidianlike-imagetoolkit", repo
+// c:\git\obsidianlike_imageToolkit) instead owns a whole click-to-zoom/pan/
+// rotate/... *webview* script — its DOM lives inside this editor's own
+// webview, which is something only this host can inject (two extensions'
+// webviews can't share a document). So `getImageToolkitApi()` only hands over
+// *where* that script/stylesheet live on disk and *what* the current settings
+// are; `resolveCustomTextEditor` below is the one that adds those paths to
+// `localResourceRoots`, converts them to webview URIs, and posts them to the
+// webview to be loaded as a real <script>/<link> tag (see the
+// `load-image-toolkit` handler in webview-src/editor.js).
+interface ImageToolkitWebviewAssets { scriptPath: string; stylePath: string; }
+interface ImageToolkitApi {
+  getWebviewAssets(): ImageToolkitWebviewAssets;
+  getSettings(): Record<string, unknown>;
+  onDidChangeSettings: vscode.Event<void>;
+}
+
+let imageToolkitApiPromise: Promise<ImageToolkitApi | undefined> | undefined;
+// Same "retry on failure, cache on success" reasoning as getTasksApi()/getDataviewApi() above.
+function getImageToolkitApi(): Promise<ImageToolkitApi | undefined> {
+  if (!imageToolkitApiPromise) {
+    imageToolkitApiPromise = (async () => {
+      const ext = vscode.extensions.getExtension('angelCastro.obsidianlike-imagetoolkit');
+      if (!ext) { imageToolkitApiPromise = undefined; return undefined; }
+      try { return (await ext.activate()) as ImageToolkitApi; }
+      catch { imageToolkitApiPromise = undefined; return undefined; }
+    })();
+  }
+  return imageToolkitApiPromise;
+}
+
+// The asset *paths* are static for the lifetime of the install (they don't depend on which
+// document/panel is open), so they're resolved once process-wide and reused by every panel's
+// localResourceRoots instead of re-activating the sibling extension per panel.
+let imageToolkitAssetRoots: vscode.Uri[] = [];
+let imageToolkitAssetsPromise: Promise<ImageToolkitWebviewAssets | undefined> | undefined;
+function getImageToolkitAssets(): Promise<ImageToolkitWebviewAssets | undefined> {
+  if (!imageToolkitAssetsPromise) {
+    imageToolkitAssetsPromise = (async () => {
+      const api = await getImageToolkitApi();
+      if (!api) { return undefined; }
+      const assets = api.getWebviewAssets();
+      imageToolkitAssetRoots = [
+        vscode.Uri.file(path.dirname(assets.scriptPath)),
+        vscode.Uri.file(path.dirname(assets.stylePath)),
+      ];
+      return assets;
+    })();
+  }
+  return imageToolkitAssetsPromise;
+}
+
+// Broadcasts fresh settings to every open panel whenever the user changes an
+// `obsidianlikeImageToolkit.*` setting, mirroring ensureSubscribedTo{Tasks,Dataview}Changes()'s
+// retry-on-cold-start-race reasoning above.
+let subscribedToImageToolkitChanges = false;
+async function ensureSubscribedToImageToolkitChanges(retriesLeft = 5): Promise<void> {
+  if (subscribedToImageToolkitChanges) { return; }
+  const api = await getImageToolkitApi();
+  if (!api?.onDidChangeSettings) {
+    if (retriesLeft > 0) {
+      setTimeout(() => { void ensureSubscribedToImageToolkitChanges(retriesLeft - 1); }, 1500);
+    }
+    return;
+  }
+  subscribedToImageToolkitChanges = true;
+  api.onDidChangeSettings(() => {
+    const settings = api.getSettings();
+    activePanels.forEach(p => { try { p.webview.postMessage({ type: 'image-toolkit-settings', settings }); } catch {} });
+  });
+}
+
+// Injects the Image Toolkit's webview script/stylesheet into one already-open panel: extends its
+// localResourceRoots, then posts `load-image-toolkit` so editor.js appends the actual <script>/
+// <link> tags. Split out of resolveCustomTextEditor (rather than awaited inline there) because
+// getImageToolkitAssets() depends on activating another extension, which resolveCustomTextEditor
+// itself can't block on without delaying every document's first paint on the (common, negligible
+// once cached) case where the sibling extension isn't installed at all.
+async function injectImageToolkitIfAvailable(webviewPanel: vscode.WebviewPanel, docUri: vscode.Uri): Promise<void> {
+  const assets = await getImageToolkitAssets();
+  if (!assets) { return; }
+  const api = await getImageToolkitApi();
+  if (!api) { return; }
+  webviewPanel.webview.options = {
+    enableScripts: true,
+    localResourceRoots: [
+      vscode.Uri.joinPath(extensionUri, 'out'),
+      ...getAttachmentRoots(docUri),
+      ...imageToolkitAssetRoots,
+    ],
+  };
+  const scriptUri = webviewPanel.webview.asWebviewUri(vscode.Uri.file(assets.scriptPath)).toString();
+  const styleUri  = webviewPanel.webview.asWebviewUri(vscode.Uri.file(assets.stylePath)).toString();
+  try {
+    webviewPanel.webview.postMessage({ type: 'load-image-toolkit', scriptUri, styleUri, settings: api.getSettings() });
+  } catch { /* panel disposed before this resolved */ }
+}
+
 // Fallback used when the Tasks extension isn't installed/active: a plain [ ]/[x]
 // flip with no recurrence handling.
 function naiveToggleTaskLine(lineText: string): string[] {
@@ -736,6 +887,8 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
   ): void {
     void ensureSubscribedToTasksChanges();
     void ensureSubscribedToDataviewChanges();
+    void ensureSubscribedToImageToolkitChanges();
+    void injectImageToolkitIfAvailable(webviewPanel, document.uri);
     recordNoteOpened(document.uri.fsPath);
     broadcastRecentNotes();
 
@@ -761,6 +914,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       localResourceRoots: [
         vscode.Uri.joinPath(extensionUri, 'out'),
         ...getAttachmentRoots(document.uri),
+        ...imageToolkitAssetRoots,
       ],
     };
 
@@ -899,6 +1053,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             localResourceRoots: [
               vscode.Uri.joinPath(extensionUri, 'out'),
               ...getAttachmentRoots(document.uri),
+              ...imageToolkitAssetRoots,
             ],
           };
         }
@@ -1027,6 +1182,31 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           const baseDirOverride =
             basePathRel && vaultRoot ? path.dirname(path.join(vaultRoot, basePathRel)) : undefined;
           if (raw) { void navigateToTarget(raw, document.uri, webviewPanel, true, baseDirOverride); }
+
+        } else if (msg.type === 'open-external-file') {
+          // Sent instead of open-note for a [[file.docx]]/[[file.xlsx]]/[[file.pdf]]
+          // wiki-link or a ![[...]] embed of one (see EXTERNAL_FILE_EXT/
+          // ExternalFileWidget in editor.js) — there's nothing to open *as a note*
+          // here, so this hands the resolved file straight to the OS's own default
+          // application (see openFileWithOsDefaultApp's own comment for why that's
+          // a direct OS-shell spawn rather than vscode.env.openExternal) rather
+          // than routing it through vscode.openWith/navigateToTarget's
+          // markdown-editor machinery.
+          (async () => {
+            const raw = (msg.name as string || '').trim();
+            if (!raw) { return; }
+            const basePathRel = (msg.basePath as string | undefined)?.trim();
+            const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const currentDir = basePathRel && vaultRoot
+              ? path.dirname(path.join(vaultRoot, basePathRel))
+              : path.dirname(document.uri.fsPath);
+            const targetUri = await resolveExternalFileUri(raw, currentDir);
+            if (!targetUri) {
+              vscode.window.showWarningMessage(`No se encontró el fichero "${raw}" en la bóveda.`);
+              return;
+            }
+            openFileWithOsDefaultApp(targetUri.fsPath);
+          })();
 
         } else if (msg.type === 'open-transclusion') {
           // Same navigation as open-note, except a transclusion pointing at a note
@@ -1357,7 +1537,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
        block's own text via new Function(...) -- same trust level as Obsidian itself already
        gives that content, not a new exposure. -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; img-src ${cspSource} data: blob:; script-src ${cspSource} 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline';">
+        content="default-src 'none'; img-src ${cspSource} data: blob:; script-src ${cspSource} 'unsafe-inline' 'unsafe-eval'; style-src ${cspSource} 'unsafe-inline';">
   <style>
     html, body {
       height: 100%; margin: 0; overflow: hidden;

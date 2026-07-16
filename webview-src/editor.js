@@ -117,10 +117,15 @@ const vsTheme = EditorView.theme({
     display: 'inline-block', width: '1.2em',
     color: 'var(--text-muted, inherit)',
   },
-  // YAML frontmatter "Properties" panel (PropertiesWidget).
+  // YAML frontmatter "Properties" panel (PropertiesWidget). PropertiesWidget
+  // only ever renders on line 1 (parseFrontmatter requires it), so this
+  // negative top margin — pulling it up into `.cm-content`'s own 16px top
+  // padding — is always safe/correctly scoped without any extra "is this
+  // actually the first block" check: there's nothing above it to collide
+  // with when it exists at all.
   '.cm-properties': {
     display: 'block',
-    margin: '4px 0 18px',
+    margin: '-8px 0 18px',
     paddingBottom: '4px',
     borderBottom: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.25)))',
     fontSize: '0.88em',
@@ -198,14 +203,44 @@ const vsTheme = EditorView.theme({
   // let each glyph's own oversized metrics dictate the box, which is exactly
   // what made icons of different sizes/paddings misalign against the checkbox
   // and against each other in a list of mixed-status tasks).
+  // `!important` on every property here for the same reason `.cm-code-block`
+  // above needs it: an Obsidian vault theme's own CSS (`obsidianLike.obsidianTheme`)
+  // loads *after* this, into a later <style> tag (see the theme-css postMessage
+  // comment there), and a real-world theme ("Border") was reported to make every
+  // one of these icons (in-progress, delegated, done, cancelled — i.e. every
+  // status *except* the plain unchecked checkbox, which isn't this rule at all)
+  // invisible. Border wasn't inspected directly (its CSS lives in the user's own
+  // vault, not this repo), but this is the exact same class of bug already fixed
+  // for `.cm-code-block`/`.cm-table-row-hidden`/etc. below: a theme commonly
+  // resets generic inline/list-content styling (`display`, `font-size`, `color`)
+  // site-wide, and normal CSS specificity doesn't help against a theme rule using
+  // its own `!important` — only out-`!important`-ing it reliably wins regardless
+  // of what a given theme's selector happens to be.
+  // `width`/`height`/`font-size` deliberately use `calc(var(--md-font-size) * N)`
+  // instead of a plain `Nem`: `em` on `font-size` is relative to the *parent's*
+  // computed font-size, and a theme resetting font-size broadly on generic inline
+  // elements (a bare `span` selector, say) would zero out this icon's own
+  // `!important`-but-still-relative `0.7em` right along with it — confirmed with a
+  // synthetic worst-case theme in headless Chrome (a `span { font-size: 0
+  // !important }` rule reduced this icon to `0px` even with the em value itself
+  // marked `!important`, since `!important` only protects *which* declaration
+  // wins, not what a relative unit resolves against). `--md-font-size` is a CSS
+  // custom property set once on `document.documentElement` (`root.style.setProperty`
+  // near this file's init code) — custom properties aren't reset by any `font-size`
+  // declaration, however broad, so this stays correct regardless of what a theme
+  // does to actual font-size values on ancestor elements.
   '.cm-task-status-icon': {
-    display: 'inline-flex',
+    display: 'inline-flex !important',
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
-    width: '1em', height: '1em',
-    fontSize: '0.7em',
-    lineHeight: '1',
+    width: 'calc(var(--md-font-size, 14px) * 1) !important',
+    height: 'calc(var(--md-font-size, 14px) * 1) !important',
+    fontSize: 'calc(var(--md-font-size, 14px) * 0.7) !important',
+    lineHeight: '1 !important',
+    color: 'initial !important',
+    opacity: '1 !important',
+    visibility: 'visible !important',
   },
   '.cm-task-overdue': {
     color: 'var(--text-error, #e06c75)',
@@ -712,6 +747,28 @@ const vsTheme = EditorView.theme({
     fontSize: '0.9em',
   },
   '.cm-transclusion-error': { color: 'var(--text-error, #e06c75)' },
+  // ![[file.docx/.xlsx/.pdf]] embed (ExternalFileWidget) — a compact,
+  // clickable box naming the file, opening it with the OS's default
+  // application on click rather than trying to render it inline.
+  '.cm-external-file': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35)))',
+    borderRadius: '6px',
+    background: 'var(--table-row-alt-background, rgba(128,128,128,0.04))',
+    padding: '6px 12px',
+    margin: '4px 0 10px',
+    cursor: 'pointer',
+  },
+  '.cm-external-file:hover': {
+    background: 'var(--vscode-list-hoverBackground, rgba(128,128,128,0.14))',
+  },
+  '.cm-external-file-icon': { fontSize: '1.1em' },
+  '.cm-external-file-name': {
+    textDecoration: 'underline',
+    color: 'var(--link-color, var(--vscode-textLink-foreground, #4a9eff))',
+  },
   // [[ ]] wiki-link suggester (see WikiSuggestView) — a plain floating DOM
   // element appended as a child of `.cm-editor` (view.dom, which CM6 already
   // gives `position: relative`) and positioned with plain absolute offsets
@@ -814,6 +871,11 @@ const vsTheme = EditorView.theme({
   '.cm-table-menu-item:hover': {
     background: 'var(--vscode-list-hoverBackground, rgba(128,128,128,0.18))',
   },
+  '.cm-table-menu-item.is-disabled': {
+    opacity: '0.45',
+    cursor: 'default',
+  },
+  '.cm-table-menu-item.is-disabled:hover': { background: 'transparent' },
   '.cm-table-menu-sep': {
     height: '1px',
     margin: '4px 0',
@@ -1204,17 +1266,75 @@ function deleteTableColumn(t, colIndex) {
   for (const row of t.rows) row.splice(colIndex, 1);
 }
 
+// A table cell is directly `contentEditable` — typing into it commits straight back to the
+// document (via `mutateTableAt`, same helper the row/column context-menu actions already use),
+// instead of the table ever falling back to raw `| pipe | source |` text the way it used to
+// whenever the cursor landed on one of its lines. Cells intentionally show plain, unformatted
+// text rather than `renderCell`'s rendered HTML (bold/links/tags/wikilinks) while this widget is
+// active — a contentEditable region holding rendered sub-elements makes "what does typing/
+// backspace do to the underlying markdown" far harder to get right (and easy to silently corrupt
+// on commit, since committing has to turn edited HTML back into markdown, not just read
+// `textContent`), and plain text editing here is also just how Obsidian's own Live Preview treats
+// a table cell being edited — rich rendering only reappears once you actually run a query/render
+// pass elsewhere (this extension has no per-cell focus/blur formatted<->raw toggle at all, on
+// purpose, to keep the round-trip simple and robust).
+function commitTableCell(view, tableFrom, isHeader, rowIndex, colIndex, value) {
+  mutateTableAt(view, tableFrom + 1, t => {
+    if (isHeader) { t.header[colIndex] = value; }
+    else if (t.rows[rowIndex]) { t.rows[rowIndex][colIndex] = value; }
+  });
+}
+
+// Finds the (possibly just-rebuilt, after a commit above triggered a redecoration) cell at
+// (rowIndex, colIndex) within the table starting at `tableFrom`, and focuses it — used by
+// Tab/Shift+Tab/Enter navigation, which must re-query the DOM after each commit rather than
+// holding onto the cell element it started from, since that element's own table widget was just
+// torn down and replaced (its `eq()` no longer matches once the underlying text changed).
+function focusTableCell(view, tableFrom, isHeader, rowIndex, colIndex) {
+  const tableEl = view.dom.querySelector(`table.cm-table[data-table-from="${tableFrom}"]`);
+  if (!tableEl) return;
+  const selector = isHeader ? `th[data-col="${colIndex}"]` : `td[data-col="${colIndex}"]`;
+  const scope = isHeader ? tableEl.querySelector('thead') : tableEl.querySelector(`tbody tr[data-row="${rowIndex}"]`);
+  const cell = scope && scope.querySelector(selector);
+  if (cell) {
+    cell.focus();
+    // Place the caret at the end rather than leaving it at the browser's default (start) —
+    // matches where you'd expect to land after tabbing/entering into a fresh cell.
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}
+
 class TableWidget extends WidgetType {
-  constructor(src) { super(); this.src = src; }
-  eq(other) { return this.src === other.src; }
+  constructor(view, from, src) { super(); this.view = view; this.from = from; this.src = src; }
+  eq(other) { return this.from === other.from && this.src === other.src; }
   toDOM() {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'overflow-x:auto;margin:4px 0 10px;width:100%;display:block;';
 
     const t = parseTableSrc(this.src);
     if (!t) {
+      // Unparseable as a table (shouldn't normally happen — `parseTableSrc` only needs a
+      // header + delimiter line pair — but if it ever does, this stays editable as plain text
+      // rather than stranding the user with no way to fix it up from the rendered view: on blur,
+      // whatever was typed is written back as-is (not re-parsed as a table), so it's always at
+      // least *some* valid document content, just not necessarily a table anymore.
       wrap.style.cssText += 'white-space:pre;font-family:monospace;opacity:0.75;';
+      wrap.contentEditable = 'true';
       wrap.textContent = this.src;
+      wrap.dataset.tableFrom = String(this.from);
+      wrap.addEventListener('mousedown', e => e.stopPropagation());
+      wrap.addEventListener('blur', () => {
+        const value = wrap.textContent;
+        if (value === this.src) return;
+        const range = findTableRangeAt(this.view.state, this.from + 1);
+        if (!range) return;
+        this.view.dispatch({ changes: { from: range.fromLine.from, to: range.toLine.to, insert: value } });
+      });
       return wrap;
     }
 
@@ -1227,18 +1347,86 @@ class TableWidget extends WidgetType {
     const table = document.createElement('table');
     // `cm-table` marks this as *our* rendered table for tableContextMenuHandler
     // below, so a right-click can be routed to row/column management instead
-    // of the generic "create table" item.
+    // of the generic "create table" item. `data-table-from` lets cell-navigation
+    // (focusTableCell above) re-find this exact table after a commit rebuilds it.
     table.className = 'cm-table';
+    table.dataset.tableFrom = String(this.from);
     table.style.cssText =
       'border-collapse:collapse;width:100%;font-size:inherit;font-family:inherit;color:inherit;';
+
+    const colCount = t.header.length;
+    const lastRowIndex = t.rows.length - 1;
+
+    // Shared keydown/blur wiring for both `<th>` and `<td>` cells — `isHeader`/`rowIndex`/`colIndex`
+    // identify the cell being edited, `nextCoords()` computes where Tab/Enter should land (and
+    // whether a new row needs inserting first, when tabbing/entering past the last cell/row).
+    const wireCell = (cell, isHeader, rowIndex, colIndex) => {
+      cell.contentEditable = 'true';
+      cell.dataset.col = String(colIndex);
+      cell.addEventListener('mousedown', e => e.stopPropagation());
+
+      const commitAndGo = (nextIsHeader, nextRow, nextCol, insertRowFirst) => {
+        const value = cell.textContent;
+        if (insertRowFirst) {
+          mutateTableAt(this.view, this.from + 1, tt => {
+            if (isHeader) { tt.header[colIndex] = value; } else { tt.rows[rowIndex][colIndex] = value; }
+            insertTableRow(tt, tt.rows.length);
+          });
+        } else if (value !== (isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex])) {
+          commitTableCell(this.view, this.from, isHeader, rowIndex, colIndex, value);
+        }
+        focusTableCell(this.view, this.from, nextIsHeader, nextRow, nextCol);
+      };
+
+      cell.addEventListener('blur', () => {
+        const value = cell.textContent;
+        if (value !== (isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex])) {
+          commitTableCell(this.view, this.from, isHeader, rowIndex, colIndex, value);
+        }
+      });
+
+      cell.addEventListener('keydown', e => {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          if (e.shiftKey) {
+            if (isHeader) { if (colIndex > 0) commitAndGo(true, -1, colIndex - 1, false); return; }
+            if (colIndex > 0) { commitAndGo(false, rowIndex, colIndex - 1, false); return; }
+            if (rowIndex > 0) { commitAndGo(false, rowIndex - 1, colCount - 1, false); return; }
+            commitAndGo(true, -1, colCount - 1, false);
+            return;
+          }
+          if (colIndex < colCount - 1) {
+            commitAndGo(isHeader ? true : false, isHeader ? -1 : rowIndex, colIndex + 1, false);
+            return;
+          }
+          if (isHeader) {
+            if (t.rows.length > 0) { commitAndGo(false, 0, 0, false); } else { commitAndGo(false, 0, 0, true); }
+            return;
+          }
+          if (rowIndex < lastRowIndex) { commitAndGo(false, rowIndex + 1, 0, false); return; }
+          commitAndGo(false, rowIndex + 1, 0, true); // past the last cell of the last row: grow the table
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          if (isHeader) {
+            if (t.rows.length > 0) { commitAndGo(false, 0, colIndex, false); } else { commitAndGo(false, 0, colIndex, true); }
+            return;
+          }
+          if (rowIndex < lastRowIndex) { commitAndGo(false, rowIndex + 1, colIndex, false); return; }
+          commitAndGo(false, rowIndex + 1, colIndex, true); // past the last row: grow the table
+        } else if (e.key === 'Escape') {
+          cell.textContent = isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex];
+          cell.blur();
+        }
+      });
+    };
 
     const thead = document.createElement('thead');
     const hRow  = document.createElement('tr');
     t.header.forEach((h, i) => {
       const th = document.createElement('th');
       th.style.cssText = CELL + TH_EXTRA + `text-align:${aligns[i] || 'left'};`;
-      th.dataset.col = String(i);
-      th.innerHTML = renderCell(h);
+      th.textContent = h;
+      wireCell(th, true, -1, i);
       hRow.appendChild(th);
     });
     thead.appendChild(hRow);
@@ -1252,8 +1440,8 @@ class TableWidget extends WidgetType {
       row.forEach((cell, i) => {
         const td = document.createElement('td');
         td.style.cssText = CELL + `text-align:${aligns[i] || 'left'};`;
-        td.dataset.col = String(i);
-        td.innerHTML = renderCell(cell);
+        td.textContent = cell;
+        wireCell(td, false, ri, i);
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
@@ -2774,6 +2962,15 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           //   Lines 2..N:      Decoration.replace({}) to empty + Decoration.line
           //                    to collapse height to 0.
           // The widget uses inline styles so it renders without CM6 class scoping.
+          // Rendered unconditionally — *not* gated behind `!isActive` the way this used to be
+          // (and the way most other live-preview elements still are): every `<td>`/`<th>` TableWidget
+          // renders is itself `contentEditable`, committing edits straight back to the document via
+          // `mutateTableAt` (see TableWidget/commitTableCell above) the same way `PropertiesWidget`'s
+          // real `<input>`s already do for frontmatter — so there's no more "reveal raw `| pipe |`
+          // source to let you edit it" fallback to fall back to. Reported as "can't fill a table with
+          // data — the cursor landing on any of its lines just drops into raw markdown mode instead of
+          // letting me type into a cell," which was this `isActive` check doing exactly what it was
+          // written to do, for a widget that (until now) had no other way to accept input.
           if (n === 'Table') {
             try {
               const fromLine = state.doc.lineAt(node.from);
@@ -2781,43 +2978,37 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
                 Math.min(node.to, state.doc.length) - 1);
               const toLine   = state.doc.lineAt(endPos);
 
-              let isActive = false;
-              for (let i = fromLine.number; i <= toLine.number; i++) {
-                if (active.has(i)) { isActive = true; break; }
-              }
-              if (!isActive) {
-                const src = state.doc.sliceString(fromLine.from, toLine.to);
-                // First line replaced by the rendered widget (single-line, safe)
-                decs.push({ from: fromLine.from, to: fromLine.to,
-                  dec: Decoration.replace({ widget: new TableWidget(src) }) });
-                // Remaining lines: replace content + collapse via line decoration.
-                // A BLANK line must skip the Decoration.replace({}) push entirely —
-                // pushing it anyway (as every one of these call sites originally did)
-                // seeds the merge below with two zero-length decorations at the exact
-                // same (from, to) point (the replace's span degenerates to zero width
-                // on an empty line, landing on the same point as the line decoration's
-                // own from===to point). RangeSetBuilder silently keeps only one of a
-                // pair of decorations added at an identical point — confirmed with a
-                // real EditorView in jsdom (throwaway script, not checked in): the
-                // line decoration (and therefore its height:0 CSS) never reached the
-                // DOM for blank lines, while non-blank lines in the very same block
-                // collapsed correctly, since their replace span was non-zero-width and
-                // sorted to a different point than the line decoration. This was the
-                // actual root cause of "folding a heading leaves a blank-space gap"
-                // (reported against foldPlugin, which has the identical fix, below) —
-                // two earlier fix attempts aimed at the wrong layer (CSS specificity,
-                // then inline styles) because the line decoration's CSS was correct,
-                // it just never got attached to blank lines' DOM elements at all. Since
-                // Decoration.replace({}) over a zero-length span replaces nothing
-                // anyway, skipping the push for blank lines loses no behavior.
-                for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
-                  const line = state.doc.line(ln);
-                  if (line.to > line.from) {
-                    decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
-                  }
-                  lineDecs.push({ from: line.from,
-                    dec: hiddenLineDeco('cm-table-row-hidden') });
+              const src = state.doc.sliceString(fromLine.from, toLine.to);
+              // First line replaced by the rendered widget (single-line, safe)
+              decs.push({ from: fromLine.from, to: fromLine.to,
+                dec: Decoration.replace({ widget: new TableWidget(view, fromLine.from, src) }) });
+              // Remaining lines: replace content + collapse via line decoration.
+              // A BLANK line must skip the Decoration.replace({}) push entirely —
+              // pushing it anyway (as every one of these call sites originally did)
+              // seeds the merge below with two zero-length decorations at the exact
+              // same (from, to) point (the replace's span degenerates to zero width
+              // on an empty line, landing on the same point as the line decoration's
+              // own from===to point). RangeSetBuilder silently keeps only one of a
+              // pair of decorations added at an identical point — confirmed with a
+              // real EditorView in jsdom (throwaway script, not checked in): the
+              // line decoration (and therefore its height:0 CSS) never reached the
+              // DOM for blank lines, while non-blank lines in the very same block
+              // collapsed correctly, since their replace span was non-zero-width and
+              // sorted to a different point than the line decoration. This was the
+              // actual root cause of "folding a heading leaves a blank-space gap"
+              // (reported against foldPlugin, which has the identical fix, below) —
+              // two earlier fix attempts aimed at the wrong layer (CSS specificity,
+              // then inline styles) because the line decoration's CSS was correct,
+              // it just never got attached to blank lines' DOM elements at all. Since
+              // Decoration.replace({}) over a zero-length span replaces nothing
+              // anyway, skipping the push for blank lines loses no behavior.
+              for (let ln = fromLine.number + 1; ln <= toLine.number; ln++) {
+                const line = state.doc.line(ln);
+                if (line.to > line.from) {
+                  decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
                 }
+                lineDecs.push({ from: line.from,
+                  dec: hiddenLineDeco('cm-table-row-hidden') });
               }
             } catch (_) {}
             return false;
@@ -3181,6 +3372,12 @@ const noteIndexRebuildEffect = StateEffect.define();
 // anywhere" (same-dir-first vs. vault-wide fallback both resolve if either
 // matches) and "with hint" existence just needs a name+parent-dir match.
 function noteTargetExists(rawTarget) {
+  // A .docx/.xlsx/.pdf target isn't in noteIndex (that only tracks .md notes)
+  // — there's no cheap client-side way to check whether it actually exists in
+  // the vault without a new round-trip, so it's treated as always-resolved
+  // rather than incorrectly dimming a link that in fact opens fine (host-side
+  // resolution at click time is what actually matters for whether it works).
+  if (isExternalFileTarget(rawTarget)) return true;
   const notePart = rawTarget.split('#')[0];
   const segments = notePart.replace(/\\/g, '/').split('/').filter(Boolean);
   const noteName = segments.pop() || notePart;
@@ -3340,6 +3537,16 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
   }
 }, { decorations: v => v.decorations });
 
+// A wiki-link/transclusion target naming one of these opens (or embeds a
+// clickable "open" box for) the real file with the OS's own default
+// application (vscode.env.openExternal on the host side) instead of being
+// treated as a markdown note reference — see `isExternalFileTarget`,
+// `ExternalFileWidget`, and the `open-external-file` message handler.
+const EXTERNAL_FILE_EXT = /\.(docx|xlsx|pdf)$/i;
+function isExternalFileTarget(raw) {
+  return EXTERNAL_FILE_EXT.test((raw || '').split('#')[0].split('|')[0].trim());
+}
+
 // ── Image plugin (![[filename.ext]] → <img>) ──────────────────────────────────
 const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
 const imgPlugin = ViewPlugin.fromClass(class {
@@ -3489,6 +3696,34 @@ function renderMarkdownBlock(text) {
   return frag;
 }
 
+// A "![[file.docx/.xlsx/.pdf]]" embed can't be rendered as markdown text the
+// way a note transclusion can — there's no content to fetch/slice a section
+// out of — so transclusionPlugin routes these here instead of into
+// TransclusionWidget/get-transclusion: a simple clickable box naming the
+// file, opening it with the OS's default application on click (same
+// `open-external-file` message a plain [[file.docx]] link sends — see
+// isWikiLinkEl's click handler and EXTERNAL_FILE_EXT).
+class ExternalFileWidget extends WidgetType {
+  constructor(target) { super(); this.target = target; }
+  eq(other) { return this.target === other.target; }
+  toDOM() {
+    const box = document.createElement('div');
+    box.className = 'cm-external-file';
+    box.dataset.target = this.target;
+    box.title = 'Abrir con la aplicación del sistema';
+    const icon = document.createElement('span');
+    icon.className = 'cm-external-file-icon';
+    icon.textContent = '📎';
+    const name = document.createElement('span');
+    name.className = 'cm-external-file-name';
+    name.textContent = this.target;
+    box.appendChild(icon);
+    box.appendChild(name);
+    return box;
+  }
+  ignoreEvent() { return false; }
+}
+
 class TransclusionWidget extends WidgetType {
   constructor(target, data) { super(); this.target = target; this.data = data; }
   eq(other) { return this.target === other.target && this.data === other.data; }
@@ -3557,6 +3792,13 @@ const transclusionPlugin = ViewPlugin.fromClass(class {
       const mTo   = mFrom + m[0].length;
       const ln = state.doc.lineAt(mFrom).number;
       if (active.has(ln)) continue;
+      // A .docx/.xlsx/.pdf embed has no text content to fetch/render — see
+      // ExternalFileWidget's own comment — so it never goes through the
+      // get-transclusion round-trip at all.
+      if (EXTERNAL_FILE_EXT.test(filenameGuess)) {
+        all.push({ from: mFrom, to: mTo, dec: Decoration.replace({ widget: new ExternalFileWidget(raw) }) });
+        continue;
+      }
       const cached = transclusionCache.get(raw);
       if (cached === undefined) requestTransclusion(raw);
       all.push({ from: mFrom, to: mTo,
@@ -3627,22 +3869,80 @@ function mutateTableAt(view, pos, mutateFn) {
 }
 
 // Inserts a starter 2-column table at `pos`, as its own block (blank line
-// before it if the line at `pos` isn't already empty). Selects the first
-// header cell's placeholder text so the user can immediately type over it.
+// before it if the line at `pos` isn't already empty).
 function insertTableTemplate(view, pos) {
   const line = view.state.doc.lineAt(pos);
   const lineEmpty = line.text.trim() === '';
   const insertFrom = lineEmpty ? line.from : line.to;
   const prefix = lineEmpty ? '' : '\n\n';
-  const firstHeader = 'Columna 1';
-  const body = `| ${firstHeader} | Columna 2 |\n| --- | --- |\n|  |  |\n`;
+  const body = '| Columna 1 | Columna 2 |\n| --- | --- |\n|  |  |\n';
   const insert = prefix + body;
-  const headerFrom = insertFrom + prefix.length + 2; // '| '.length
+  // Cursor lands right *after* the table, not inside it. This mattered a lot
+  // more before TableWidget started rendering unconditionally (see its own
+  // comment) — back when a table only rendered as a real <table> while the
+  // cursor sat on none of its own lines, an earlier version of this function
+  // selected the "Columna 1" placeholder text for immediate retyping, which
+  // left the table stuck in raw-markdown mode (no <table class="cm-table">
+  // for tableContextMenuHandler's right-click detection to find) until the
+  // user clicked elsewhere first. Tables always render now regardless of
+  // cursor position, so that specific failure mode is gone either way — this
+  // is kept mainly because landing past the table is still the more sensible
+  // default cursor position after inserting a block.
   view.dispatch({
     changes: { from: insertFrom, to: insertFrom, insert },
-    selection: EditorSelection.range(headerFrom, headerFrom + firstHeader.length),
+    selection: EditorSelection.cursor(insertFrom + insert.length),
   });
   view.focus();
+}
+
+// ── Cortar/Copiar/Pegar for the custom context menu ─────────────────────────
+// tableContextMenuHandler suppresses VS Code's own native context menu
+// wherever it has something to offer (see its own comment), which meant Cut/
+// Copy/Paste — normally just "whatever the native menu already provides" —
+// disappeared from the right-click menu entirely, even outside a table.
+// Reimplemented here so this extension's own menu is a real replacement, not
+// a strict subset: `document.execCommand('copy'/'cut'/'paste')` is tried
+// first since it operates on the browser's actual DOM selection — which CM6
+// keeps in sync with its own selection model precisely so that native
+// behaviors like this (and screen readers, Find-in-page, ...) keep working —
+// and, for paste, so it flows through CM6's own native `paste` event
+// handling rather than a raw text insertion that bypasses it. `execCommand`
+// is old and can be blocked/unsupported in some embedding contexts, so a
+// Clipboard API (`navigator.clipboard`) fallback backs each one up; Ctrl+C/
+// X/V keep working exactly as before regardless of any of this, since
+// neither path here changes anything about that.
+function copySelection(view) {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+  if (!ok && navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(view.state.sliceDoc(sel.from, sel.to)).catch(() => {});
+  }
+}
+function cutSelection(view) {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  copySelection(view);
+  view.dispatch({ changes: { from: sel.from, to: sel.to, insert: '' }, userEvent: 'delete.cut' });
+  view.focus();
+}
+function pasteAtCursor(view) {
+  let ok = false;
+  try { ok = document.execCommand('paste'); } catch (_) { ok = false; }
+  if (ok) { view.focus(); return; }
+  if (navigator.clipboard && navigator.clipboard.readText) {
+    navigator.clipboard.readText().then(text => {
+      if (!text) return;
+      const sel = view.state.selection.main;
+      view.dispatch({
+        changes: { from: sel.from, to: sel.to, insert: text },
+        selection: EditorSelection.cursor(sel.from + text.length),
+        userEvent: 'input.paste',
+      });
+      view.focus();
+    }).catch(() => {});
+  }
 }
 
 class TableMenuView {
@@ -3660,8 +3960,9 @@ class TableMenuView {
     document.removeEventListener('mousedown', this._onDocMouseDown, true);
     document.removeEventListener('keydown', this._onDocKeyDown, true);
   }
-  // `items`: Array<{ label, action } | { separator: true }>. `clientX`/`clientY`
-  // are viewport coordinates from the triggering contextmenu event.
+  // `items`: Array<{ label, action, disabled? } | { separator: true }>.
+  // `clientX`/`clientY` are viewport coordinates from the triggering
+  // contextmenu event.
   show(clientX, clientY, items) {
     this.hide();
     const menu = document.createElement('div');
@@ -3674,8 +3975,9 @@ class TableMenuView {
         continue;
       }
       const row = document.createElement('div');
-      row.className = 'cm-table-menu-item';
+      row.className = 'cm-table-menu-item' + (it.disabled ? ' is-disabled' : '');
       row.textContent = it.label;
+      if (it.disabled) { menu.appendChild(row); continue; }
       row.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
       row.addEventListener('click', e => {
         e.preventDefault(); e.stopPropagation();
@@ -3733,8 +4035,13 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       const rowEl = cellEl.closest('tr');
       const rowIndex = !isHeader && rowEl && rowEl.dataset.row !== undefined ? Number(rowEl.dataset.row) : -1;
       const pos = view.posAtDOM(tableEl);
+      const hasSelection = !view.state.selection.main.empty;
 
       const items = [
+        { label: 'Cortar',  action: () => cutSelection(view), disabled: !hasSelection },
+        { label: 'Copiar',  action: () => copySelection(view), disabled: !hasSelection },
+        { label: 'Pegar',   action: () => pasteAtCursor(view) },
+        { separator: true },
         { label: 'Añadir columna a la izquierda', action: () => mutateTableAt(view, pos, t => insertTableColumn(t, colIndex)) },
         { label: 'Añadir columna a la derecha',   action: () => mutateTableAt(view, pos, t => insertTableColumn(t, colIndex + 1)) },
         { label: 'Eliminar columna',               action: () => mutateTableAt(view, pos, t => deleteTableColumn(t, colIndex)) },
@@ -3753,10 +4060,22 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
     }
 
     // Not inside a rendered table — offer to create one at the click position.
-    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
-    if (pos == null) return false;
+    // posAtCoords returns null for a click that's within contentDOM's own DOM
+    // bounds but below the last rendered line (a short document leaves blank
+    // space there that's still part of .cm-content) — falling straight through
+    // to `return false` there was the main reason the native Cut/Copy/Paste
+    // menu "sometimes" showed up instead of this one: any right-click below
+    // the visible text (a very easy spot to land on) never reached this far.
+    // Falling back to end-of-document instead means a right-click anywhere in
+    // the editor's own content area reliably gets *some* menu from here.
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY }) ?? view.state.doc.length;
+    const hasSelection = !view.state.selection.main.empty;
     e.preventDefault();
     menu.show(e.clientX, e.clientY, [
+      { label: 'Cortar', action: () => cutSelection(view), disabled: !hasSelection },
+      { label: 'Copiar', action: () => copySelection(view), disabled: !hasSelection },
+      { label: 'Pegar',  action: () => pasteAtCursor(view) },
+      { separator: true },
       { label: 'Crear tabla', action: () => insertTableTemplate(view, pos) },
     ]);
     return true;
@@ -4334,6 +4653,20 @@ function moveVerticalByLine(view, dir, extend) {
         targetLineNum = dir > 0 ? spanToLine + 1 : spanFromLine - 1;
       }
     }
+    // Same reasoning as the fold-span check above, for frontmatterAtomicRanges
+    // (see its own comment): that facet protects CM6's own built-in
+    // navigation/pointer paths, but this function bypasses those entirely for
+    // a cross-line jump, so it needs its own explicit check. Frontmatter is
+    // always anchored at the document's very start (parseFrontmatter requires
+    // line 1), so the only way to land inside it via vertical movement is
+    // pressing Up from somewhere below it — there's no "coming from above" to
+    // account for, unlike a fold, which can be approached from either
+    // direction.
+    const fm = parseFrontmatter(state);
+    if (fm) {
+      const fmCloseLine = state.doc.lineAt(fm.to).number;
+      if (targetLineNum <= fmCloseLine) { targetLineNum = fmCloseLine + 1; }
+    }
     targetLineNum = Math.min(Math.max(targetLineNum, 1), state.doc.lines);
     const targetLine = state.doc.line(targetLineNum);
     newHead = targetLine.from + Math.min(col, targetLine.length);
@@ -4483,6 +4816,8 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (mdLink) { e.preventDefault(); return true; }
     const transclOpen = e.target.closest('.cm-transclusion-open');
     if (transclOpen) { e.preventDefault(); return true; }
+    const externalFile = e.target.closest('.cm-external-file');
+    if (externalFile) { e.preventDefault(); return true; }
     const taskCb = e.target.closest('.cm-task-checkbox');
     if (taskCb) { e.preventDefault(); return true; }
     const taskQueryEditBtn = e.target.closest('.cm-task-query-edit-btn');
@@ -4499,7 +4834,11 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (wikiEl) {
       e.preventDefault();
       const target = wikiEl.dataset.target || wikiEl.textContent.trim();
-      vscode.postMessage({ type: 'open-note', name: target });
+      // A .docx/.xlsx/.pdf target isn't a note to open in this editor — hand
+      // it to the OS's own default application instead (see EXTERNAL_FILE_EXT).
+      vscode.postMessage(isExternalFileTarget(target)
+        ? { type: 'open-external-file', name: target }
+        : { type: 'open-note', name: target });
       return true;
     }
     const tableWiki = e.target.closest('[data-wiki]');
@@ -4508,7 +4847,10 @@ const linkClickHandler = EditorView.domEventHandlers({
       // `data-wiki-base` (see renderCell) is only set for wikilinks rendered on behalf of another
       // file (e.g. a tasks-query row's description) — forwarded so the host resolves/creates
       // relative to *that* file's directory instead of always defaulting to the open document's.
-      vscode.postMessage({ type: 'open-note', name: tableWiki.dataset.wiki, basePath: tableWiki.dataset.wikiBase });
+      const target = tableWiki.dataset.wiki;
+      vscode.postMessage(isExternalFileTarget(target)
+        ? { type: 'open-external-file', name: target, basePath: tableWiki.dataset.wikiBase }
+        : { type: 'open-note', name: target, basePath: tableWiki.dataset.wikiBase });
       return true;
     }
     const mdLink = e.target.closest('.cm-md-link');
@@ -4521,6 +4863,12 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (transclOpen) {
       e.preventDefault();
       vscode.postMessage({ type: 'open-transclusion', target: transclOpen.dataset.target });
+      return true;
+    }
+    const externalFile = e.target.closest('.cm-external-file');
+    if (externalFile) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'open-external-file', name: externalFile.dataset.target });
       return true;
     }
     // Checked before the generic .cm-task-checkbox below: a tasks-query result
@@ -4790,6 +5138,39 @@ const foldAtomicRanges = EditorView.atomicRanges.of(view => {
   return builder.finish();
 });
 
+// Blocks any cursor position from position 0 through the frontmatter's own
+// closing "---" line — requested: the cursor should only ever be able to
+// land *below* the frontmatter panel, never inside or immediately to either
+// side of its own (raw, hidden) text. PropertiesWidget's whole design
+// already assumes this — "editing happens entirely through that panel's own
+// controls," never by directly editing the underlying YAML text in Live
+// Preview — so a text cursor being placeable inside that raw span at all was
+// an oversight, not an intentional gap; foldAtomicRanges (above) already
+// established the exact same EditorView.atomicRanges mechanism and its
+// semantics for folded heading content, so this mirrors it rather than
+// inventing a new approach. The `to` bound is computed the same way
+// computeFoldedSpans computes a fold's own upper bound (one *less* than
+// wherever the next valid content actually starts) — here that's the
+// frontmatter's closing "---" line's own `.to`, not `.to + 1`, since the
+// newline right after it is exactly the boundary a redirected cursor should
+// land just past, not before.
+//
+// Registered *inside* previewCompartment (with previewCompartment's other
+// entries below), not alongside foldAtomicRanges outside it: PropertiesWidget
+// itself only ever renders in Live Preview — Source Mode shows the raw YAML
+// as ordinary, fully editable text (see PropertiesWidget's own top comment
+// for why there's deliberately no other raw-YAML view) — so this must be
+// disabled right along with it, not left active over now-genuinely-editable
+// text.
+const frontmatterAtomicRanges = EditorView.atomicRanges.of(view => {
+  const fm = parseFrontmatter(view.state);
+  if (!fm) return Decoration.none;
+  const to = view.state.doc.lineAt(fm.to).to;
+  const builder = new RangeSetBuilder();
+  if (to > 0) { try { builder.add(0, to, Decoration.replace({})); } catch (_) {} }
+  return builder.finish();
+});
+
 // ── Source mode (Compartment) ─────────────────────────────────────────────────
 const previewCompartment = new Compartment();
 let sourceMode = false;
@@ -4808,7 +5189,7 @@ function createEditor(parent, content) {
       // rebuild for this same transaction already sees the fresh activation
       // state — see the comment above wikiLinkActivationTracker's definition.
       wikiLinkActivationTracker,
-      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]),
+      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]),
       foldPlugin,
       foldAtomicRanges,
       linkClickHandler,
@@ -4971,7 +5352,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin]
+      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);
@@ -5197,6 +5578,31 @@ window.addEventListener('message', ev => {
         const sep = key.indexOf(' ');
         requestDataviewQuery(key.slice(0, sep), key.slice(sep + 1));
       }
+      break;
+    // Sent once, the first time the sibling "Obsidian-like Image Toolkit" extension's assets
+    // resolve (see injectImageToolkitIfAvailable in extension.ts) — loads its stylesheet/script
+    // as real <link>/<script> tags. Settings are handed to the script via a global read
+    // synchronously at its own top level, so it must be set *before* the <script> is appended.
+    case 'load-image-toolkit':
+      if (msg.styleUri) {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = msg.styleUri;
+        document.head.appendChild(link);
+      }
+      window.__imageToolkitSettings = msg.settings || {};
+      if (msg.scriptUri) {
+        const script = document.createElement('script');
+        script.src = msg.scriptUri;
+        document.body.appendChild(script);
+      }
+      break;
+    // Sent on every later change to an `obsidianlikeImageToolkit.*` setting — the toolkit script
+    // is already loaded by this point, so just hand it the fresh settings via a DOM event instead
+    // of reloading the whole script.
+    case 'image-toolkit-settings':
+      window.__imageToolkitSettings = msg.settings || {};
+      window.dispatchEvent(new CustomEvent('image-toolkit-settings-changed', { detail: msg.settings || {} }));
       break;
   }
 });
