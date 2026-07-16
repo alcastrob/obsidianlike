@@ -201,7 +201,22 @@ function resolvesToOldTarget(
   return sorted[0].toLowerCase() === oldFsPath.toLowerCase();
 }
 
-const WIKI_TARGET_RE = /(!?)\[\[([^\]]+)\]\]/g;
+// Nested-bracket-aware: a heading's own raw text can legitimately contain a
+// "[[link]]" (e.g. "# Ver [[Pepe]]"), and a "note#section" reference to that
+// heading (`[[note#Ver [[Pepe]]]]` / `![[note#Ver [[Pepe]]]]`) then has a
+// nested "[[Pepe]]" sitting inside the outer target. A plain `[^\]]+`-style
+// char class (the original pattern here) always stops at the *first* `]` —
+// the inner link's own closing bracket — truncating the captured inner text
+// and leaving the real outer "]]" as unmatched, dangling literal text; for
+// this function specifically, that meant a rename-fixup rewrite could
+// corrupt an unrelated note's markdown by replacing only part of such a
+// link. Same pattern/reasoning as WIKI_LINK_RE_SRC/EMBED_RE_SRC in
+// webview-src/editor.js (kept independent since the two files aren't
+// bundled together) — `(?!\[\[)` lets a lone, unpaired "[" (e.g. a heading
+// like "# Tareas [urgente]") still match as plain text, only a genuine
+// doubled "[[" is treated as the start of a nested link. Only one level of
+// nesting is handled.
+const WIKI_TARGET_RE = /(!?)\[\[((?:(?!\[\[)[^\]]|\[\[[^\[\]]*\]\])+)\]\]/g;
 
 async function fixUpLinksForMovedNote(oldUri: vscode.Uri, newUri: vscode.Uri): Promise<void> {
   const oldName = path.basename(oldUri.fsPath, '.md');

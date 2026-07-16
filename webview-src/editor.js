@@ -389,6 +389,118 @@ const vsTheme = EditorView.theme({
   '.cm-dataview-query .dv-table th': {
     opacity: '0.75',
     fontWeight: '600',
+    // Holds the sortable label + filter button side by side (see enhanceDataviewTable above);
+    // overriding a <th>'s default table-cell display like this is fine in the Chromium engine
+    // VS Code webviews run on.
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '4px',
+  },
+  '.cm-dataview-query .dv-th-label': {
+    cursor: 'pointer',
+    userSelect: 'none',
+    display: 'inline-flex',
+    alignItems: 'center',
+    minWidth: '0',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  '.cm-dataview-query .dv-th-label:hover': {
+    opacity: '0.8',
+  },
+  '.cm-dataview-query .dv-th-sort-indicator': {
+    fontSize: '0.85em',
+    opacity: '0.8',
+  },
+  '.cm-dataview-query .dv-th-filter': {
+    flex: '0 0 auto',
+    border: 'none',
+    background: 'transparent',
+    color: 'inherit',
+    cursor: 'pointer',
+    opacity: '0.45',
+    fontSize: '0.85em',
+    padding: '0 2px',
+    lineHeight: '1',
+  },
+  '.cm-dataview-query .dv-th-filter:hover, .cm-dataview-query .dv-th-filter.dv-th-filter-active': {
+    opacity: '1',
+  },
+  '.cm-dataview-query .dv-th-filter.dv-th-filter-active': {
+    color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
+  },
+  // The filter popover is appended to document.body (so it can float above the editor), not
+  // under `.cm-dataview-query` — these rules can't be scoped under that ancestor selector.
+  '.dv-filter-popover': {
+    position: 'fixed',
+    zIndex: '1000',
+    minWidth: '180px',
+    maxWidth: '320px',
+    maxHeight: '60vh',
+    display: 'flex',
+    flexDirection: 'column',
+    background: 'var(--vscode-editorWidget-background, var(--background-secondary, #252526))',
+    color: 'var(--vscode-editorWidget-foreground, inherit)',
+    border: '1px solid var(--vscode-editorWidget-border, var(--background-modifier-border, rgba(128,128,128,0.4)))',
+    borderRadius: '4px',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+    padding: '6px',
+    fontSize: '0.9em',
+  },
+  '.dv-filter-popover input[type="text"]': {
+    width: '100%',
+    boxSizing: 'border-box',
+    font: 'inherit',
+    fontSize: '0.95em',
+    padding: '4px 6px',
+    margin: '0 0 6px',
+    background: 'var(--background-modifier-form-field, var(--background-secondary))',
+    color: 'inherit',
+    border: '1px solid var(--background-modifier-border, transparent)',
+    borderRadius: '4px',
+  },
+  '.dv-filter-list': {
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    borderTop: '1px solid var(--background-modifier-border, rgba(128,128,128,0.25))',
+    padding: '4px 0',
+  },
+  '.dv-filter-option': {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '2px 4px',
+    borderRadius: '3px',
+    cursor: 'pointer',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  '.dv-filter-option:hover': {
+    background: 'var(--background-modifier-hover, rgba(128,128,128,0.15))',
+  },
+  '.dv-filter-select-all': {
+    fontWeight: '600',
+  },
+  '.dv-filter-footer': {
+    borderTop: '1px solid var(--background-modifier-border, rgba(128,128,128,0.25))',
+    marginTop: '4px',
+    paddingTop: '6px',
+    display: 'flex',
+    justifyContent: 'flex-end',
+  },
+  '.dv-filter-footer button': {
+    font: 'inherit',
+    fontSize: '0.9em',
+    padding: '3px 10px',
+    cursor: 'pointer',
+    background: 'var(--vscode-button-secondaryBackground, transparent)',
+    color: 'var(--vscode-button-secondaryForeground, inherit)',
+    border: '1px solid var(--background-modifier-border, rgba(128,128,128,0.4))',
+    borderRadius: '4px',
   },
   '.cm-dataview-query .dv-link': {
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
@@ -678,6 +790,35 @@ const vsTheme = EditorView.theme({
     fontStyle: 'italic',
   },
   '.cm-hover-preview-error': { color: 'var(--text-error, #e06c75)' },
+  // Table context menu (TableMenuView / tableContextMenuHandler) — a plain
+  // floating DOM element appended to `.cm-editor`, same positioning
+  // convention as `.cm-wikilink-suggest`/`.cm-hover-preview` above, just
+  // anchored at the right-click point instead of a text/link position.
+  '.cm-table-menu': {
+    position: 'absolute',
+    zIndex: '70',
+    minWidth: '190px',
+    background: 'var(--vscode-editorWidget-background, #252526)',
+    color: 'var(--vscode-editorWidget-foreground, inherit)',
+    border: '1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35))',
+    borderRadius: '6px',
+    boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+    fontSize: '0.92em',
+    padding: '4px 0',
+  },
+  '.cm-table-menu-item': {
+    padding: '6px 14px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
+  '.cm-table-menu-item:hover': {
+    background: 'var(--vscode-list-hoverBackground, rgba(128,128,128,0.18))',
+  },
+  '.cm-table-menu-sep': {
+    height: '1px',
+    margin: '4px 0',
+    background: 'var(--vscode-editorWidget-border, rgba(128,128,128,0.25))',
+  },
   // Standalone inline code (`text`) — a small chip, same look as before this
   // was split out of mdHighlight's tags.monospace spec into a stable class name.
   '.cm-inline-code': {
@@ -890,6 +1031,48 @@ function getActiveLines(state) {
   return set;
 }
 
+// Matches a closed "[[target]]" or "[[target|alias]]" wiki-link, allowing the
+// target/alias text to itself contain ONE level of nested "[[...]]" — needed
+// because a heading's own raw text can legitimately contain a wiki-link
+// (e.g. "# Ver [[Pepe]]"), and a "note#section" reference to that heading
+// (`![[note#Ver [[Pepe]]]]`) then has a nested "[[Pepe]]" sitting inside the
+// outer target that must not be mistaken for the outer link's own closing
+// "]]". A plain `[^\]]+`-style char class (the original pattern here) always
+// stops at the *first* `]` it sees, which is the inner link's closing bracket
+// — truncating the captured target/section and leaving the real outer "]]"
+// as unmatched, dangling literal text.
+//
+// The alternation is `(?:(?!\[\[)[^\]|]|\[\[[^\[\]]*\]\])`: at each position,
+// either consume one character that is not "]"/"|" and not the start of a
+// literal "[[" run, OR — if a literal "[[" *does* start here — consume an
+// entire simple (non-nested-again) "[[...]]" chunk as one atomic unit. The
+// `(?!\[\[)` guard is what keeps a *lone*, unpaired "[" (e.g. a heading like
+// "# Tareas [urgente]") matching as plain text instead of being swallowed by
+// the nested-chunk branch and failing to close — only a genuine doubled "[["
+// is treated as the start of a nested link. Only one level of nesting is
+// handled (a link inside a link inside a link is not a realistic case here);
+// the alias group's own alternation intentionally omits the "|" exclusion
+// nested-chunk-internally since an inner link's own "|alias" isn't meant to
+// interact with the outer link's alias splitting.
+// String source (not a RegExp literal) because every call site below needs
+// its own regex instance — `.exec()`-driven loops elsewhere in this file
+// already rely on independent `lastIndex` state per scan (see
+// findLinkContextAt's own "fresh copy... to avoid any lastIndex
+// state-sharing bug" comment) — sharing one `RegExp` object with the `g`
+// flag across unrelated loops would reintroduce exactly that bug.
+const WIKI_LINK_RE_SRC =
+  '(?<!!)\\[\\[((?:(?!\\[\\[)[^\\]|]|\\[\\[[^\\[\\]]*\\]\\])+?)' +
+  '(?:\\|((?:(?!\\[\\[)[^\\]]|\\[\\[[^\\[\\]]*\\]\\])*?))?\\]\\]';
+
+// Same nested-bracket reasoning as WIKI_LINK_RE_SRC above, for "![[target]]"
+// (images and transclusions — imgPlugin/transclusionPlugin below). Unlike
+// the plain-link pattern, "|" is deliberately left *inside* the single
+// capture group here (both plugins split on the first "|" themselves,
+// downstream, to separate a filename from an image width/caption param, or
+// a transclusion target from... nothing currently, but the split logic is
+// shared) rather than being excluded/captured separately by the regex.
+const EMBED_RE_SRC = '!\\[\\[((?:(?!\\[\\[)[^\\]]|\\[\\[[^\\[\\]]*\\]\\])+)\\]\\]';
+
 // ── Table widget ──────────────────────────────────────────────────────────────
 // Renders inline markdown (bold, italic, code, wiki-links) inside table cells.
 // `basePath` (optional, workspace-relative — e.g. a task's own `t.path`) is the file the *raw*
@@ -950,9 +1133,11 @@ function renderCell(raw, basePath) {
       ? `<span class="cm-md-link" data-url="${bareUrl}">${bareUrl}</span>`
       : `<span class="cm-md-link" data-url="${url}">${text}</span>`
   );
-  // Wiki-links [[target]] or [[target|alias]]
+  // Wiki-links [[target]] or [[target|alias]] — nested-bracket-aware, see
+  // WIKI_LINK_RE_SRC's own comment above for why (a "#section" naming a
+  // heading that itself contains a "[[link]]" is a valid, real target).
   const baseAttr = basePath ? ` data-wiki-base="${String(basePath).replace(/"/g, '&quot;')}"` : '';
-  s = s.replace(/(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g, (_, tgt, alias) =>
+  s = s.replace(new RegExp(WIKI_LINK_RE_SRC, 'g'), (_, tgt, alias) =>
     `<span data-wiki="${tgt}"${baseAttr} style="color:var(--link-color,var(--vscode-textLink-foreground,#4a9eff));` +
     `text-decoration:underline;cursor:pointer;">${alias || tgt}</span>`
   );
@@ -963,6 +1148,62 @@ function renderCell(raw, basePath) {
   return s;
 }
 
+// ── Table parsing/serialization ─────────────────────────────────────────────
+// Shared by TableWidget's own rendering and the table-editing context menu
+// below (tableContextMenuHandler/mutateTableAt) — factored out rather than
+// duplicated so a row/column edit and a fresh render always agree on exactly
+// what a "cell" is.
+function parseTableRow(line) {
+  return line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+}
+
+// { header: string[], delim: string[], rows: string[][] } from a table's raw
+// multi-line source text, or null if it doesn't look like a table (fewer
+// than 2 pipe-containing lines — no header/delimiter row pair).
+function parseTableSrc(src) {
+  const lines = (src || '').split('\n').filter(l => l.trim() && l.includes('|'));
+  if (lines.length < 2) return null;
+  return { header: parseTableRow(lines[0]), delim: parseTableRow(lines[1]), rows: lines.slice(2).map(parseTableRow) };
+}
+
+function serializeTableRow(cells) {
+  return '| ' + cells.map(c => (c || '').trim()).join(' | ') + ' |';
+}
+
+function serializeTable(t) {
+  return [t.header, t.delim, ...t.rows].map(serializeTableRow).join('\n');
+}
+
+function tableAligns(t) {
+  return t.delim.map(s => {
+    const v = s.trim();
+    if (v.startsWith(':') && v.endsWith(':')) return 'center';
+    if (v.endsWith(':')) return 'right';
+    return 'left';
+  });
+}
+
+// Row/column mutators — plain in-place edits on the parsed { header, delim,
+// rows } shape, applied by mutateTableAt below. `rowIndex`/`colIndex` here
+// always refer to *data* rows (excluding the header) and 0-based columns.
+function insertTableRow(t, rowIndex) {
+  t.rows.splice(rowIndex, 0, new Array(t.header.length).fill(''));
+}
+function deleteTableRow(t, rowIndex) {
+  if (rowIndex >= 0 && rowIndex < t.rows.length) t.rows.splice(rowIndex, 1);
+}
+function insertTableColumn(t, colIndex) {
+  t.header.splice(colIndex, 0, `Columna ${t.header.length + 1}`);
+  t.delim.splice(colIndex, 0, '---');
+  for (const row of t.rows) row.splice(colIndex, 0, '');
+}
+function deleteTableColumn(t, colIndex) {
+  if (t.header.length <= 1) return; // never delete the last remaining column
+  t.header.splice(colIndex, 1);
+  t.delim.splice(colIndex, 1);
+  for (const row of t.rows) row.splice(colIndex, 1);
+}
+
 class TableWidget extends WidgetType {
   constructor(src) { super(); this.src = src; }
   eq(other) { return this.src === other.src; }
@@ -970,36 +1211,33 @@ class TableWidget extends WidgetType {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'overflow-x:auto;margin:4px 0 10px;width:100%;display:block;';
 
-    const lines = (this.src || '').split('\n').filter(l => l.trim() && l.includes('|'));
-    if (lines.length < 2) {
+    const t = parseTableSrc(this.src);
+    if (!t) {
       wrap.style.cssText += 'white-space:pre;font-family:monospace;opacity:0.75;';
       wrap.textContent = this.src;
       return wrap;
     }
 
-    const parseRow = line =>
-      line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
-
-    const aligns = parseRow(lines[1]).map(s => {
-      const t = s.trim();
-      if (t.startsWith(':') && t.endsWith(':')) return 'center';
-      if (t.endsWith(':')) return 'right';
-      return 'left';
-    });
+    const aligns = tableAligns(t);
 
     const BORDER   = '1px solid rgba(128,128,128,0.38)';
     const CELL     = `border:${BORDER};padding:5px 12px;line-height:1.5;vertical-align:top;color:inherit;`;
     const TH_EXTRA = 'font-weight:600;background:rgba(128,128,128,0.12);';
 
     const table = document.createElement('table');
+    // `cm-table` marks this as *our* rendered table for tableContextMenuHandler
+    // below, so a right-click can be routed to row/column management instead
+    // of the generic "create table" item.
+    table.className = 'cm-table';
     table.style.cssText =
       'border-collapse:collapse;width:100%;font-size:inherit;font-family:inherit;color:inherit;';
 
     const thead = document.createElement('thead');
     const hRow  = document.createElement('tr');
-    parseRow(lines[0]).forEach((h, i) => {
+    t.header.forEach((h, i) => {
       const th = document.createElement('th');
       th.style.cssText = CELL + TH_EXTRA + `text-align:${aligns[i] || 'left'};`;
+      th.dataset.col = String(i);
       th.innerHTML = renderCell(h);
       hRow.appendChild(th);
     });
@@ -1007,12 +1245,14 @@ class TableWidget extends WidgetType {
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    lines.slice(2).forEach((line, ri) => {
+    t.rows.forEach((row, ri) => {
       const tr = document.createElement('tr');
+      tr.dataset.row = String(ri);
       if (ri % 2 === 1) tr.style.background = 'rgba(128,128,128,0.05)';
-      parseRow(line).forEach((cell, i) => {
+      row.forEach((cell, i) => {
         const td = document.createElement('td');
         td.style.cssText = CELL + `text-align:${aligns[i] || 'left'};`;
+        td.dataset.col = String(i);
         td.innerHTML = renderCell(cell);
         tr.appendChild(td);
       });
@@ -2002,6 +2242,238 @@ class TasksQueryWidget extends WidgetType {
   }
 }
 
+// ── Excel-like client-side sort/filter for ```dataview TABLE results ──────────
+// Purely a display-layer transform over the sibling extension's already-rendered
+// <table class="dv-table"> — never touches the underlying DQL query or asks the
+// host to re-run anything, just reorders/hides the <tr>s already in the DOM.
+// Clicking a column header cycles sort (none → asc → desc); the small ▾ button
+// next to each header opens a checkbox-list filter popover (search box + one
+// checkbox per unique value + "select all"), mirroring Excel's AutoFilter.
+//
+// State lives in `dvTableState` (keyed by the <table> element itself via a
+// WeakMap) rather than as widget fields, so it survives `livePreviewPlugin`
+// rebuilds that reuse the same DOM node (DataviewQueryWidget.eq() returning
+// true keeps CM6 from calling toDOM() again) — it only resets when fresh query
+// results genuinely replace the table (a new toDOM() call, see below).
+const dvTableState = new WeakMap(); // <table> -> { originalRows, sortCol, sortDir, filters: Map<col, Set<excludedValue>> }
+
+function dvCellText(tr, col) {
+  const cell = tr.children[col];
+  return cell ? cell.textContent.trim() : '';
+}
+
+// Numeric compare when both sides parse as numbers (so "2" sorts before "10"),
+// locale string compare otherwise; blanks always sort last regardless of
+// direction — same conventions as Excel's own column sort.
+function dvCompareCells(a, b) {
+  if (a === '' && b === '') return 0;
+  if (a === '') return 1;
+  if (b === '') return -1;
+  const na = Number(a), nb = Number(b);
+  if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function dvRowPassesFilters(state, tr, exceptCol) {
+  for (const [col, excluded] of state.filters) {
+    if (col === exceptCol) continue;
+    if (excluded.has(dvCellText(tr, col))) return false;
+  }
+  return true;
+}
+
+function dvApplyTable(table, state) {
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  let rows = state.originalRows.filter((tr) => dvRowPassesFilters(state, tr, -1));
+  if (state.sortCol != null) {
+    const dir = state.sortDir === 'desc' ? -1 : 1;
+    rows = rows
+      .slice()
+      .sort((ra, rb) => dvCompareCells(dvCellText(ra, state.sortCol), dvCellText(rb, state.sortCol)) * dir);
+  }
+  tbody.replaceChildren(...rows);
+
+  const headRow = table.tHead && table.tHead.rows[0];
+  if (headRow) {
+    Array.from(headRow.cells).forEach((th, i) => {
+      const indicator = th.querySelector('.dv-th-sort-indicator');
+      if (indicator) indicator.textContent = state.sortCol === i ? (state.sortDir === 'desc' ? ' ▼' : ' ▲') : '';
+      const filterBtn = th.querySelector('.dv-th-filter');
+      if (filterBtn) filterBtn.classList.toggle('dv-th-filter-active', !!(state.filters.get(i) && state.filters.get(i).size));
+    });
+  }
+}
+
+function dvClosePopover() {
+  const existing = document.querySelector('.dv-filter-popover');
+  if (existing) existing.remove();
+}
+
+let dvPopoverOutsideHandlerInstalled = false;
+function ensureDvPopoverOutsideHandler() {
+  if (dvPopoverOutsideHandlerInstalled) return;
+  dvPopoverOutsideHandlerInstalled = true;
+  // Appended to document.body (so it can float above the CM6 editor), not a descendant of the
+  // widget — CM6's own event handling never sees clicks inside it, so this is the only place
+  // that needs to close it on an outside click.
+  document.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.dv-filter-popover') || e.target.closest('.dv-th-filter')) return;
+    dvClosePopover();
+  });
+}
+
+function dvOpenFilterPopover(table, state, col, anchorBtn) {
+  dvClosePopover();
+
+  // Cascading like Excel's own AutoFilter: the value list for this column only considers rows
+  // that already pass every *other* column's active filter, not the full original set.
+  const values = new Set();
+  for (const tr of state.originalRows) {
+    if (dvRowPassesFilters(state, tr, col)) values.add(dvCellText(tr, col));
+  }
+  const excluded = state.filters.get(col) || new Set();
+
+  const pop = document.createElement('div');
+  pop.className = 'dv-filter-popover';
+
+  const search = document.createElement('input');
+  search.type = 'text';
+  search.placeholder = 'Buscar…';
+  pop.appendChild(search);
+
+  const selectAllRow = document.createElement('label');
+  selectAllRow.className = 'dv-filter-option dv-filter-select-all';
+  const selectAllCb = document.createElement('input');
+  selectAllCb.type = 'checkbox';
+  selectAllRow.append(selectAllCb, document.createTextNode(' Seleccionar todo'));
+  pop.appendChild(selectAllRow);
+
+  const list = document.createElement('div');
+  list.className = 'dv-filter-list';
+  pop.appendChild(list);
+
+  const rowsByValue = new Map();
+  const sortedValues = [...values].sort(dvCompareCells);
+  for (const v of sortedValues) {
+    const row = document.createElement('label');
+    row.className = 'dv-filter-option';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !excluded.has(v);
+    cb.dataset.value = v;
+    row.append(cb, document.createTextNode(' ' + (v === '' ? '(vacío)' : v)));
+    list.appendChild(row);
+    rowsByValue.set(v, row);
+  }
+
+  const updateSelectAll = () => {
+    const boxes = [...list.querySelectorAll('input[type="checkbox"]')].filter((cb) => cb.closest('label').style.display !== 'none');
+    selectAllCb.checked = boxes.length > 0 && boxes.every((cb) => cb.checked);
+    selectAllCb.indeterminate = !selectAllCb.checked && boxes.some((cb) => cb.checked);
+  };
+  updateSelectAll();
+
+  const commitFilter = () => {
+    if (excluded.size > 0) state.filters.set(col, excluded);
+    else state.filters.delete(col);
+    dvApplyTable(table, state);
+  };
+
+  search.addEventListener('input', () => {
+    const q = search.value.trim().toLowerCase();
+    for (const [v, row] of rowsByValue) {
+      row.style.display = q === '' || v.toLowerCase().includes(q) ? '' : 'none';
+    }
+    updateSelectAll();
+  });
+
+  selectAllCb.addEventListener('change', () => {
+    for (const row of list.querySelectorAll('label')) {
+      if (row.style.display === 'none') continue;
+      const cb = row.querySelector('input');
+      cb.checked = selectAllCb.checked;
+      if (cb.checked) excluded.delete(cb.dataset.value);
+      else excluded.add(cb.dataset.value);
+    }
+    commitFilter();
+  });
+
+  list.addEventListener('change', (e) => {
+    const cb = e.target.closest('input[type="checkbox"]');
+    if (!cb) return;
+    if (cb.checked) excluded.delete(cb.dataset.value);
+    else excluded.add(cb.dataset.value);
+    updateSelectAll();
+    commitFilter();
+  });
+
+  const footer = document.createElement('div');
+  footer.className = 'dv-filter-footer';
+  const clearBtn = document.createElement('button');
+  clearBtn.type = 'button';
+  clearBtn.textContent = 'Borrar filtro';
+  clearBtn.addEventListener('click', () => {
+    state.filters.delete(col);
+    dvApplyTable(table, state);
+    dvClosePopover();
+  });
+  footer.appendChild(clearBtn);
+  pop.appendChild(footer);
+
+  document.body.appendChild(pop);
+  const btnRect = anchorBtn.getBoundingClientRect();
+  const left = Math.min(btnRect.left, window.innerWidth - pop.offsetWidth - 8);
+  pop.style.left = Math.max(4, left) + 'px';
+  pop.style.top = (btnRect.bottom + 4) + 'px';
+  search.focus();
+}
+
+function enhanceDataviewTable(table) {
+  const thead = table.tHead;
+  const tbody = table.tBodies[0];
+  if (!thead || !tbody || !thead.rows.length) return;
+
+  const state = { originalRows: [...tbody.rows], sortCol: null, sortDir: 'asc', filters: new Map() };
+  dvTableState.set(table, state);
+  ensureDvPopoverOutsideHandler();
+
+  Array.from(thead.rows[0].cells).forEach((th, col) => {
+    const text = th.textContent;
+    th.textContent = '';
+
+    const label = document.createElement('span');
+    label.className = 'dv-th-label';
+    label.textContent = text;
+    const indicator = document.createElement('span');
+    indicator.className = 'dv-th-sort-indicator';
+    label.appendChild(indicator);
+    label.addEventListener('click', () => {
+      if (state.sortCol !== col) { state.sortCol = col; state.sortDir = 'asc'; }
+      else if (state.sortDir === 'asc') { state.sortDir = 'desc'; }
+      else { state.sortCol = null; state.sortDir = 'asc'; }
+      dvApplyTable(table, state);
+    });
+
+    const filterBtn = document.createElement('button');
+    filterBtn.type = 'button';
+    filterBtn.className = 'dv-th-filter';
+    filterBtn.textContent = '▾';
+    filterBtn.title = 'Filtrar';
+    filterBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (document.querySelector('.dv-filter-popover')) { dvClosePopover(); return; }
+      dvOpenFilterPopover(table, state, col, filterBtn);
+    });
+
+    th.append(label, filterBtn);
+  });
+}
+
+function enhanceDataviewTables(root) {
+  root.querySelectorAll('table.dv-table').forEach(enhanceDataviewTable);
+}
+
 // Single-line replacement widget for the opening ```dataview/```dql/```dataviewjs fence — same
 // "replace only the first line, collapse the rest" strategy as TasksQueryWidget above. `cached`
 // is whatever's in `dataviewQueryCache` for this (lang, query) pair when `_build()` ran:
@@ -2017,6 +2489,7 @@ class DataviewQueryWidget extends WidgetType {
     wrap.className = 'cm-dataview-query';
     if (this.cached) {
       wrap.innerHTML = this.cached.html;
+      enhanceDataviewTables(wrap);
     } else {
       const loading = document.createElement('div');
       loading.className = 'cm-dataview-query-loading';
@@ -2024,6 +2497,16 @@ class DataviewQueryWidget extends WidgetType {
       wrap.appendChild(loading);
     }
     return wrap;
+  }
+  // The sort label / filter button are real interactive controls, unlike the rest of this
+  // widget's content (plain text, or `[data-wiki]` links already handled via
+  // `linkClickHandler`'s preventDefault-on-mousedown guards) — same reasoning as
+  // TasksQueryWidget's filter-input guard above: without this, clicking them moved the cursor
+  // into this block's document range, swapping the widget out for raw source before the click
+  // could register. The filter popover itself lives outside the editor's DOM (appended to
+  // document.body), so CM6 never routes its clicks through here in the first place.
+  ignoreEvent(event) {
+    return !!(event.target && event.target.closest && event.target.closest('.dv-th-label, .dv-th-filter'));
   }
 }
 
@@ -2746,7 +3229,10 @@ function findLinkContextAt(state, pos) {
   if (!sel.empty || sel.head !== pos) return null;
   const line = state.doc.lineAt(pos);
 
-  const closedRe = /(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
+  // Fresh instance per call — see WIKI_LINK_RE_SRC's own comment for both the
+  // nested-bracket-aware pattern and why this can't share a RegExp object
+  // with wikiLinkPlugin's own independent .exec() loop.
+  const closedRe = new RegExp(WIKI_LINK_RE_SRC, 'g');
   let m;
   while ((m = closedRe.exec(line.text)) !== null) {
     const from = line.from + m.index;
@@ -2810,7 +3296,8 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
     const { state } = view;
     const { from: vf, to: vt } = view.viewport;
     const str = state.doc.sliceString(vf, vt);
-    const re = /(?<!!)\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
+    // Nested-bracket-aware — see WIKI_LINK_RE_SRC's own comment.
+    const re = new RegExp(WIKI_LINK_RE_SRC, 'g');
     const all = [];
     let m;
     while ((m = re.exec(str)) !== null) {
@@ -2868,7 +3355,8 @@ const imgPlugin = ViewPlugin.fromClass(class {
     const active = getActiveLines(state);
     const { from: vf, to: vt } = view.viewport;
     const str = state.doc.sliceString(vf, vt);
-    const re = /!\[\[([^\]]+)\]\]/g;
+    // Nested-bracket-aware — see EMBED_RE_SRC's own comment.
+    const re = new RegExp(EMBED_RE_SRC, 'g');
     const all = [];
     let m;
     while ((m = re.exec(str)) !== null) {
@@ -3055,7 +3543,8 @@ const transclusionPlugin = ViewPlugin.fromClass(class {
     const active = getActiveLines(state);
     const { from: vf, to: vt } = view.viewport;
     const str = state.doc.sliceString(vf, vt);
-    const re = /!\[\[([^\]]+)\]\]/g;
+    // Nested-bracket-aware — see EMBED_RE_SRC's own comment.
+    const re = new RegExp(EMBED_RE_SRC, 'g');
     const all = [];
     let m;
     while ((m = re.exec(str)) !== null) {
@@ -3084,6 +3573,195 @@ const transclusionPlugin = ViewPlugin.fromClass(class {
     return builder.finish();
   }
 }, { decorations: v => v.decorations });
+
+// ── Table context menu (create / manage rows & columns) ────────────────────────
+// Right-clicking a rendered table (TableWidget's own <table class="cm-table">,
+// tagged above) shows a small floating menu for adding/removing the row or
+// column under the pointer; right-clicking anywhere else in the editor offers
+// "Crear tabla" to insert a new one. This replaces the native browser/VS Code
+// context menu inside the editor (`e.preventDefault()` below) — table editing
+// doesn't have any other entry point in this editor (there's no ribbon/toolbar),
+// so a context menu is the only reasonable place for it, same as Obsidian's own.
+
+// Finds the syntax-tree `Table` node containing `pos` (if any) and returns the
+// same { fromLine, toLine } character-position range livePreviewPlugin's own
+// Table handling computes — kept in exact agreement with that so a menu action
+// always replaces precisely the span TableWidget itself was built from.
+function findTableRangeAt(state, pos) {
+  let found = null;
+  syntaxTree(state).iterate({
+    from: Math.max(0, pos - 1), to: Math.min(state.doc.length, pos + 1),
+    enter(node) {
+      // Capture plain numbers immediately, not `node` itself — lezer reuses
+      // one mutable SyntaxNodeRef across the whole traversal for performance,
+      // so a reference held past this callback (and read only after
+      // `iterate()` returns) would end up reflecting whatever node the
+      // traversal visited *last*, not the Table actually matched here.
+      if (node.name === 'Table' && node.from <= pos && pos <= node.to) {
+        found = { from: node.from, to: node.to };
+        return false;
+      }
+    },
+  });
+  if (!found) return null;
+  const fromLine = state.doc.lineAt(found.from);
+  const endPos   = Math.max(found.from, Math.min(found.to, state.doc.length) - 1);
+  const toLine   = state.doc.lineAt(endPos);
+  return { fromLine, toLine };
+}
+
+// Re-resolves the table's current range from `pos` (a position anchor
+// captured once, at the moment the context menu was opened — see
+// tableContextMenuHandler below) rather than trusting any range computed at
+// that same moment, so a menu item clicked a little later (nothing should
+// have changed in between, but there's no need to assume that) still edits
+// the table's actual current text.
+function mutateTableAt(view, pos, mutateFn) {
+  const range = findTableRangeAt(view.state, pos);
+  if (!range) return;
+  const { fromLine, toLine } = range;
+  const t = parseTableSrc(view.state.doc.sliceString(fromLine.from, toLine.to));
+  if (!t) return;
+  mutateFn(t);
+  view.dispatch({ changes: { from: fromLine.from, to: toLine.to, insert: serializeTable(t) } });
+}
+
+// Inserts a starter 2-column table at `pos`, as its own block (blank line
+// before it if the line at `pos` isn't already empty). Selects the first
+// header cell's placeholder text so the user can immediately type over it.
+function insertTableTemplate(view, pos) {
+  const line = view.state.doc.lineAt(pos);
+  const lineEmpty = line.text.trim() === '';
+  const insertFrom = lineEmpty ? line.from : line.to;
+  const prefix = lineEmpty ? '' : '\n\n';
+  const firstHeader = 'Columna 1';
+  const body = `| ${firstHeader} | Columna 2 |\n| --- | --- |\n|  |  |\n`;
+  const insert = prefix + body;
+  const headerFrom = insertFrom + prefix.length + 2; // '| '.length
+  view.dispatch({
+    changes: { from: insertFrom, to: insertFrom, insert },
+    selection: EditorSelection.range(headerFrom, headerFrom + firstHeader.length),
+  });
+  view.focus();
+}
+
+class TableMenuView {
+  constructor(view) {
+    this.view = view;
+    this.dom = null;
+    this._onDocMouseDown = e => { if (this.dom && !this.dom.contains(e.target)) this.hide(); };
+    this._onDocKeyDown = e => { if (e.key === 'Escape') this.hide(); };
+  }
+  destroy() { this.hide(); }
+  hide() {
+    if (!this.dom) return;
+    this.dom.remove();
+    this.dom = null;
+    document.removeEventListener('mousedown', this._onDocMouseDown, true);
+    document.removeEventListener('keydown', this._onDocKeyDown, true);
+  }
+  // `items`: Array<{ label, action } | { separator: true }>. `clientX`/`clientY`
+  // are viewport coordinates from the triggering contextmenu event.
+  show(clientX, clientY, items) {
+    this.hide();
+    const menu = document.createElement('div');
+    menu.className = 'cm-table-menu';
+    for (const it of items) {
+      if (it.separator) {
+        const sep = document.createElement('div');
+        sep.className = 'cm-table-menu-sep';
+        menu.appendChild(sep);
+        continue;
+      }
+      const row = document.createElement('div');
+      row.className = 'cm-table-menu-item';
+      row.textContent = it.label;
+      row.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+      row.addEventListener('click', e => {
+        e.preventDefault(); e.stopPropagation();
+        this.hide();
+        it.action();
+      });
+      menu.appendChild(row);
+    }
+    this.view.dom.appendChild(menu);
+
+    // Called from a domEventHandlers callback (contextmenu), not from CM6's own
+    // update()/measure cycle, so a direct synchronous getBoundingClientRect()
+    // read here is safe — same reasoning linkClickHandler's drop handler
+    // already relies on for its own posAtCoords call.
+    const editorRect = this.view.dom.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    let left = clientX - editorRect.left;
+    let top  = clientY - editorRect.top;
+    if (left + menuRect.width > editorRect.width) left = Math.max(0, editorRect.width - menuRect.width - 4);
+    if (top + menuRect.height > editorRect.height) top = Math.max(0, top - menuRect.height);
+    menu.style.left = left + 'px';
+    menu.style.top  = top + 'px';
+    this.dom = menu;
+
+    // Deferred registration: the same right-click that opened the menu would
+    // otherwise immediately bubble to this brand-new document-level listener
+    // as part of its own event dispatch (mousedown normally precedes
+    // contextmenu, but on some platforms/browsers a synthetic follow-up can
+    // still be in flight) and close the menu before the user sees it.
+    setTimeout(() => {
+      document.addEventListener('mousedown', this._onDocMouseDown, true);
+      document.addEventListener('keydown', this._onDocKeyDown, true);
+    }, 0);
+  }
+}
+
+const tableMenuPlugin = ViewPlugin.fromClass(TableMenuView);
+
+const tableContextMenuHandler = EditorView.domEventHandlers({
+  contextmenu(e, view) {
+    if (!view.contentDOM.contains(e.target)) return false;
+    // Widgets with their own real form controls (PropertiesWidget's text
+    // inputs, a ```tasks``` query's filter box, ...) need the native
+    // right-click menu for cut/copy/paste/select-all — don't hijack those.
+    if (e.target.closest && e.target.closest('input, textarea, select')) return false;
+    const menu = view.plugin(tableMenuPlugin);
+    if (!menu) return false;
+
+    const tableEl = e.target.closest && e.target.closest('table.cm-table');
+    if (tableEl) {
+      const cellEl = e.target.closest('td, th');
+      if (!cellEl) { e.preventDefault(); return true; } // inside the table box but not on a cell — nothing to offer
+      const isHeader = cellEl.tagName === 'TH';
+      const colIndex = Number(cellEl.dataset.col);
+      const rowEl = cellEl.closest('tr');
+      const rowIndex = !isHeader && rowEl && rowEl.dataset.row !== undefined ? Number(rowEl.dataset.row) : -1;
+      const pos = view.posAtDOM(tableEl);
+
+      const items = [
+        { label: 'Añadir columna a la izquierda', action: () => mutateTableAt(view, pos, t => insertTableColumn(t, colIndex)) },
+        { label: 'Añadir columna a la derecha',   action: () => mutateTableAt(view, pos, t => insertTableColumn(t, colIndex + 1)) },
+        { label: 'Eliminar columna',               action: () => mutateTableAt(view, pos, t => deleteTableColumn(t, colIndex)) },
+        { separator: true },
+      ];
+      if (isHeader) {
+        items.push({ label: 'Añadir fila abajo', action: () => mutateTableAt(view, pos, t => insertTableRow(t, 0)) });
+      } else if (rowIndex >= 0) {
+        items.push({ label: 'Añadir fila arriba', action: () => mutateTableAt(view, pos, t => insertTableRow(t, rowIndex)) });
+        items.push({ label: 'Añadir fila abajo',  action: () => mutateTableAt(view, pos, t => insertTableRow(t, rowIndex + 1)) });
+        items.push({ label: 'Eliminar fila',      action: () => mutateTableAt(view, pos, t => deleteTableRow(t, rowIndex)) });
+      }
+      e.preventDefault();
+      menu.show(e.clientX, e.clientY, items);
+      return true;
+    }
+
+    // Not inside a rendered table — offer to create one at the click position.
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos == null) return false;
+    e.preventDefault();
+    menu.show(e.clientX, e.clientY, [
+      { label: 'Crear tabla', action: () => insertTableTemplate(view, pos) },
+    ]);
+    return true;
+  },
+});
 
 // ── Ctrl+hover wiki-link preview popup ────────────────────────────────────────
 // Holding Ctrl (Cmd on macOS) while the mouse rests over a [[wiki-link]] shows a
@@ -4011,11 +4689,29 @@ const foldPlugin = ViewPlugin.fromClass(class {
       const { state } = view;
       const { from: vf, to: vt } = view.viewport;
       const headings = collectHeadings(state);
+      const foldedSpans = computeFoldedSpans(state, headings);
       const all = [], lineDecs = [];
 
       for (const h of headings) {
-        // Fold toggle widget — only for heading lines in viewport
-        if (h.lineTo >= vf && h.lineFrom <= vt) {
+        // Fold toggle widget — only for heading lines in viewport, and only
+        // when this heading isn't itself hidden inside an ancestor's folded
+        // content (e.g. an "## Hijo"/"### Nieto" nested under a folded "#
+        // Padre"). Pushing one unconditionally here — the original code —
+        // put a widget decoration at exactly the same zero-length point
+        // (h.lineFrom, h.lineFrom) as that nested heading's own line's
+        // hiddenLineDeco below, the identical "two decorations at one point,
+        // only one survives" collision already diagnosed for blank lines
+        // (see the comment on the collapse loop below): confirmed with a
+        // real EditorView in jsdom (throwaway script, not checked in) that
+        // every *nested heading's own line* kept its FoldToggle widget and
+        // never got `cm-fold-hidden`, while its surrounding paragraph lines
+        // (no competing widget decoration) collapsed correctly — reported as
+        // "folding a heading with nested headings inside still leaves blank
+        // space," one gap per nested heading. A hidden heading's fold toggle
+        // wouldn't be usable anyway (its own line is invisible), so skipping
+        // it here loses no behavior.
+        const hiddenByFold = foldedSpans.some(sp => h.lineFrom >= sp.from && h.lineFrom <= sp.to);
+        if (!hiddenByFold && h.lineTo >= vf && h.lineFrom <= vt) {
           all.push({ from: h.lineFrom, to: h.lineFrom,
             dec: Decoration.widget({ widget: new FoldToggle(h.lineFrom, foldedSet.has(h.lineFrom)), side: -1 }) });
         }
@@ -4034,7 +4730,7 @@ const foldPlugin = ViewPlugin.fromClass(class {
       // correctly. Confirmed with a real EditorView in jsdom (throwaway
       // script, not checked in). Skipping the push for blank lines loses no
       // behavior, since replacing a zero-length span is already a no-op.
-      for (const { from, to } of computeFoldedSpans(state, headings)) {
+      for (const { from, to } of foldedSpans) {
         const startLn = state.doc.lineAt(from).number;
         const endLn   = state.doc.lineAt(to).number;
         for (let ln = startLn; ln <= endLn; ln++) {
@@ -4117,6 +4813,8 @@ function createEditor(parent, content) {
       foldAtomicRanges,
       linkClickHandler,
       hoverPreviewPlugin,
+      tableMenuPlugin,
+      tableContextMenuHandler,
       wikiSuggestPlugin,
       wikiSuggestKeymap,
       verticalMoveKeymap,
