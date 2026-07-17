@@ -24,6 +24,16 @@ let noteHistory = init.recentNotes || [];
 let imageMap  = init.imageMap  || {};
 let syncTimer = null;
 
+// Hanging-indent width reserved for a list item's own marker, used by both
+// the CSS below and the ListItem/ListMark decoration logic further down.
+// Two deliberately different, tight values (not one shared constant, and not
+// the earlier, much wider 1.2em/2em split either) — see the long comment on
+// the ListMark handling ("marker width, round two") for why: a single shared
+// value wide enough to fit a 3-digit ordered marker read as an oversized gap
+// after a plain bullet, compared to Obsidian's own compact spacing.
+const LIST_BULLET_MARKER_WIDTH_EM  = 1.0;
+const LIST_ORDERED_MARKER_WIDTH_EM = 1.6;
+
 // ── Theme (CSS variables from VS Code) ────────────────────────────────────────
 const vsTheme = EditorView.theme({
   '&': { height: '100%', background: 'transparent' },
@@ -114,8 +124,17 @@ const vsTheme = EditorView.theme({
   '.cm-list-depth-4': { paddingLeft: '6em' },
   '.cm-list-first': { marginTop: '0.5em' },
   '.cm-list-bullet': {
-    display: 'inline-block', width: '1.2em',
+    display: 'inline-block', width: `${LIST_BULLET_MARKER_WIDTH_EM}em`,
     color: 'var(--text-muted, inherit)',
+  },
+  // Raw (unrendered) list marker text — an active-line bullet ("- "/"* "/"+ ")
+  // or any ordered marker ("1. ", "10. ", ...), neither of which ever becomes
+  // a fixed-width BulletWidget (bullets: only while inactive; ordered:
+  // never). The actual width is set per-instance as an inline style (see the
+  // ListMark handling in livePreviewPlugin) — bullet vs. ordered reserve
+  // different widths, so this class-level width is just a fallback.
+  '.cm-list-marker-raw': {
+    display: 'inline-block', width: `${LIST_BULLET_MARKER_WIDTH_EM}em`,
   },
   // YAML frontmatter "Properties" panel (PropertiesWidget). PropertiesWidget
   // only ever renders on line 1 (parseFrontmatter requires it), so this
@@ -914,14 +933,29 @@ const vsTheme = EditorView.theme({
   // would otherwise silently win the cascade over this on source-order alone,
   // even though `.cm-code-block` itself is a more specific selector — normal
   // specificity doesn't help against a theme rule using its own !important.
+  // Restyled to match Obsidian's own default code-block look (light, airy card
+  // with generous padding) rather than the flat solid-gray box this used to
+  // be — reported as looking wrong compared to a real Obsidian screenshot.
+  // `--code-background` (theme-overridable) is the base color.
+  //
+  // An earlier version also layered a faint radial-gradient dot-grid texture
+  // on top, trying to match the paper-like grain visible in that reference
+  // screenshot — removed after a follow-up report ("¿por qué el fondo... tiene
+  // puntos? Quítalos") that it just read as visual noise rather than a subtle
+  // texture worth keeping. A plain flat background is a safer default anyway:
+  // each content line is its own separate `.cm-line` element (not one shared
+  // container for the whole block), so a repeating background pattern is
+  // never pixel-perfectly continuous across a multi-line block the way a
+  // single real `<pre>` element's texture would be in Obsidian itself — fine
+  // at a glance, but not something worth the complexity once it wasn't wanted.
   '.cm-code-block': {
     fontFamily: 'var(--code-font, var(--font-monospace, var(--vscode-editor-font-family, monospace)))',
     fontSize: 'var(--code-font-size, 14px)',
-    background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15))) !important',
+    background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.05))) !important',
     color: 'var(--code-normal, inherit)',
-    borderLeft: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
-    borderRight: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
-    padding: '0 14px !important',
+    borderLeft: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.18))) !important',
+    borderRight: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.18))) !important',
+    padding: '0 18px !important',
   },
   // The ```/``` fence lines themselves: collapsed to zero height (not just
   // text-hidden) when not the active line, so — matching Obsidian — they don't
@@ -931,23 +965,30 @@ const vsTheme = EditorView.theme({
   // and .cm-code-block-first/-last below, which sets non-zero margin/border/
   // padding with !important of its own, can end up on the very same line).
   '.cm-code-block-first': {
-    borderTop: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
-    borderRadius: '6px 6px 0 0 !important',
-    paddingTop: '8px !important', marginTop: '6px !important',
+    borderTop: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.18))) !important',
+    borderRadius: '10px 10px 0 0 !important',
+    paddingTop: '12px !important', marginTop: '8px !important',
   },
   '.cm-code-block-last': {
-    borderBottom: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
-    borderRadius: '0 0 6px 6px !important',
-    paddingBottom: '8px !important', marginBottom: '10px !important',
+    borderBottom: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.18))) !important',
+    borderRadius: '0 0 10px 10px !important',
+    paddingBottom: '12px !important', marginBottom: '14px !important',
   },
   '.cm-code-block-solo': {
-    border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.35))) !important',
-    borderRadius: '6px !important',
-    paddingTop: '8px !important', paddingBottom: '8px !important', marginTop: '6px !important', marginBottom: '10px !important',
+    border: '1px solid var(--table-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.18))) !important',
+    borderRadius: '10px !important',
+    paddingTop: '12px !important', paddingBottom: '12px !important', marginTop: '8px !important', marginBottom: '14px !important',
   },
   // Cancels the standalone inline-code chip look for CodeText found inside a
   // fenced block's own box (see the comment on .cm-inline-code / mdHighlight above).
   '.cm-code-block .cm-inline-code': { background: 'none !important', padding: '0 !important', borderRadius: '0 !important' },
+  // Same cancellation, for a fenced block's *raw* (active/being-edited) content
+  // lines instead of its rendered/collapsed box — see the long comment where
+  // `cm-raw-code-line` is pushed, in livePreviewPlugin's FencedCode handling,
+  // for why this needs its own separate rule rather than reusing
+  // `.cm-code-block` itself (that class also carries the collapsed box's own
+  // background/border/padding, which raw mode must not get).
+  '.cm-raw-code-line .cm-inline-code': { background: 'none !important', padding: '0 !important', borderRadius: '0 !important' },
   '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
   '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
@@ -1386,6 +1427,25 @@ class TableWidget extends WidgetType {
       });
 
       cell.addEventListener('keydown', e => {
+        // Stops every keystroke here from bubbling up to CM6's own contentDOM-
+        // level keymap (defaultKeymap/historyKeymap/the Mod-b/Mod-i bindings),
+        // not just the Tab/Enter/Escape ones this handler itself acts on.
+        // Without this, a plain Backspace/Delete inside a cell reached CM6's
+        // deleteCharBackward/deleteCharForward binding first — which targets
+        // *the widget's own single anchor position* in the document, not the
+        // cell's own text, so it visibly did nothing there, but it still
+        // called preventDefault() on the keydown (confirmed with a real
+        // EditorView in jsdom, throwaway script, not checked in: the document
+        // was correctly untouched, but `event.defaultPrevented` was `true`
+        // even so). A prevented keydown never reaches the browser's own
+        // default action for that key, which for a focused contentEditable
+        // element *is* the actual character deletion — so Backspace/Delete
+        // appeared to just do nothing at all. Reported as "el cursor se mueve
+        // por las celdas, pero no puedo ni añadir ni borrar contenido."
+        // Mousedown on this same cell already gets the identical treatment
+        // just above, for the analogous reason (CM6's own cursor-placement
+        // handling, not a keymap command, competing for the same event there).
+        e.stopPropagation();
         if (e.key === 'Tab') {
           e.preventDefault();
           if (e.shiftKey) {
@@ -1583,9 +1643,19 @@ class PropertiesWidget extends WidgetType {
   // *cursor's* position, unrelated to this panel) never mistakes it for an
   // edit inside whatever wiki-link the document cursor happens to be sitting
   // on elsewhere.
+  //
+  // Explicit `selection` — same fix, same reasoning, as mutateTableAt's own
+  // comment (see there for the full story): a stray CM6 cursor sitting right
+  // at this widget's own closing boundary (an easy click to make, just below
+  // the panel) would otherwise risk being pulled back inside the freshly
+  // re-serialized frontmatter text on every property edit, via CM6's default
+  // (ambiguous at that exact boundary) position-mapping — reported as "con
+  // los frontmatters pasa algo parecido" right after the identical table bug.
   commit(newProps) {
+    const insert = serializeFrontmatter(newProps);
     this.view.dispatch({
-      changes: { from: this.from, to: this.to, insert: serializeFrontmatter(newProps) },
+      changes: { from: this.from, to: this.to, insert },
+      selection: mapSelectionOutsideReplacedRange(this.view.state, this.from, this.to, insert),
       userEvent: 'properties.change',
     });
   }
@@ -1628,6 +1698,10 @@ class PropertiesWidget extends WidgetType {
       cb.className = 'cm-properties-checkbox';
       cb.checked = prop.value;
       cb.addEventListener('mousedown', e => e.stopPropagation());
+      // Space toggles a focused checkbox via the browser's own default
+      // action — stopped here for the same reason every text input below
+      // does on its own keydown (see that comment for the full story).
+      cb.addEventListener('keydown', e => e.stopPropagation());
       cb.addEventListener('change', () => {
         const next = this.properties.slice();
         next[idx] = { ...prop, value: cb.checked };
@@ -1650,6 +1724,21 @@ class PropertiesWidget extends WidgetType {
       };
       input.addEventListener('blur', commitValue);
       input.addEventListener('keydown', e => {
+        // Stops every keystroke here from bubbling up to CM6's own
+        // contentDOM-level keymap (defaultKeymap/historyKeymap/Mod-b/Mod-i),
+        // same bug and same fix as wireCell's identical comment for table
+        // cells: without this, Backspace/Delete (and anything else CM6
+        // binds) reached CM6's own command first, which — even though it
+        // has nothing meaningful to do at wherever the document cursor
+        // happens to be — still calls preventDefault() on the keydown,
+        // which suppresses the *browser's* own default action for that key,
+        // which for a focused <input> is the actual character deletion.
+        // Confirmed with a real EditorView in jsdom (throwaway script, not
+        // checked in): the document was correctly untouched by CM6, but
+        // `event.defaultPrevented` was still `true`, meaning the input's own
+        // native Backspace never got a chance to run either. Reported as
+        // "en modo WYSIWYG no puedo editar el frontmatter."
+        e.stopPropagation();
         if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
       });
       valueEl.appendChild(input);
@@ -1688,6 +1777,8 @@ class PropertiesWidget extends WidgetType {
     input.placeholder = '+';
     input.addEventListener('mousedown', e => e.stopPropagation());
     input.addEventListener('keydown', e => {
+      // Same fix, same reasoning, as the text-input keydown handler above.
+      e.stopPropagation();
       if (e.key !== 'Enter' && e.key !== ',') return;
       e.preventDefault();
       const value = input.value.trim();
@@ -1727,6 +1818,8 @@ class PropertiesWidget extends WidgetType {
     const cancel = () => { input.style.display = 'none'; label.style.display = ''; input.value = ''; };
     input.addEventListener('blur', cancel);
     input.addEventListener('keydown', e => {
+      // Same fix, same reasoning, as the text-input keydown handler above.
+      e.stopPropagation();
       if (e.key === 'Escape') { e.preventDefault(); cancel(); return; }
       if (e.key !== 'Enter') return;
       e.preventDefault();
@@ -2313,6 +2406,18 @@ function renderEmptyNotice(container) {
 // Obsidian Tasks' own query results, which likewise just filter/count what's already rendered
 // rather than re-running the query.
 function renderTasksQueryResult(container, result) {
+  // `zoom factor <N>%` query line (see the sibling Tasks extension's core/Query/Query.ts) — CSS
+  // `zoom`, not `font-size`/`transform: scale`, for the same reason its own Markdown Preview
+  // renderer uses it: it scales this container's entire rendered subtree as one unit (text,
+  // emoji/icon badges, padding, layout box included), which a font-size change alone wouldn't do
+  // for anything sized in fixed px, and `transform: scale` wouldn't reflow (leaves the original
+  // box size behind, just visually shrunk inside it). Safe here for the same reason it's safe in
+  // that renderer: this webview is Chromium-based too. Omitted entirely at the default 100%
+  // (normal size) rather than set to the literal string '100%', so a query with no zoom factor
+  // renders identically to before this existed.
+  const zoomFactor = result && result.zoomFactor;
+  container.style.zoom = zoomFactor && zoomFactor !== 100 ? zoomFactor + '%' : '';
+
   const groups = result && result.groups;
   const items  = (result && result.items) || [];
   const totalCount = groups ? groups.reduce((n, g) => n + ((g.items && g.items.length) || 0), 0) : items.length;
@@ -2788,7 +2893,6 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
       const lineDecs = [];  // { from, dec }   — line.from only, to=from
       let listDepth = 0;
       let awaitingFirstItem = false;
-      const listTypeStack = []; // 'BulletList' | 'OrderedList' per current nesting level
       // Line numbers recognised as task-checkbox lines, so the plain ListMark→BulletWidget
       // replacement below can skip them (the task checkbox widget already covers that span).
       const taskLines = new Set();
@@ -2818,7 +2922,7 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
         from: view.viewport.from,
         to:   view.viewport.to,
         leave(node) {
-          if (node.name === 'BulletList' || node.name === 'OrderedList') { listDepth--; listTypeStack.pop(); }
+          if (node.name === 'BulletList' || node.name === 'OrderedList') { listDepth--; }
         },
         enter(node) {
           const n = node.name;
@@ -2831,13 +2935,37 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           // false here (rather than e.g. only for BulletList) also means the
           // matching `leave` never fires for a skipped node, so listDepth
           // bookkeeping for lists later in the *real* document stays balanced.
-          if (fmCloseLine > 0 && state.doc.lineAt(node.from).number <= fmCloseLine) { return false; }
+          //
+          // Checked against `node.to <= fm.to` — whether the node is fully
+          // *contained inside* the frontmatter block — not whether its own
+          // start line merely falls at or before the frontmatter's closing
+          // line. That second (original) check matched the tree's own root
+          // `Document` node too: it always starts on line 1, which is always
+          // "<= fmCloseLine" whenever a frontmatter exists at all, so `enter`
+          // returned `false` for the *root* itself the very first time it
+          // ran — and returning false stops the walk from descending into
+          // that node's children at all, meaning nothing after the
+          // frontmatter (headings, lists, code fences, tables, wiki-links,
+          // ...) was ever visited, for the rest of the document, on *any*
+          // note that had a frontmatter block. Confirmed with a real
+          // `EditorState` and a full tree dump (throwaway script, not
+          // checked in): the old check's very first log line was `BAIL
+          // Document from=0 to=<wholeDocLength>`. Reported as "cuando hay un
+          // frontmatter en la página, los estilos dejan de aplicarse" — every
+          // heading showed its raw "#", every list its raw "*"/"-", every
+          // fenced code block its raw backticks, unconditionally, on any
+          // frontmatter-containing note. `node.to <= fm.to` instead only
+          // matches a node whose *entire* span sits inside the frontmatter
+          // (the same dump confirmed this correctly bails on the
+          // frontmatter's own `HorizontalRule`/`Paragraph`/`BulletList`
+          // nodes while leaving `Document` — and everything after the
+          // frontmatter — alone).
+          if (fmCloseLine > 0 && node.to <= fm.to) { return false; }
 
           // ── Lists — indentation + spacing from the preceding block ────────
           if (n === 'BulletList' || n === 'OrderedList') {
             if (listDepth === 0) { awaitingFirstItem = true; }
             listDepth++;
-            listTypeStack.push(n);
             return; // descend into ListItem children
           }
           if (n === 'ListItem') {
@@ -2865,14 +2993,19 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             // first line, never how far in wrapped continuation rows start).
             // Set as an inline style (wins over any CSS class regardless of
             // stylesheet order) rather than baked into the cm-list-depth-N
-            // classes below, since the marker width differs by list type:
-            // BulletWidget always renders at a fixed 1.2em (.cm-list-bullet),
-            // but an ordered marker is raw, variable-width text ("1." vs
-            // "10." vs "100.") — never replaced by a widget at all (see the
-            // ListMark handling below) — so exact alignment isn't achievable
-            // for every digit count; 2em is just wide enough for the common
-            // 1-2 digit case without visually crowding the text.
-            const markerW = listTypeStack[listTypeStack.length - 1] === 'OrderedList' ? 2 : 1.2;
+            // classes below. `markerW` depends on the *current* (innermost)
+            // list's own type — a fixed, tight reservation per type (not one
+            // shared value wide enough to fit a 3-digit ordered marker, which
+            // read as an oversized gap after a plain bullet — see the
+            // ListMark handling's own comment for the two-round history
+            // here), matching Obsidian's own compact spacing. The ListMark
+            // handling further down gives the raw marker text itself (an
+            // active-line bullet, or any ordered marker, which is never
+            // BulletWidget-replaced at all) the same per-type width, so the
+            // marker's actual rendered footprint always equals what this
+            // formula reserves regardless of active/inactive state.
+            const isOrderedItem = node.node.parent && node.node.parent.name === 'OrderedList';
+            const markerW = isOrderedItem ? LIST_ORDERED_MARKER_WIDTH_EM : LIST_BULLET_MARKER_WIDTH_EM;
             const indentEm = depth * 1.5 + markerW;
             const firstLineStyle = `padding-left:${indentEm}em;text-indent:-${markerW}em`;
             const contLineStyle = `padding-left:${indentEm}em`;
@@ -2974,9 +3107,11 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           if (n === 'Table') {
             try {
               const fromLine = state.doc.lineAt(node.from);
-              const endPos   = Math.max(node.from,
-                Math.min(node.to, state.doc.length) - 1);
-              const toLine   = state.doc.lineAt(endPos);
+              // computeTableEndLine, not node.to directly — see its own long
+              // comment (just above findTableRangeAt) for why trusting the
+              // syntax node's own end here swallowed whatever the user typed
+              // on the very next line as soon as it stopped being blank.
+              const toLine   = computeTableEndLine(state, fromLine, node.to);
 
               const src = state.doc.sliceString(fromLine.from, toLine.to);
               // First line replaced by the rendered widget (single-line, safe)
@@ -3049,7 +3184,37 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             for (let i = fromLine.number; i <= toLine.number; i++) {
               if (active.has(i)) { isActive = true; break; }
             }
-            if (isActive) { return false; }
+            if (isActive) {
+              // Raw mode (cursor somewhere inside) intentionally shows this
+              // block completely unrendered — no marker hiding, no box
+              // styling, per the block-wide design above — but mdHighlight's
+              // own unconditional syntax highlighting still tags a fenced
+              // block's CodeText with the exact same tags.monospace class
+              // InlineCode gets (see the long "Inline code vs. fenced code
+              // block styling" comment near vsTheme), giving each raw
+              // content line the small standalone-inline-code "chip" look —
+              // background, padding, border-radius — fragmented one chip per
+              // *line*, since a highlighted range can't span a block
+              // boundary as a single element, so a multi-line block reads as
+              // a stack of disconnected pills instead of plain raw text.
+              // Reported as "el texto tiene un estilo raro (se aplica un
+              // background solo al texto)." The existing `.cm-code-block
+              // .cm-inline-code` override (below, in vsTheme) only ever
+              // fires once the block is actually rendered/collapsed — that
+              // class is never applied while raw — so it doesn't reach this
+              // case. This pushes a *different*, minimal marker class over
+              // the exact same lines instead, active or not, purely so
+              // `.cm-raw-code-line .cm-inline-code` (vsTheme) can cancel the
+              // chip look unconditionally — deliberately not reusing
+              // `.cm-code-block` itself, which also carries background/
+              // border/padding for the *collapsed* box look that raw mode
+              // must NOT get (the user confirmed raw mode itself is fine,
+              // only the per-line chip background is the problem).
+              for (let ln = fromLine.number; ln <= toLine.number; ln++) {
+                lineDecs.push({ from: state.doc.line(ln).from, dec: Decoration.line({ class: 'cm-raw-code-line' }) });
+              }
+              return false;
+            }
 
             if (info === 'tasks') {
               try {
@@ -3232,25 +3397,70 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             }) });
           }
 
+          if (n === 'ListMark') {
+            // Task-checkbox lines are already fully replaced by TaskCheckboxWidget
+            // (added while processing the enclosing ListItem, above) — skip the plain
+            // bullet replacement so the two decorations don't overlap.
+            if (taskLines.has(ln)) { return false; }
+            const markText = state.doc.sliceString(node.from, node.to);
+            const isBullet = /^[-*+]$/.test(markText);
+            let end = node.to;
+            if (state.doc.sliceString(end, end + 1) === ' ') end++;
+            // Deliberately NOT gated behind the active-line check below (unlike
+            // every other marker-hiding case in this walk) — a list marker's
+            // own rendered *width*, not just whether it's shown raw or hidden,
+            // has to stay identical across active/inactive lines, or the
+            // hanging-indent math above (the ListItem handling's own
+            // per-type `markerW`) stops matching what's actually on screen.
+            // Before this fix: an inactive bullet line got BulletWidget's
+            // fixed-width `.cm-list-bullet` span, but an *active* bullet line
+            // fell through to plain raw "- "/"* " text at its own (narrower)
+            // natural width, and an ordered marker ("1. ", "10. ", "100. ")
+            // was never width-constrained at all — active or not, since it
+            // never matches `/^[-*+]$/` and so never got BulletWidget either.
+            // Net effect: the paragraph text right after the marker visibly
+            // jumped left/right depending on whichever of those cases was on
+            // screen. Reported as "la lista de viñetas tiene alineación
+            // diferente dependiendo si la estás editando o no esa linea".
+            // Fixed by giving the raw marker text — active bullet lines, and
+            // ordered lists unconditionally — the same fixed-width
+            // inline-block box (`cm-list-marker-raw`) that BulletWidget
+            // already uses on an inactive bullet line, so both states of a
+            // bullet marker reserve identical width.
+            //
+            // Marker width, round two: the *first* version of this fix used
+            // one shared width for both bullet and ordered markers (wide
+            // enough to fit a 3-digit ordered number like "100."), on the
+            // theory that a bulleted and an ordered list's own text should
+            // line up at the same column. Reported back against a real
+            // Obsidian screenshot of the same text: Obsidian's own spacing is
+            // much tighter, and doesn't actually force bullet/ordered text to
+            // share a column either (a "•" and a "1." don't occupy the same
+            // rendered width to begin with). Reverted to a per-type width —
+            // `LIST_BULLET_MARKER_WIDTH_EM`/`LIST_ORDERED_MARKER_WIDTH_EM`,
+            // both tighter than the original pre-session values — chosen
+            // purely via the inline style below rather than the shared class,
+            // so this decoration (not just `.cm-list-bullet`) can vary width
+            // by marker type. The active/inactive-jump fix above is
+            // independent of this and still holds either way.
+            const markerW = isBullet ? LIST_BULLET_MARKER_WIDTH_EM : LIST_ORDERED_MARKER_WIDTH_EM;
+            if (isBullet && !active.has(ln)) {
+              decs.push({ from: node.from, to: end, dec: Decoration.replace({ widget: new BulletWidget() }) });
+            } else {
+              decs.push({ from: node.from, to: end, dec: Decoration.mark({
+                class: 'cm-list-marker-raw',
+                attributes: { style: `width:${markerW}em` },
+              }) });
+            }
+            return false;
+          }
+
           if (active.has(ln)) return;
 
           if (n === 'HeaderMark') {
             let end = node.to;
             if (state.doc.sliceString(end, end + 1) === ' ') end++;
             decs.push({ from: node.from, to: end, dec: Decoration.replace({}) });
-            return false;
-          }
-          if (n === 'ListMark') {
-            // Task-checkbox lines are already fully replaced by TaskCheckboxWidget
-            // (added while processing the enclosing ListItem, above) — skip the plain
-            // bullet replacement so the two decorations don't overlap.
-            if (taskLines.has(state.doc.lineAt(node.from).number)) { return false; }
-            const markText = state.doc.sliceString(node.from, node.to);
-            if (/^[-*+]$/.test(markText)) {
-              let end = node.to;
-              if (state.doc.sliceString(end, end + 1) === ' ') end++;
-              decs.push({ from: node.from, to: end, dec: Decoration.replace({ widget: new BulletWidget() }) });
-            }
             return false;
           }
           if (n === 'EmphasisMark' || n === 'CodeMark' || n === 'StrikethroughMark') {
@@ -3621,6 +3831,62 @@ function requestTransclusion(target) {
 // code, blockquotes, bullet lists and paragraphs. Inline formatting (bold, italic,
 // code, wiki-links) is delegated to `renderCell`, which already HTML-escapes its
 // input, so this stays safe against transcluded content containing HTML-like text.
+// A delimiter row (the required second line of a GFM table, e.g. "| --- | :---: |")
+// contains nothing but dashes/colons/pipes/whitespace — checked against the line
+// *after* a candidate header line to tell a real table apart from a paragraph
+// line that merely happens to contain a "|" character.
+const TABLE_DELIM_RE = /^\s*\|?[\s:|-]+\|?\s*$/;
+
+// Renders a read-only <table> from consecutive pipe-containing lines starting at
+// lines[startIdx] — same parseTableSrc/tableAligns this file already uses for the
+// live, editable TableWidget, just without any of its contentEditable/keydown
+// wiring, since transcluded content isn't meant to be edited in place (editing
+// happens in the source note). Returns the DOM node plus the index just past the
+// last table line consumed, so the caller's line-scanning loop can resume there.
+function renderMarkdownTable(lines, startIdx) {
+  let i = startIdx;
+  while (i < lines.length && lines[i].trim() && lines[i].includes('|')) { i++; }
+  const t = parseTableSrc(lines.slice(startIdx, i).join('\n'));
+  if (!t) return null;
+  const aligns = tableAligns(t);
+
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'overflow-x:auto;margin:0.4em 0;';
+  const table = document.createElement('table');
+  table.className = 'cm-table';
+  table.style.cssText = 'border-collapse:collapse;width:100%;font-size:inherit;font-family:inherit;color:inherit;';
+  const BORDER   = '1px solid rgba(128,128,128,0.38)';
+  const CELL     = `border:${BORDER};padding:5px 12px;line-height:1.5;vertical-align:top;color:inherit;`;
+  const TH_EXTRA = 'font-weight:600;background:rgba(128,128,128,0.12);';
+
+  const thead = document.createElement('thead');
+  const hRow  = document.createElement('tr');
+  t.header.forEach((h, ci) => {
+    const th = document.createElement('th');
+    th.style.cssText = CELL + TH_EXTRA + `text-align:${aligns[ci] || 'left'};`;
+    th.innerHTML = renderCell(h);
+    hRow.appendChild(th);
+  });
+  thead.appendChild(hRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  t.rows.forEach((row, ri) => {
+    const tr = document.createElement('tr');
+    if (ri % 2 === 1) tr.style.background = 'rgba(128,128,128,0.05)';
+    row.forEach((cell, ci) => {
+      const td = document.createElement('td');
+      td.style.cssText = CELL + `text-align:${aligns[ci] || 'left'};`;
+      td.innerHTML = renderCell(cell);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return { el: wrap, next: i };
+}
+
 function renderMarkdownBlock(text) {
   const frag = document.createDocumentFragment();
   const lines = (text || '').split(/\r\n|\n/);
@@ -3636,6 +3902,11 @@ function renderMarkdownBlock(text) {
   };
   while (i < lines.length) {
     const line = lines[i];
+    if (line.includes('|') && i + 1 < lines.length && TABLE_DELIM_RE.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+      flushPara();
+      const table = renderMarkdownTable(lines, i);
+      if (table) { frag.appendChild(table.el); i = table.next; continue; }
+    }
     if (/^\s*```/.test(line)) {
       flushPara();
       const codeLines = [];
@@ -3825,6 +4096,50 @@ const transclusionPlugin = ViewPlugin.fromClass(class {
 // doesn't have any other entry point in this editor (there's no ribbon/toolbar),
 // so a context menu is the only reasonable place for it, same as Obsidian's own.
 
+// A GFM table has no blank-line-terminated boundary the way this editor
+// needs one — per spec (and confirmed against lezer-markdown's own actual
+// behavior with a real EditorState, throwaway script, not checked in), a
+// `Table` node keeps absorbing *any* subsequent non-blank line as a "lazy
+// continuation" row, pipe character or not, stopping only at a genuine blank
+// line or EOF. That's correct GFM parsing, but disastrous for a widget whose
+// whole replaced range is derived from this node: the instant the user types
+// a single character on the blank line right after a table — the most
+// natural place to start writing the next paragraph — that line (and
+// everything non-blank after it, until the next real blank line) gets pulled
+// into the *same* Table node. `TableWidget`'s own `parseTableSrc` silently
+// drops any line without a "|" from what it renders as a row, so that typed
+// text doesn't just render wrong, it vanishes from view entirely while still
+// occupying document positions inside the widget's own takeover range — and
+// the next table edit's `serializeTable` call, having never parsed it as
+// anything, deletes it outright. Reported over two rounds as "todo se vuelve
+// loco" (typed text ending up spliced into the table, then — after the
+// selection-mapping fix — fragmenting into stray single characters on
+// separate lines instead): both were downstream symptoms of this same
+// oversized range, not separate bugs. Confirmed directly: typing one
+// character on the blank line after a 5-line table grew the syntax tree's
+// own Table node from 5 lines to 7, immediately swallowing a `![[...]]`
+// embed on the line after too.
+//
+// Fix: never trust the syntax node's own `.to` as the table's *effective*
+// end for rendering/editing purposes. Walk forward from the header line
+// instead, including a line only while it still looks like table syntax (a
+// literal "|"), and stop at the first one that doesn't — mirroring
+// `parseTableSrc`'s own row filter, so the range this editor treats as "the
+// table" and the range `parseTableSrc` actually turns into rows always
+// agree. The syntax node's own `.to` is still used as an outer bound (a
+// table can't be *narrower* than what lezer parsed, only this editor's own
+// notion of where it *effectively* ends needs to be narrower than lezer's).
+function computeTableEndLine(state, fromLine, nodeTo) {
+  const nodeToLine = state.doc.lineAt(Math.max(fromLine.from, Math.min(nodeTo, state.doc.length) - 1));
+  let toLine = fromLine;
+  for (let ln = fromLine.number; ln <= nodeToLine.number; ln++) {
+    const line = state.doc.line(ln);
+    if (ln > fromLine.number && !line.text.includes('|')) break;
+    toLine = line;
+  }
+  return toLine;
+}
+
 // Finds the syntax-tree `Table` node containing `pos` (if any) and returns the
 // same { fromLine, toLine } character-position range livePreviewPlugin's own
 // Table handling computes — kept in exact agreement with that so a menu action
@@ -3847,9 +4162,58 @@ function findTableRangeAt(state, pos) {
   });
   if (!found) return null;
   const fromLine = state.doc.lineAt(found.from);
-  const endPos   = Math.max(found.from, Math.min(found.to, state.doc.length) - 1);
-  const toLine   = state.doc.lineAt(endPos);
+  const toLine   = computeTableEndLine(state, fromLine, found.to);
   return { fromLine, toLine };
+}
+
+// Computes a safe selection for a transaction that replaces [oldFrom, oldTo]
+// with `insert` — shared by mutateTableAt and PropertiesWidget.commit, the
+// two places in this file that replace an entire widget-owned range (a
+// table's own source lines, the frontmatter block) without the user ever
+// having placed a *CM6* cursor inside it in the first place (editing happens
+// through the cell/panel's own DOM controls instead).
+//
+// Reported bug, confirmed with a real EditorView in jsdom (throwaway script,
+// not checked in): clicking just below a table (or just below a frontmatter
+// panel) can resolve to a position sitting *exactly* at the widget's own
+// closing boundary — a very easy click to make, since that boundary is
+// precisely where "the widget" visually ends and "real editable content"
+// visually begins. CM6's default position-mapping for a change with no
+// explicit `selection` is ambiguous for a position sitting *exactly* at the
+// edge of the replaced range: it can get pulled to the *end* of the newly
+// inserted content — i.e. back inside the table/frontmatter's own text —
+// instead of staying just past it. Every subsequent cell/property commit
+// (mutateTableAt has no other way to reach this range) re-dispatches with
+// that same ambiguity, so the stray cursor never escapes on its own; the
+// next real keystroke typed there (the user, believing they're editing
+// normal content below the block) lands inside the block's own markdown
+// instead — confirmed via video: characters ended up spliced into a table's
+// delimiter row, corrupting it, while the user was trying to type text after
+// the table entirely.
+//
+// Fix: explicitly redirect any selection range whose anchor/head sits *at or
+// within* [oldFrom, oldTo] to land just past the newly inserted content —
+// never leaving it ambiguous. A position clearly outside that span (before
+// or after) still maps the ordinary way (shifted by the length delta for
+// anything after). This makes the class of bug structurally impossible
+// rather than patching the one reported symptom: it holds regardless of how
+// the stray cursor got near the boundary, and regardless of how many
+// consecutive commits follow (verified with a throwaway script simulating 4
+// commits in a row with the cursor sitting at the boundary the whole time —
+// it never drifted inside).
+function mapSelectionOutsideReplacedRange(state, oldFrom, oldTo, insert) {
+  const delta = insert.length - (oldTo - oldFrom);
+  const newTo = oldFrom + insert.length;
+  const afterPos = Math.min(newTo + 1, state.doc.length + delta);
+  const mapPos = (pos) => {
+    if (pos < oldFrom) return pos;
+    if (pos > oldTo) return pos + delta;
+    return afterPos;
+  };
+  return EditorSelection.create(
+    state.selection.ranges.map(r => EditorSelection.range(mapPos(r.anchor), mapPos(r.head))),
+    state.selection.mainIndex
+  );
 }
 
 // Re-resolves the table's current range from `pos` (a position anchor
@@ -3865,7 +4229,11 @@ function mutateTableAt(view, pos, mutateFn) {
   const t = parseTableSrc(view.state.doc.sliceString(fromLine.from, toLine.to));
   if (!t) return;
   mutateFn(t);
-  view.dispatch({ changes: { from: fromLine.from, to: toLine.to, insert: serializeTable(t) } });
+  const insert = serializeTable(t);
+  view.dispatch({
+    changes: { from: fromLine.from, to: toLine.to, insert },
+    selection: mapSelectionOutsideReplacedRange(view.state, fromLine.from, toLine.to, insert),
+  });
 }
 
 // Inserts a starter 2-column table at `pos`, as its own block (blank line
@@ -5138,22 +5506,39 @@ const foldAtomicRanges = EditorView.atomicRanges.of(view => {
   return builder.finish();
 });
 
-// Blocks any cursor position from position 0 through the frontmatter's own
+// Blocks any cursor position from line 2 through the frontmatter's own
 // closing "---" line — requested: the cursor should only ever be able to
-// land *below* the frontmatter panel, never inside or immediately to either
-// side of its own (raw, hidden) text. PropertiesWidget's whole design
-// already assumes this — "editing happens entirely through that panel's own
-// controls," never by directly editing the underlying YAML text in Live
-// Preview — so a text cursor being placeable inside that raw span at all was
-// an oversight, not an intentional gap; foldAtomicRanges (above) already
-// established the exact same EditorView.atomicRanges mechanism and its
-// semantics for folded heading content, so this mirrors it rather than
-// inventing a new approach. The `to` bound is computed the same way
-// computeFoldedSpans computes a fold's own upper bound (one *less* than
-// wherever the next valid content actually starts) — here that's the
-// frontmatter's closing "---" line's own `.to`, not `.to + 1`, since the
-// newline right after it is exactly the boundary a redirected cursor should
-// land just past, not before.
+// land *below* the frontmatter panel, never inside its own (raw, hidden)
+// text. foldAtomicRanges (above) established the exact same
+// EditorView.atomicRanges mechanism and its semantics for folded heading
+// content, so this mirrors it rather than inventing a new approach. The `to`
+// bound is computed the same way computeFoldedSpans computes a fold's own
+// upper bound (one *less* than wherever the next valid content actually
+// starts) — here that's the frontmatter's closing "---" line's own `.to`,
+// not `.to + 1`, since the newline right after it is exactly the boundary a
+// redirected cursor should land just past, not before.
+//
+// Deliberately does *not* cover line 1 itself, where PropertiesWidget's own
+// interactive controls (text inputs, pills, checkboxes) render. First
+// version covered [0, to] — the whole block — which broke clicking into the
+// panel's own text `<input>`s entirely (reported right after shipping:
+// "no puedo editar el contenido de un frontmatter"). Root cause: CM6's own
+// pointer handling resolves *any* click within a widget-replaced range back
+// to that widget's single anchor position, then — specifically because that
+// position falls inside an atomic range — takes a different path than a
+// plain click that needs no remapping, one that suppresses the mousedown's
+// default action; a browser only auto-focuses the element under a mousedown
+// if that default action isn't prevented, so the click reached the `<input>`
+// but never actually focused it. Line 1 doesn't need atomicRanges protection
+// in the first place: it's already a single `Decoration.replace({widget})`
+// spanning the entire line, so there's no raw text there for a cursor to
+// land "inside" of regardless — the only two reachable positions on it are
+// its own boundaries (0 and its own `.to`), both already effectively inert.
+// The actual gap this facet needs to close is lines 2..N, which — unlike
+// line 1 — are collapsed one line at a time (hiddenLineDeco per line, not
+// one combined widget) and therefore do have reachable boundary positions
+// between them for a cursor to slip into, exactly like the folded-heading
+// gap foldAtomicRanges already closes.
 //
 // Registered *inside* previewCompartment (with previewCompartment's other
 // entries below), not alongside foldAtomicRanges outside it: PropertiesWidget
@@ -5165,9 +5550,10 @@ const foldAtomicRanges = EditorView.atomicRanges.of(view => {
 const frontmatterAtomicRanges = EditorView.atomicRanges.of(view => {
   const fm = parseFrontmatter(view.state);
   if (!fm) return Decoration.none;
+  const from = view.state.doc.line(1).to + 1;
   const to = view.state.doc.lineAt(fm.to).to;
   const builder = new RangeSetBuilder();
-  if (to > 0) { try { builder.add(0, to, Decoration.replace({})); } catch (_) {} }
+  if (to > from) { try { builder.add(from, to, Decoration.replace({})); } catch (_) {} }
   return builder.finish();
 });
 
@@ -5252,8 +5638,23 @@ function createEditor(parent, content) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 const root = document.documentElement;
-root.style.setProperty('--md-font', init.font || '');
-root.style.setProperty('--code-font', init.codeFont || '');
+// `var(--x, fallback)` only substitutes `fallback` when `--x` is *undefined* —
+// a custom property explicitly set to an empty string still counts as "set" (to
+// the empty token stream), so `font-family: var(--code-font, var(--font-
+// monospace, ...))` with `--code-font: ;` doesn't fall through the chain at
+// all: the whole declaration becomes invalid at computed-value time and
+// `font-family` reverts to its *inherited* value instead — silently skipping
+// every fallback, including the final hardcoded `monospace`. Reported as code
+// blocks not using the configured monospace font at all (`obsidianLike.codeFont`
+// empty is the default/common case, so this bit essentially everyone). Fixed by
+// never calling `setProperty` with an empty value — `removeProperty` instead,
+// so the custom property is genuinely undefined and `var()`'s fallback chain
+// actually runs.
+function setFontVar(name, value) {
+  if (value) { root.style.setProperty(name, value); } else { root.style.removeProperty(name); }
+}
+setFontVar('--md-font', init.font);
+setFontVar('--code-font', init.codeFont);
 root.style.setProperty('--code-font-size', (init.codeFontSize || 14) + 'px');
 root.style.setProperty('--md-font-size', (init.fontSize || 14) + 'px');
 
@@ -5470,8 +5871,12 @@ window.addEventListener('message', ev => {
       break;
     }
     case 'font-update':
-      if (msg.font)      root.style.setProperty('--md-font', msg.font);
-      if (msg.codeFont !== undefined) root.style.setProperty('--code-font', msg.codeFont);
+      // setFontVar (see its own comment above) — not a plain setProperty —
+      // so clearing a custom font back to "use the theme/editor default"
+      // actually falls through var()'s fallback chain instead of leaving
+      // --md-font/--code-font set to an inert empty string.
+      if (msg.font !== undefined)     setFontVar('--md-font', msg.font);
+      if (msg.codeFont !== undefined) setFontVar('--code-font', msg.codeFont);
       if (msg.codeFontSize) root.style.setProperty('--code-font-size', msg.codeFontSize);
       if (msg.fontSize)  root.style.setProperty('--md-font-size', msg.fontSize);
       // Changing the font can change line-height/character metrics after CM6

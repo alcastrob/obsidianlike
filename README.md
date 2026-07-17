@@ -230,7 +230,10 @@ prioridad, dependencias, fechas y un backlink clicable a la nota (con el encabez
 está la tarea, si tiene uno) — con un botón ✏️ propio para editar esa tarea concreta sin salir del
 listado. Encima del listado hay un filtro de texto por descripción, y debajo un contador de
 tareas mostradas, igual que en Obsidian. Igual que en una tarea suelta, una URL suelta dentro de
-la descripción también se muestra como enlace clicable.
+la descripción también se muestra como enlace clicable. Añadiendo una línea `zoom factor 80%` a la
+consulta (propio de este port, no del plugin Tasks original) se reduce el tamaño de todo el
+listado — texto, emojis, badges — al porcentaje indicado, útil para listados largos; sin esa
+línea, tamaño normal.
 
 Esto funciona como **dependencia opcional** de la extensión hermana `angelCastro.obsidian-like-tasks`
 (repo `obsidianlike_tasks`): si no está instalada, los checkboxes siguen funcionando con un toggle
