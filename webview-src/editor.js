@@ -900,8 +900,14 @@ const vsTheme = EditorView.theme({
     margin: '4px 0',
     background: 'var(--vscode-editorWidget-border, rgba(128,128,128,0.25))',
   },
-  // Standalone inline code (`text`) — a small chip, same look as before this
-  // was split out of mdHighlight's tags.monospace spec into a stable class name.
+  // Standalone inline code (`text`) — plain colored monospace text, no chip
+  // background/padding/border-radius. Reported against a real Obsidian
+  // screenshot (`telemetría` rendered inline in a sentence): the vault's own
+  // Live Preview shows inline code as just accent-colored monospace text
+  // flowing with the surrounding sentence, not a pill/chip — this used to add
+  // a background+padding+radius "chip" look that doesn't match that reference
+  // at all. Font/size stay theme-configurable exactly as before; only the
+  // box-styling properties were removed.
   '.cm-inline-code': {
     // --code-font is the user-configurable `obsidianLike.codeFont` setting (empty
     // by default, falling through to the Obsidian theme's --font-monospace var,
@@ -910,9 +916,11 @@ const vsTheme = EditorView.theme({
     // --code-font-size is the user-configurable `obsidianLike.codeFontSize` setting
     // (default 14px) — an absolute size, unlike the surrounding text's em-relative sizing.
     fontSize: 'var(--code-font-size, 14px)',
-    background: 'var(--code-background, var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)))',
-    color: 'var(--code-normal, inherit)',
-    padding: '1px 4px', borderRadius: '3px',
+    // --code-normal is the Obsidian-theme-driven color; the fallback chain ends
+    // on VS Code's own preformatted-text color rather than `inherit`, since
+    // `inherit` renders indistinguishably from plain body text when no theme
+    // defines --code-normal — the whole point of this rule is a visible accent.
+    color: 'var(--code-normal, var(--text-accent, var(--vscode-textPreformat-foreground, #c586c0)))',
   },
   // Fenced code blocks (```...```) — line classes added in livePreviewPlugin's
   // FencedCode handling, one per *content* line (fence-open/-close lines are
@@ -989,6 +997,47 @@ const vsTheme = EditorView.theme({
   // `.cm-code-block` itself (that class also carries the collapsed box's own
   // background/border/padding, which raw mode must not get).
   '.cm-raw-code-line .cm-inline-code': { background: 'none !important', padding: '0 !important', borderRadius: '0 !important' },
+  // Blockquotes (`> text`) — a full-width card: tinted background (with a
+  // subtle dot-grid texture, matching a real Obsidian screenshot reference),
+  // a colored left bar, and rounded corners on the block's outer edges.
+  // Reported against that screenshot: this editor previously only drew a bare
+  // 3px left border with muted text and no background at all (the old
+  // tags.quote mark spec, now stripped down to just the text color — see
+  // mdHighlight above). Every line in the block gets `.cm-blockquote-line`
+  // unconditionally (even the active/cursor line — mirrors `.HyperMD-header`,
+  // which keeps its own line class while editing too); only the raw "> "
+  // marker itself (QuoteMark) hides/reveals per active line, same as
+  // HeaderMark. `!important` throughout for the same reason `.cm-code-block`
+  // needs it: a later-loading Obsidian theme's own generic line/blockquote
+  // CSS can otherwise win the cascade regardless of this rule's specificity.
+  // Note this dot texture is a deliberate, distinct choice from the identical
+  // pattern tried (and reverted, 3 times) for `.cm-code-block` — that one was
+  // rejected as "se ve fatal" for *code*; this is a different element with
+  // its own reference screenshot explicitly showing the texture, not a
+  // reintroduction of the rejected code-block look.
+  '.cm-blockquote-line': {
+    background: 'var(--blockquote-background-color, var(--vscode-textBlockQuote-background, rgba(128,128,128,0.06))) !important',
+    backgroundImage: 'radial-gradient(circle, rgba(128,128,128,0.14) 1px, transparent 1px) !important',
+    backgroundSize: '11px 11px !important',
+    borderLeft: '4px solid var(--blockquote-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.5))) !important',
+    paddingLeft: '14px !important',
+    paddingRight: '10px !important',
+  },
+  '.cm-blockquote-line-first': {
+    borderRadius: '6px 6px 0 0 !important',
+    paddingTop: '6px !important',
+    marginTop: '4px !important',
+  },
+  '.cm-blockquote-line-last': {
+    borderRadius: '0 0 6px 6px !important',
+    paddingBottom: '6px !important',
+    marginBottom: '8px !important',
+  },
+  '.cm-blockquote-line-solo': {
+    borderRadius: '6px !important',
+    paddingTop: '6px !important', paddingBottom: '6px !important',
+    marginTop: '4px !important', marginBottom: '8px !important',
+  },
   '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
   '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
@@ -1085,9 +1134,13 @@ const mdHighlight = HighlightStyle.define([
   // with a `.cm-code-block .cm-inline-code` override cancelling the chip look
   // specifically inside a fenced block (see the comment there).
   { tag: tags.monospace, class: 'cm-inline-code' },
+  // Only the text color lives here — the border/background/padding "card" look
+  // is now a block-wide line class (`.cm-blockquote-line` etc., in vsTheme),
+  // built in livePreviewPlugin's own Blockquote handling, not this per-character
+  // mark (which — like tags.monospace for fenced code — can't span a multi-line
+  // block as one element, so it used to render as a stack of disconnected
+  // left-border fragments instead of one cohesive box).
   { tag: tags.quote,
-    borderLeft: '3px solid var(--blockquote-border-color, var(--vscode-editorWidget-border, rgba(128,128,128,0.4)))',
-    paddingLeft: '12px',
     color: 'var(--blockquote-color, var(--text-muted, inherit))' },
   { tag: tags.processingInstruction,
     color: 'var(--text-faint, var(--vscode-editorLineNumber-foreground, rgba(128,128,128,0.5)))',
@@ -2896,6 +2949,18 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
       // Line numbers recognised as task-checkbox lines, so the plain ListMark→BulletWidget
       // replacement below can skip them (the task checkbox widget already covers that span).
       const taskLines = new Set();
+      // Line numbers already given a `.cm-blockquote-line*` class — a nested
+      // blockquote's own Blockquote node spans a subset of its parent's lines,
+      // and the tree walk visits the outer one first (top-down `enter`), so
+      // without this a nested `> > quote` line would get two separate
+      // Decoration.line pushes at the exact same `line.from` point. That's the
+      // same "two decorations at one point" collision documented elsewhere in
+      // this file (see hiddenLineDeco's blank-line fix) for a line+replace
+      // pair; here it'd be two same-point line decorations instead, with no
+      // guarantee both survive the RangeSetBuilder merge. Tracking handled
+      // lines and skipping on the (later-visited, nested) duplicate avoids
+      // relying on that being safe at all.
+      const blockquoteHandledLines = new Set();
 
       // ── YAML frontmatter → "Propiedades" panel ─────────────────────────────
       // Computed unconditionally (not viewport-gated like the tree-walk below)
@@ -3323,6 +3388,39 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             return false;
           }
 
+          // ── Blockquotes — card-style box, active + inactive (mirrors headings
+          // just below: the box stays on even while editing a line inside it;
+          // only the raw "> " marker itself, QuoteMark further down this same
+          // switch, hides/reveals per active line) ──────────────────────────
+          if (n === 'Blockquote') {
+            try {
+              const fromLine = state.doc.lineAt(node.from);
+              // node.to normally lands right at the end of the block's last
+              // quoted line (a blank line always terminates a blockquote in
+              // CommonMark, so — unlike FencedCode while unclosed — there's no
+              // "runs away to EOF" case to guard against here). The one edge
+              // case worth handling: node.to landing exactly on the *next*
+              // line's own start (i.e. including the trailing newline), which
+              // would make a naive `lineAt(node.to)` report one line too many.
+              let toLine = state.doc.lineAt(node.to);
+              if (toLine.from === node.to && toLine.number > fromLine.number) {
+                toLine = state.doc.line(toLine.number - 1);
+              }
+              for (let bln = fromLine.number; bln <= toLine.number; bln++) {
+                if (blockquoteHandledLines.has(bln)) continue;
+                blockquoteHandledLines.add(bln);
+                const line = state.doc.line(bln);
+                let cls = 'cm-blockquote-line';
+                if (fromLine.number === toLine.number) cls += ' cm-blockquote-line-solo';
+                else if (bln === fromLine.number) cls += ' cm-blockquote-line-first';
+                else if (bln === toLine.number) cls += ' cm-blockquote-line-last';
+                lineDecs.push({ from: line.from, dec: Decoration.line({ class: cls }) });
+              }
+            } catch (_) {}
+            // Don't return false — QuoteMark, nested lists/blockquotes and the
+            // quoted text itself still need their own normal processing.
+          }
+
           // ── Headings — line class for Obsidian theme (active + inactive) ──
           const headingM = /^ATXHeading([1-6])$/.exec(n);
           if (headingM) {
@@ -3458,6 +3556,18 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
           if (active.has(ln)) return;
 
           if (n === 'HeaderMark') {
+            let end = node.to;
+            if (state.doc.sliceString(end, end + 1) === ' ') end++;
+            decs.push({ from: node.from, to: end, dec: Decoration.replace({}) });
+            return false;
+          }
+          // Blockquote's "> " prefix — one QuoteMark node per quoted line (lezer
+          // pushes a fresh one for every line, including continuation lines —
+          // confirmed against @lezer/markdown's own DefaultSkipMarkup.Blockquote).
+          // Same hide-on-non-active-line treatment as HeaderMark: the block's
+          // own card styling (.cm-blockquote-line*, pushed above) stays on
+          // regardless, only the raw "> " marker itself reveals while editing.
+          if (n === 'QuoteMark') {
             let end = node.to;
             if (state.doc.sliceString(end, end + 1) === ' ') end++;
             decs.push({ from: node.from, to: end, dec: Decoration.replace({}) });
@@ -4979,27 +5089,81 @@ function moveVerticalByLine(view, dir, extend) {
   const curLine = state.doc.lineAt(range.head);
 
   // EditorView.lineWrapping means a single *document* line with no embedded
-  // newline (a long paragraph) can still span several on-screen rows. Moving
-  // by document-line-number alone (below) would skip straight over those
-  // extra rows to the next real line — e.g. landing on the blank line after
-  // a long paragraph instead of the paragraph's own second visual row.
-  // CM6's own pixel-based view.moveVertically() *does* handle this correctly,
-  // but only reusing it for a single, freshly-computed step that turns out to
-  // stay on the *same* document line: calling it fresh (no persisted
-  // goalColumn passed in, unlike CM6's own cursorLineDown/Up, which is what
-  // this whole custom keymap replaced) means there's no stale cross-press
-  // goal to go wrong, and moving between wrap-rows of one line never crosses
-  // into a differently-decorated line either, so the corruption described
-  // above this function's binding can't happen for this particular step.
-  const pixelCandidate = view.moveVertically(EditorSelection.cursor(range.head), dir > 0);
-  const staysOnSameLine = state.doc.lineAt(pixelCandidate.head).number === curLine.number;
+  // newline (a long paragraph, or a single long list-item's own text) can
+  // still span several on-screen rows. Moving by document-line-number alone
+  // (the `else` branch below) would skip straight over those extra rows to
+  // the next real line — e.g. landing on the blank line after a long
+  // paragraph instead of the paragraph's own second visual row.
+  //
+  // First version of this same-line-row step reused CM6's own pixel-based
+  // view.moveVertically() for a single, freshly-computed step, trusting it
+  // whenever the result stayed on the same document line (state.doc.lineAt
+  // comparison). Reported back as still reproducible on macOS specifically —
+  // a 3-row-wrapped list item where Down correctly moved row 1 → row 2, but
+  // the *second* Down (row 2 → row 3) landed past the item entirely, on
+  // whatever document line follows it. Not reproduced with byte-identical
+  // content on Windows/headless Chrome (built a real EditorView via Puppeteer
+  // against this exact bundle and stepped through it — every row-to-row move
+  // came out correct there). That points at view.moveVertically's own
+  // internal single-step goal-column math occasionally overshooting by more
+  // than one visual row depending on platform font-rendering/hinting — the
+  // same class of pixel-based unreliability this whole custom keymap exists
+  // to route around for *cross*-line moves, just now hit inside the one
+  // remaining call to a CM6 pixel primitive this function still had.
+  //
+  // Fixed by dropping view.moveVertically here too, in favor of a measured,
+  // self-computed row check: view.coordsAtPos gives a position's actual
+  // rendered box (real font metrics, whatever the platform). If stepping one
+  // row-height in the requested direction from the cursor's own row still
+  // lands inside curLine's own rendered vertical extent, there's a further
+  // row within this same document line — resolved directly via
+  // view.posAtCoords at that point, never asking CM6's own vertical-motion
+  // primitive to decide "how far".
+  //
+  // curLine's own top/bottom are measured via coordsAtPos at its first/last
+  // character, NOT view.lineBlockAt — lineBlockAt's `top`/`height` live in
+  // CM6's internal *document* coordinate space (scroll-independent, origin
+  // at the very top of the content), while coordsAtPos returns viewport/DOM
+  // pixel coordinates; mixing the two silently compares unrelated numbers.
+  // Confirmed empirically (a real EditorView via Puppeteer against this
+  // exact bundle, not checked in): with lineBlockAt, `blockBottom` for a
+  // 3-row wrapped line came out around 73 while headCoords (viewport
+  // coordinates) for its own second row already sat past 90 — so the
+  // "still inside this line's block" check always failed past the first
+  // row, exactly reproducing the reported skip-past-the-whole-item bug
+  // (and confirming, mid-fix, that this exact coordinate mismatch — not the
+  // platform-specific view.moveVertically overshoot this rewrite set out to
+  // fix — was what a first draft of this rewrite introduced). Using
+  // coordsAtPos for both ends keeps everything in the same coordinate space.
+  let newHead = null;
+  const headCoords = view.coordsAtPos(range.head);
+  if (headCoords) {
+    const blockTop = view.coordsAtPos(curLine.from)?.top;
+    const lastCharCoords = view.coordsAtPos(Math.max(curLine.from, curLine.to - 1), 1);
+    const blockBottom = lastCharCoords ? lastCharCoords.bottom : view.coordsAtPos(curLine.to)?.bottom;
+    if (blockTop != null && blockBottom != null) {
+      // Measured from the cursor's own rendered box, not a hardcoded/default
+      // line height — matches whatever this particular row's actual font
+      // size is (a heading's own row is taller than plain body text, say).
+      const rowH = Math.max(1, headCoords.bottom - headCoords.top);
+      const targetY = (headCoords.top + headCoords.bottom) / 2 + dir * rowH;
+      if (targetY > blockTop && targetY < blockBottom) {
+        const pos = view.posAtCoords({ x: headCoords.left, y: targetY });
+        // Paranoia check: posAtCoords should land back inside curLine given
+        // targetY is inside its own measured extent, but never trust a
+        // cross-checked geometry call blindly — falls through to the
+        // ordinary cross-line jump below if this ever disagrees.
+        if (pos != null && state.doc.lineAt(pos).number === curLine.number) {
+          newHead = pos;
+        }
+      }
+    }
+  }
 
-  let newHead;
-  if (staysOnSameLine) {
-    // Still within the same wrapped document line — trust the pixel step,
-    // and deliberately leave vGoalCol untouched (this isn't a line-to-line
-    // jump, so it has no bearing on that column-preservation mechanism).
-    newHead = pixelCandidate.head;
+  if (newHead != null) {
+    // Still within the same wrapped document line — and deliberately leave
+    // vGoalCol untouched (this isn't a line-to-line jump, so it has no
+    // bearing on that column-preservation mechanism).
   } else {
     // Actually crossing into a different document line (the common case,
     // and also what a wrapped line's *last*/*first* visual row hits next) —
