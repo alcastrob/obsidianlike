@@ -5162,28 +5162,76 @@ function moveVerticalByLine(view, dir, extend) {
   // adapts to whatever margin/padding this specific line and its neighbor
   // happen to carry, instead of hardcoding a number that only happens to
   // work for plain, unspaced wrapped text.
+  //
+  // Fourth attempt: still reported overshooting on real macOS hardware —
+  // this time on the *last* row of a 3-row wrapped item specifically (the
+  // list item's own line rendered at 84px total / 3 rows of 28px each,
+  // confirmed via a live devtools measurement — so the row genuinely exists,
+  // the bug is failing to land on it). Root cause: querying posAtCoords at
+  // the *cursor's own* x (preserved from the previous, wider row) fails
+  // whenever the *next* row's actual text doesn't extend out that far
+  // horizontally (short last lines of a wrapped paragraph are common) — the
+  // browser's hit-testing at a point past a row's own rendered content can
+  // resolve to whatever it considers nearest, which past a short row's end
+  // can be the (empty, full-width) line below rather than that row's own
+  // last character, misreporting a different document line entirely even
+  // though the row we wanted is right there.
+  //
+  // Fixed the fourth attempt's specific failure (adding a "safe x" fallback)
+  // but a live trace (Puppeteer, real ArrowDown keypresses against this exact
+  // bundle, then a hand-simulation of the same candidate search from the
+  // live post-keypress state) showed *neither* x — not the cursor's own, not
+  // curLine.from's — ever resolving inside the target row at all, for any
+  // nudge: `view.posAtCoords` kept returning a position on the *next
+  // document line* even for a y solidly inside the target row's own measured
+  // [top, bottom) band (confirmed by also directly mapping every character
+  // offset of curLine to its own row via coordsAtPos, independent of any
+  // pixel guessing). Root cause: curLine.from's x is this *specific* item's
+  // marker-row (row 0) indent, which differs from every *continuation* row's
+  // own (different, un-indented-by-the-marker) hanging-indent x — so it was
+  // never actually "safe" for a later row to begin with. More fundamentally,
+  // *any* fixed x guess is fragile here: even CM6's own view.moveVertically,
+  // tried directly (bypassing this codebase entirely) from the same
+  // document position, reproduced the identical overshoot — this is a real
+  // Chromium hit-testing quirk with short wrapped rows next to
+  // differently-sized content (this item's own leading inline-code span),
+  // not something specific to any of this function's own attempts.
+  //
+  // Fixed for real by not guessing coordinates at all: walk curLine's own
+  // characters one at a time via view.coordsAtPos (never posAtCoords), in
+  // the requested direction, until the row (top) actually changes — this can
+  // only ever agree with where the text really is, since it's reading real
+  // rendered positions of real characters, not hit-testing an unclaimed
+  // point in space. Once the next row is found, a second short walk within
+  // *that* row picks whichever character's own left is closest to the
+  // cursor's current x, preserving the usual "keep roughly the same column"
+  // feel without ever needing to know a row's rendered width in advance.
   let newHead = null;
   const headCoords = view.coordsAtPos(range.head);
   if (headCoords) {
     const startTop = headCoords.top;
-    for (let nudge = 3; nudge <= 200; nudge += 5) {
-      const targetY = dir > 0 ? headCoords.bottom + nudge : headCoords.top - nudge;
-      const pos = view.posAtCoords({ x: headCoords.left, y: targetY });
-      if (pos == null) break;
-      if (state.doc.lineAt(pos).number !== curLine.number) {
-        // Crossed into a different document line already — no further row
-        // remains in this direction within curLine; let the cross-line
-        // branch below handle it (whatever nudge got us here isn't a
-        // reliable position within curLine anyway).
-        break;
+    let p = range.head;
+    let rowStart = null;
+    while (true) {
+      p += dir;
+      if (p < curLine.from || p > curLine.to) break; // ran off curLine — no further row this direction
+      const c = view.coordsAtPos(p);
+      if (c && Math.abs(c.top - startTop) > 4) { rowStart = p; break; }
+    }
+    if (rowStart != null) {
+      const rowTop = view.coordsAtPos(rowStart).top;
+      let best = rowStart;
+      let bestDist = Math.abs(view.coordsAtPos(rowStart).left - headCoords.left);
+      let q = rowStart;
+      while (true) {
+        q += dir;
+        if (q < curLine.from || q > curLine.to) break;
+        const c = view.coordsAtPos(q);
+        if (!c || Math.abs(c.top - rowTop) > 4) break; // left the newly-found row
+        const dist = Math.abs(c.left - headCoords.left);
+        if (dist < bestDist) { bestDist = dist; best = q; }
       }
-      const posCoords = view.coordsAtPos(pos);
-      if (posCoords && posCoords.top !== startTop) {
-        newHead = pos;
-        break;
-      }
-      // Still the same visual row — the gap to the next one is wider than
-      // this nudge; widen and try again.
+      newHead = best;
     }
   }
 
