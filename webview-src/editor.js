@@ -5111,52 +5111,79 @@ function moveVerticalByLine(view, dir, extend) {
   // to route around for *cross*-line moves, just now hit inside the one
   // remaining call to a CM6 pixel primitive this function still had.
   //
-  // Fixed by dropping view.moveVertically here too, in favor of a measured,
-  // self-computed row check: view.coordsAtPos gives a position's actual
-  // rendered box (real font metrics, whatever the platform). If stepping one
-  // row-height in the requested direction from the cursor's own row still
-  // lands inside curLine's own rendered vertical extent, there's a further
-  // row within this same document line — resolved directly via
-  // view.posAtCoords at that point, never asking CM6's own vertical-motion
-  // primitive to decide "how far".
+  // Second attempt (dropping view.moveVertically for a measured "jump one
+  // row-height, then check it's still inside curLine's own coordsAtPos-
+  // measured top/bottom") fixed one real bug — mixing view.lineBlockAt's
+  // internal document-coordinate space with coordsAtPos's viewport space —
+  // but was reported still reproducing on real macOS hardware, at a
+  // *different* row-to-row step than originally reported (via a live
+  // devtools-console repro, cursor rect logged after every keypress): two
+  // consecutive single-row steps measured ~56px then ~28px, a clean 2:1
+  // ratio, on the same wrapped list item. Root cause: assuming every visual
+  // row of a wrapped line is the same height (`rowH`, measured from just the
+  // *current* row) breaks the instant row spacing isn't uniform — which it
+  // isn't here, since this particular list item is the first item of a
+  // freshly-started list (interrupted by the blockquote right above it in
+  // the user's real note), and gets its own extra top margin/padding for
+  // spacing from the preceding block (see the "Lists — indentation +
+  // spacing" ListItem handling: `cm-list-first`). A step sized off the
+  // *current* row's height can under- or overshoot whenever the *next* row's
+  // effective vertical offset differs from that assumption, exactly this
+  // margin-adjacent case.
   //
-  // curLine's own top/bottom are measured via coordsAtPos at its first/last
-  // character, NOT view.lineBlockAt — lineBlockAt's `top`/`height` live in
-  // CM6's internal *document* coordinate space (scroll-independent, origin
-  // at the very top of the content), while coordsAtPos returns viewport/DOM
-  // pixel coordinates; mixing the two silently compares unrelated numbers.
-  // Confirmed empirically (a real EditorView via Puppeteer against this
-  // exact bundle, not checked in): with lineBlockAt, `blockBottom` for a
-  // 3-row wrapped line came out around 73 while headCoords (viewport
-  // coordinates) for its own second row already sat past 90 — so the
-  // "still inside this line's block" check always failed past the first
-  // row, exactly reproducing the reported skip-past-the-whole-item bug
-  // (and confirming, mid-fix, that this exact coordinate mismatch — not the
-  // platform-specific view.moveVertically overshoot this rewrite set out to
-  // fix — was what a first draft of this rewrite introduced). Using
-  // coordsAtPos for both ends keeps everything in the same coordinate space.
+  // Third attempt: nudge just a few px past the current row's own measured
+  // edge (its bottom, moving down; its top, moving up) and trust whatever
+  // view.posAtCoords resolves there, on the theory that landing 1-3px past
+  // the edge always lands in the very first pixel of whatever comes next,
+  // however far away that actually is — no step-size assumption needed.
+  // Reported still overshooting, on the very first press this time, for
+  // exactly this margin-adjacent list item (reproduced with the real note's
+  // own structure — the blockquote-interrupted list — via Puppeteer against
+  // this exact bundle, not checked in). Root cause, found by also dumping
+  // view.posAtCoords's *own* resulting coordsAtPos alongside its returned
+  // position: a 3px nudge past the row's bottom edge resolved to a position
+  // one character *to the left* of the start, still on the *exact same*
+  // visual row (identical top/bottom to the starting position) — browsers
+  // don't reliably treat "a few px past a line's bottom edge" as "inside the
+  // next line" for hit-testing; posAtCoords can snap back to the nearest
+  // actual glyph on the row the coordinate came closest to, especially with
+  // a larger gap (this item's own extra top margin, from `cm-list-first`)
+  // between rows than the nudge accounted for. Checking only "a different
+  // offset than before" (the previous version's paranoia check) missed this
+  // entirely, since a neighboring character on the *same* row also differs.
+  //
+  // Fixed by verifying the *row itself* changed (comparing the resolved
+  // position's own coordsAtPos().top against the starting row's top, not
+  // just comparing character offsets or document-line numbers), and — if it
+  // didn't — widening the nudge and retrying, since the only reason a nudge
+  // past the edge could fail to leave the current row is that the actual gap
+  // to the next row is larger than the nudge tried. Growing additively
+  // (rather than assuming any particular gap size up front) means this
+  // adapts to whatever margin/padding this specific line and its neighbor
+  // happen to carry, instead of hardcoding a number that only happens to
+  // work for plain, unspaced wrapped text.
   let newHead = null;
   const headCoords = view.coordsAtPos(range.head);
   if (headCoords) {
-    const blockTop = view.coordsAtPos(curLine.from)?.top;
-    const lastCharCoords = view.coordsAtPos(Math.max(curLine.from, curLine.to - 1), 1);
-    const blockBottom = lastCharCoords ? lastCharCoords.bottom : view.coordsAtPos(curLine.to)?.bottom;
-    if (blockTop != null && blockBottom != null) {
-      // Measured from the cursor's own rendered box, not a hardcoded/default
-      // line height — matches whatever this particular row's actual font
-      // size is (a heading's own row is taller than plain body text, say).
-      const rowH = Math.max(1, headCoords.bottom - headCoords.top);
-      const targetY = (headCoords.top + headCoords.bottom) / 2 + dir * rowH;
-      if (targetY > blockTop && targetY < blockBottom) {
-        const pos = view.posAtCoords({ x: headCoords.left, y: targetY });
-        // Paranoia check: posAtCoords should land back inside curLine given
-        // targetY is inside its own measured extent, but never trust a
-        // cross-checked geometry call blindly — falls through to the
-        // ordinary cross-line jump below if this ever disagrees.
-        if (pos != null && state.doc.lineAt(pos).number === curLine.number) {
-          newHead = pos;
-        }
+    const startTop = headCoords.top;
+    for (let nudge = 3; nudge <= 200; nudge += 5) {
+      const targetY = dir > 0 ? headCoords.bottom + nudge : headCoords.top - nudge;
+      const pos = view.posAtCoords({ x: headCoords.left, y: targetY });
+      if (pos == null) break;
+      if (state.doc.lineAt(pos).number !== curLine.number) {
+        // Crossed into a different document line already — no further row
+        // remains in this direction within curLine; let the cross-line
+        // branch below handle it (whatever nudge got us here isn't a
+        // reliable position within curLine anyway).
+        break;
       }
+      const posCoords = view.coordsAtPos(pos);
+      if (posCoords && posCoords.top !== startTop) {
+        newHead = pos;
+        break;
+      }
+      // Still the same visual row — the gap to the next one is wider than
+      // this nudge; widen and try again.
     }
   }
 
