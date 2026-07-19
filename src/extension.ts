@@ -219,8 +219,27 @@ function resolvesToOldTarget(
 // nesting is handled.
 const WIKI_TARGET_RE = /(!?)\[\[((?:(?!\[\[)[^\]]|\[\[[^\[\]]*\]\])+)\]\]/g;
 
+// Runs as a plain background fs read/write for every *closed* linking file —
+// deliberately not vscode.workspace.openTextDocument + a multi-file
+// WorkspaceEdit, which is what this used to do. Reported problem: renaming a
+// heavily-linked note made every single linking note pop open as its own tab,
+// since applying a WorkspaceEdit against a file that isn't currently open in
+// any editor makes VS Code instantiate this extension's own custom editor for
+// it to show/apply the change — fine for one or two incoming links, unusable
+// for a well-connected note with dozens. A closed file's content isn't
+// visible to the user at all right now, so there's no reason to route the
+// edit through VS Code's document/editor machinery in the first place — a
+// direct fs.promises.readFile/writeFile never touches the editor UI.
+// The one file that *does* need the normal channel is one that's *already*
+// open (vscode.workspace.textDocuments) — its live document (and whatever
+// webview is showing it) needs to observe the change the ordinary way, via
+// WorkspaceEdit/onDidChangeTextDocument, not have its file silently
+// overwritten out from under it on disk. If that open document has unsaved
+// edits, those are flushed first (document.save(), which already goes through
+// the race-free onWillSaveTextDocument path documented above) so the
+// pre-rename content used to search for a match is the real up-to-date text,
+// not a stale on-disk copy missing the user's last few keystrokes.
 async function fixUpLinksForMovedNote(oldUri: vscode.Uri, newUri: vscode.Uri): Promise<void> {
-  const oldName = path.basename(oldUri.fsPath, '.md');
   const newName = path.basename(newUri.fsPath, '.md');
   const newDir  = path.dirname(newUri.fsPath);
   if (oldUri.fsPath === newUri.fsPath) { return; }
@@ -234,12 +253,14 @@ async function fixUpLinksForMovedNote(oldUri: vscode.Uri, newUri: vscode.Uri): P
   const edit = new vscode.WorkspaceEdit();
   for (const docUri of allMd) {
     if (docUri.fsPath === newUri.fsPath) { continue; } // only incoming links from other notes are in scope
-    const doc = await vscode.workspace.openTextDocument(docUri);
-    const text = doc.getText();
     const linkingDir = path.dirname(docUri.fsPath);
+    const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === docUri.fsPath);
+    if (openDoc?.isDirty) { await openDoc.save(); }
+    const text = openDoc ? openDoc.getText() : await fs.promises.readFile(docUri.fsPath, 'utf8');
 
     WIKI_TARGET_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
+    const replacements: Array<{ from: number; to: number; insert: string }> = [];
     while ((m = WIKI_TARGET_RE.exec(text)) !== null) {
       const bang = m[1];
       const inner = m[2];
@@ -253,10 +274,23 @@ async function fixUpLinksForMovedNote(oldUri: vscode.Uri, newUri: vscode.Uri): P
       if (!resolvesToOldTarget(notePart, linkingDir, oldFileList, oldUri.fsPath)) { continue; }
 
       const newNotePart = newDir === linkingDir ? newName : `${path.basename(newDir)}/${newName}`;
-      edit.replace(docUri,
-        new vscode.Range(doc.positionAt(m.index), doc.positionAt(m.index + m[0].length)),
-        `${bang}[[${newNotePart}${sectionSuffix}${aliasSuffix}]]`
-      );
+      replacements.push({
+        from: m.index, to: m.index + m[0].length,
+        insert: `${bang}[[${newNotePart}${sectionSuffix}${aliasSuffix}]]`,
+      });
+    }
+    if (replacements.length === 0) { continue; }
+
+    if (openDoc) {
+      for (const r of replacements) {
+        edit.replace(docUri, new vscode.Range(openDoc.positionAt(r.from), openDoc.positionAt(r.to)), r.insert);
+      }
+    } else {
+      let out = text;
+      for (const r of [...replacements].sort((a, b) => b.from - a.from)) {
+        out = out.slice(0, r.from) + r.insert + out.slice(r.to);
+      }
+      await fs.promises.writeFile(docUri.fsPath, out, 'utf8');
     }
   }
   if (edit.size > 0) { await vscode.workspace.applyEdit(edit); }
@@ -280,6 +314,114 @@ async function handleWorkspaceRename(files: ReadonlyArray<{ oldUri: vscode.Uri; 
       await fixUpLinksForMovedNote(oldUri, newUri);
     }
   }
+}
+
+// ── Fixing up `#section` links after a heading is renamed ────────────────────
+// Unlike a file rename/move, there's no native VS Code event for "a heading's
+// text changed" — headings are just plain lines inside an ordinary text edit,
+// so this is detected by diffing, not by subscribing to something. Every note
+// this extension has seen (opened via this editor, or saved at least once
+// this session) has its current heading list cached in `lastHeadingsByPath`;
+// on every save, the fresh heading list is compared against that cache, and
+// if exactly one heading changed text (same level, same position among the
+// note's headings, everything else byte-identical) that's treated as a
+// rename — anything less clear-cut (a heading added/removed, several
+// changing at once) is deliberately left alone rather than guessing wrong and
+// rewriting an unrelated link.
+const lastHeadingsByPath: Map<string, Array<{ level: number; text: string }>> = new Map();
+
+function detectRenamedHeading(
+  before: Array<{ level: number; text: string }> | undefined,
+  after: Array<{ level: number; text: string }>
+): { oldText: string; newText: string } | null {
+  if (!before || before.length !== after.length) { return null; }
+  let changedIndex = -1;
+  for (let i = 0; i < before.length; i++) {
+    if (before[i].level !== after[i].level) { return null; } // a level change reads as too different an edit to guess from
+    if (before[i].text !== after[i].text) {
+      if (changedIndex !== -1) { return null; } // more than one heading changed — ambiguous, don't guess
+      changedIndex = i;
+    }
+  }
+  if (changedIndex === -1) { return null; }
+  return { oldText: before[changedIndex].text, newText: after[changedIndex].text };
+}
+
+// Same background-fs-first strategy as fixUpLinksForMovedNote (see its own
+// comment): a closed linking file is read/written directly via fs, never
+// through vscode.workspace.openTextDocument/a multi-file WorkspaceEdit, so
+// fixing up incoming links to a heavily-linked heading doesn't pop open a tab
+// per linking note. An already-open file gets its unsaved edits flushed first,
+// then the change applied through the normal WorkspaceEdit channel so its
+// live document (and webview) picks it up.
+async function fixUpHeadingLinksForRenamedHeading(
+  noteUri: vscode.Uri, oldHeading: string, newHeading: string
+): Promise<void> {
+  if (oldHeading === newHeading) { return; }
+
+  const allMd = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
+  const allMdPaths = allMd.map(u => u.fsPath);
+  const edit = new vscode.WorkspaceEdit();
+
+  for (const docUri of allMd) {
+    const linkingDir = path.dirname(docUri.fsPath);
+    const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === docUri.fsPath);
+    if (openDoc?.isDirty) { await openDoc.save(); }
+    const text = openDoc ? openDoc.getText() : await fs.promises.readFile(docUri.fsPath, 'utf8');
+
+    WIKI_TARGET_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    const replacements: Array<{ from: number; to: number; insert: string }> = [];
+    while ((m = WIKI_TARGET_RE.exec(text)) !== null) {
+      const bang = m[1];
+      const inner = m[2];
+      const pipeIdx = inner.indexOf('|');
+      const targetRaw   = pipeIdx >= 0 ? inner.slice(0, pipeIdx) : inner;
+      const aliasSuffix = pipeIdx >= 0 ? inner.slice(pipeIdx) : '';
+      const hashIdx = targetRaw.indexOf('#');
+      if (hashIdx === -1) { continue; } // no #section at all — nothing for this fixup to touch
+      const notePart = targetRaw.slice(0, hashIdx);
+      const section  = targetRaw.slice(hashIdx + 1).trim();
+      // Section matching mirrors the live resolution rule (get-transclusion/
+      // open-note): case-insensitive, exact match, not a substring.
+      if (section.toLowerCase() !== oldHeading.toLowerCase()) { continue; }
+      if (!resolvesToOldTarget(notePart, linkingDir, allMdPaths, noteUri.fsPath)) { continue; }
+
+      replacements.push({
+        from: m.index, to: m.index + m[0].length,
+        insert: `${bang}[[${notePart}#${newHeading}${aliasSuffix}]]`,
+      });
+    }
+    if (replacements.length === 0) { continue; }
+
+    if (openDoc) {
+      for (const r of replacements) {
+        edit.replace(docUri, new vscode.Range(openDoc.positionAt(r.from), openDoc.positionAt(r.to)), r.insert);
+      }
+    } else {
+      let out = text;
+      for (const r of [...replacements].sort((a, b) => b.from - a.from)) {
+        out = out.slice(0, r.from) + r.insert + out.slice(r.to);
+      }
+      await fs.promises.writeFile(docUri.fsPath, out, 'utf8');
+    }
+  }
+  if (edit.size > 0) { await vscode.workspace.applyEdit(edit); }
+}
+
+// Called from onDidSaveTextDocument (registered in activate()) for every saved
+// markdown file: compares the fresh heading list against whatever was cached
+// for this path (from the last time it was opened or saved), fixes up any
+// links to a renamed heading in the background, then refreshes the cache —
+// this becomes the baseline for the *next* save, so only one heading's worth
+// of change is ever attributed per save, matching the debounced/idle-autosave
+// granularity most edits actually arrive in.
+async function checkForRenamedHeading(doc: vscode.TextDocument): Promise<void> {
+  const after = parseHeadings(doc.getText()).map(h => ({ level: h.level, text: h.text }));
+  const before = lastHeadingsByPath.get(doc.uri.fsPath);
+  lastHeadingsByPath.set(doc.uri.fsPath, after);
+  const renamed = detectRenamedHeading(before, after);
+  if (renamed) { await fixUpHeadingLinksForRenamedHeading(doc.uri, renamed.oldText, renamed.newText); }
 }
 
 function computeBreadcrumb(docUri: vscode.Uri): Array<{ name: string; fsPath: string }> {
@@ -348,9 +490,11 @@ async function resolveNoteUri(notePart: string, currentDir: string): Promise<vsc
   return sameDirMatch ?? found[0];
 }
 
-// Same shape as resolveNoteUri, for a `[[file.docx]]`/`[[file.xlsx]]`/`[[file.pdf]]`
-// wiki-link/embed target (see EXTERNAL_FILE_EXT in editor.js) — the one
-// difference is the glob pattern searches for `notePart` *as-is*, with no
+// Same shape as resolveNoteUri, for a `[[file.ext]]` wiki-link/embed target
+// naming any non-note, non-image attachment (.docx/.xlsx/.pdf/.zip/.txt/... —
+// see EXTERNAL_FILE_EXT/isExternalFileTarget in editor.js, which decide by
+// shape rather than an enumerated list) — the one difference from
+// resolveNoteUri is the glob pattern searches for `notePart` *as-is*, with no
 // `.md` appended, since the target already names the real file including its
 // own extension.
 async function resolveExternalFileUri(notePart: string, currentDir: string): Promise<vscode.Uri | undefined> {
@@ -891,6 +1035,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     void injectImageToolkitIfAvailable(webviewPanel, document.uri);
     recordNoteOpened(document.uri.fsPath);
     broadcastRecentNotes();
+    // Baseline for checkForRenamedHeading's diff on the next save — seeded at
+    // open time (not just after a save) so a heading edited and saved without
+    // ever having been saved *before* in this session still has something to
+    // compare against.
+    lastHeadingsByPath.set(document.uri.fsPath, parseHeadings(document.getText()).map(h => ({ level: h.level, text: h.text })));
 
     const getFont = (): string =>
       vscode.workspace.getConfiguration('obsidianLike').get<string>('markdownFont', '').trim() ||
@@ -1184,13 +1333,14 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           if (raw) { void navigateToTarget(raw, document.uri, webviewPanel, true, baseDirOverride); }
 
         } else if (msg.type === 'open-external-file') {
-          // Sent instead of open-note for a [[file.docx]]/[[file.xlsx]]/[[file.pdf]]
-          // wiki-link or a ![[...]] embed of one (see EXTERNAL_FILE_EXT/
-          // ExternalFileWidget in editor.js) — there's nothing to open *as a note*
-          // here, so this hands the resolved file straight to the OS's own default
-          // application (see openFileWithOsDefaultApp's own comment for why that's
-          // a direct OS-shell spawn rather than vscode.env.openExternal) rather
-          // than routing it through vscode.openWith/navigateToTarget's
+          // Sent instead of open-note for a [[file.ext]] wiki-link or a
+          // ![[...]] embed naming any non-note, non-image attachment (see
+          // EXTERNAL_FILE_EXT/ExternalFileWidget in editor.js) — there's
+          // nothing to open *as a note* here, so this hands the resolved file
+          // straight to the OS's own default application (see
+          // openFileWithOsDefaultApp's own comment for why that's a direct
+          // OS-shell spawn rather than vscode.env.openExternal) rather than
+          // routing it through vscode.openWith/navigateToTarget's
           // markdown-editor machinery.
           (async () => {
             const raw = (msg.name as string || '').trim();
@@ -1674,6 +1824,29 @@ export function activate(context: vscode.ExtensionContext) {
   // WorkspaceEdit.renameFile()) — see the comment above fixUpLinksForMovedNote.
   context.subscriptions.push(
     vscode.workspace.onDidRenameFiles(e => { void handleWorkspaceRename(e.files); })
+  );
+
+  // Seeds lastHeadingsByPath for a note opened via VS Code's own plain text
+  // editor ("Open With → Text Editor") — resolveCustomTextEditor already seeds
+  // it for the normal path, but that hook never fires for this one. Guarded to
+  // markdown files only; harmless (just an extra parseHeadings scan) if this
+  // fires again for a file already seeded by resolveCustomTextEditor.
+  context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument(doc => {
+      if (doc.languageId !== 'markdown') { return; }
+      lastHeadingsByPath.set(doc.uri.fsPath, parseHeadings(doc.getText()).map(h => ({ level: h.level, text: h.text })));
+    })
+  );
+
+  // See checkForRenamedHeading's own comment: there's no native "a heading was
+  // renamed" event, so this diffs each save's heading list against the last
+  // one seen for that path and fixes up any `#section` links elsewhere in the
+  // vault that referenced the old heading text, entirely in the background.
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument(doc => {
+      if (doc.languageId !== 'markdown') { return; }
+      void checkForRenamedHeading(doc);
+    })
   );
 
   context.subscriptions.push(

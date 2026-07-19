@@ -3857,18 +3857,32 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
   }
 }, { decorations: v => v.decorations });
 
-// A wiki-link/transclusion target naming one of these opens (or embeds a
-// clickable "open" box for) the real file with the OS's own default
-// application (vscode.env.openExternal on the host side) instead of being
-// treated as a markdown note reference — see `isExternalFileTarget`,
-// `ExternalFileWidget`, and the `open-external-file` message handler.
-const EXTERNAL_FILE_EXT = /\.(docx|xlsx|pdf)$/i;
-function isExternalFileTarget(raw) {
-  return EXTERNAL_FILE_EXT.test((raw || '').split('#')[0].split('|')[0].trim());
-}
-
 // ── Image plugin (![[filename.ext]] → <img>) ──────────────────────────────────
 const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
+
+// A wiki-link/transclusion target ending in *any* extension other than a
+// recognized image one (IMG_EXT, handled separately by imgPlugin) or `.md`
+// (a plain note reference) opens (or embeds a clickable "open" box for) the
+// real file with the OS's own default application (vscode.env.openExternal
+// on the host side) instead of being treated as a markdown note reference —
+// see `isExternalFileTarget`, `ExternalFileWidget`, and the
+// `open-external-file` message handler. Matches real Obsidian's own
+// behavior for any non-note, non-image attachment.
+//
+// Previously a fixed list (`.docx|.xlsx|.pdf` only) — reported as "no
+// funciona" for a `.zip`/`.txt` link or embed: falling outside that list
+// meant it went through the normal note-resolution path instead, which
+// appends ".md" and searches for that, so a real "archivo.zip" in the vault
+// was never going to match a search for "archivo.zip.md" and always showed
+// a false "not found", even though the file plainly exists (and Obsidian
+// itself opens it fine). Matched by shape (any `.ext` suffix) rather than an
+// enumerated list, so this covers whatever attachment type shows up next
+// without needing another list update.
+const EXTERNAL_FILE_EXT = /\.[a-z0-9]+$/i;
+function isExternalFileTarget(raw) {
+  const filename = (raw || '').split('#')[0].split('|')[0].trim();
+  return EXTERNAL_FILE_EXT.test(filename) && !IMG_EXT.test(filename) && !/\.md$/i.test(filename);
+}
 const imgPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
@@ -4173,10 +4187,13 @@ const transclusionPlugin = ViewPlugin.fromClass(class {
       const mTo   = mFrom + m[0].length;
       const ln = state.doc.lineAt(mFrom).number;
       if (active.has(ln)) continue;
-      // A .docx/.xlsx/.pdf embed has no text content to fetch/render — see
-      // ExternalFileWidget's own comment — so it never goes through the
-      // get-transclusion round-trip at all.
-      if (EXTERNAL_FILE_EXT.test(filenameGuess)) {
+      // A non-note, non-image embed (.docx/.xlsx/.pdf/.zip/.txt/...) has no
+      // text content to fetch/render — see ExternalFileWidget's own comment —
+      // so it never goes through the get-transclusion round-trip at all.
+      // isExternalFileTarget (not a direct EXTERNAL_FILE_EXT test) so a
+      // literal ".md" suffix still falls through to the normal transclusion
+      // path below rather than being misrouted here.
+      if (isExternalFileTarget(filenameGuess)) {
         all.push({ from: mFrom, to: mTo, dec: Decoration.replace({ widget: new ExternalFileWidget(raw) }) });
         continue;
       }
