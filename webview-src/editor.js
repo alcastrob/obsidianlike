@@ -3,7 +3,7 @@
 
 import { EditorState, EditorSelection, RangeSetBuilder, Compartment, StateEffect, Prec } from "@codemirror/state";
 import {
-  EditorView, ViewPlugin, Decoration, WidgetType, keymap, drawSelection
+  EditorView, ViewPlugin, Decoration, WidgetType, keymap, drawSelection, runScopeHandlers
 } from "@codemirror/view";
 import {
   defaultKeymap, history, historyKeymap, indentWithTab
@@ -11,6 +11,11 @@ import {
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { syntaxHighlighting, HighlightStyle, syntaxTree } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
+import {
+  search, openSearchPanel, closeSearchPanel, findNext, findPrevious,
+  selectMatches, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll,
+  getSearchQuery, setSearchQuery, SearchQuery, searchKeymap
+} from "@codemirror/search";
 
 // ── Bootstrap data ───────────────────────────────────────────────────────────
 const vscode = acquireVsCodeApi();
@@ -220,13 +225,7 @@ const vsTheme = EditorView.theme({
   // like "w"/"d") — a checkbox can only ever show two visual states, so these
   // are a separate clickable <span> instead (see TaskCheckboxWidget/STATUS_ICON
   // below). Carries `.cm-task-checkbox` too, so it inherits cursor/margin/
-  // alignment from the rule above. A color-emoji glyph renders noticeably
-  // larger than the checkbox's own 1em box at the same font-size, so this
-  // shrinks the font-size and centers/clips the glyph into that same fixed
-  // box instead of letting it size itself (`width/height: auto`, tried first,
-  // let each glyph's own oversized metrics dictate the box, which is exactly
-  // what made icons of different sizes/paddings misalign against the checkbox
-  // and against each other in a list of mixed-status tasks).
+  // alignment from the rule above.
   // `!important` on every property here for the same reason `.cm-code-block`
   // above needs it: an Obsidian vault theme's own CSS (`obsidianLike.obsidianTheme`)
   // loads *after* this, into a later <style> tag (see the theme-css postMessage
@@ -244,7 +243,7 @@ const vsTheme = EditorView.theme({
   // instead of a plain `Nem`: `em` on `font-size` is relative to the *parent's*
   // computed font-size, and a theme resetting font-size broadly on generic inline
   // elements (a bare `span` selector, say) would zero out this icon's own
-  // `!important`-but-still-relative `0.7em` right along with it — confirmed with a
+  // `!important`-but-still-relative value right along with it — confirmed with a
   // synthetic worst-case theme in headless Chrome (a `span { font-size: 0
   // !important }` rule reduced this icon to `0px` even with the em value itself
   // marked `!important`, since `!important` only protects *which* declaration
@@ -253,14 +252,27 @@ const vsTheme = EditorView.theme({
   // near this file's init code) — custom properties aren't reset by any `font-size`
   // declaration, however broad, so this stays correct regardless of what a theme
   // does to actual font-size values on ancestor elements.
+  //
+  // `fontSize` used to be `* 0.7` (shrunk, on the theory that a color-emoji glyph
+  // renders larger than a checkbox's own box at the same font-size, so shrinking it
+  // would make it fit), combined with `overflow: 'hidden'` to clip whatever still
+  // didn't fit. That backfired: a color emoji's *visual* glyph is taller than its
+  // nominal font-size box regardless of how small that font-size is (this is normal
+  // color-emoji-font behavior, not something scoped to this codebase), so shrinking
+  // the font-size never actually stopped the clip from cutting into it — it just
+  // shrank the box these icons compete for, making the clip worse. Reported as "los
+  // iconos de estado se ven cortados para cualquier estado que no sea To do"
+  // (screenshot showed only a corner of the glyph surviving). Fixed by matching the
+  // font-size multiplier to the box's own (`* 1`, not `* 0.7`) and dropping
+  // `overflow: hidden` — the glyph is now fully visible, at the cost of occasionally
+  // overflowing the box's edges slightly rather than a guaranteed-but-broken exact fit.
   '.cm-task-status-icon': {
     display: 'inline-flex !important',
     alignItems: 'center',
     justifyContent: 'center',
-    overflow: 'hidden',
     width: 'calc(var(--md-font-size, 14px) * 1) !important',
     height: 'calc(var(--md-font-size, 14px) * 1) !important',
-    fontSize: 'calc(var(--md-font-size, 14px) * 0.7) !important',
+    fontSize: 'calc(var(--md-font-size, 14px) * 1) !important',
     lineHeight: '1 !important',
     color: 'initial !important',
     opacity: '1 !important',
@@ -498,6 +510,19 @@ const vsTheme = EditorView.theme({
   },
   // The filter popover is appended to document.body (so it can float above the editor), not
   // under `.cm-dataview-query` — these rules can't be scoped under that ancestor selector.
+  //
+  // NOTE (found while fixing the dependency-hover popup below, not otherwise addressed here):
+  // `EditorView.theme()` (which builds `vsTheme`) compiles every selector that doesn't start
+  // with `&` into `.<generated-editor-class> <selector>` (see `buildTheme`/`finish` in
+  // @codemirror/view) — a *descendant* combinator, requiring the generated class on an ancestor.
+  // That generated class only ever lands on `view.dom` (`.cm-editor` itself, see
+  // `hoverPreviewPlugin` above, which correctly appends its own popup there instead of to
+  // `document.body`). An element appended straight to `document.body`, as this one is, is a
+  // *sibling* of `.cm-editor`, not a descendant of it — so none of the rules below actually
+  // match it. In practice this popover likely renders with none of this styling (no
+  // `position: fixed`, no background/border/z-index — a plain block flowing wherever it lands
+  // in `<body>`), same failure mode diagnosed for `.cm-dep-hover-preview` near `renderTaskRow`,
+  // which now sets its styles inline instead of relying on this object for exactly this reason.
   '.dv-filter-popover': {
     position: 'fixed',
     zIndex: '1000',
@@ -566,35 +591,6 @@ const vsTheme = EditorView.theme({
     color: 'var(--vscode-button-secondaryForeground, inherit)',
     border: '1px solid var(--background-modifier-border, rgba(128,128,128,0.4))',
     borderRadius: '4px',
-  },
-  // Task-dependency reference hover popup (attachDependencyHoverPreview, near renderTaskRow) —
-  // appended to document.body like `.dv-filter-popover` above, same reasoning: it must float
-  // above the editor and isn't scoped under any single query row.
-  '.cm-dep-hover-preview': {
-    position: 'fixed',
-    zIndex: '1000',
-    minWidth: '160px',
-    maxWidth: '360px',
-    background: 'var(--vscode-editorWidget-background, var(--background-secondary, #252526))',
-    color: 'var(--vscode-editorWidget-foreground, inherit)',
-    border: '1px solid var(--vscode-editorWidget-border, var(--background-modifier-border, rgba(128,128,128,0.4)))',
-    borderRadius: '4px',
-    boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
-    padding: '6px 10px',
-    fontSize: '0.85em',
-    lineHeight: '1.4',
-  },
-  '.cm-dep-hover-desc': {
-    whiteSpace: 'normal',
-    wordBreak: 'break-word',
-  },
-  '.cm-dep-hover-meta': {
-    marginTop: '4px',
-    opacity: '0.6',
-    fontSize: '0.9em',
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
   },
   '.cm-dataview-query .dv-link': {
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
@@ -939,6 +935,101 @@ const vsTheme = EditorView.theme({
     height: '1px',
     margin: '4px 0',
     background: 'var(--vscode-editorWidget-border, rgba(128,128,128,0.25))',
+  },
+  // Find/replace panel (ObsidianSearchPanel, @codemirror/search's own
+  // createPanel hook). `.cm-panels`/`.cm-panels-top` are CM6's own generic
+  // panel-row container (@codemirror/view's base theme gives it a full-width
+  // opaque background + border, meant for a panel that fills that bar) —
+  // neutralized here since this panel manages its own floating-card chrome
+  // instead and would otherwise sit inside a visible, empty colored strip at
+  // the top of the editor. `position: sticky` (already the default) is left
+  // alone: with `search({ top: true })`, that's what keeps this container —
+  // and this panel's own `position: absolute` anchored inside it — pinned to
+  // the top of the *viewport* as the user scrolls, rather than wherever the
+  // top of the document happens to be.
+  '.cm-panels, .cm-panels-top, .cm-panels-bottom': {
+    background: 'transparent !important',
+    borderTop: 'none !important',
+    borderBottom: 'none !important',
+  },
+  '.cm-obsidian-search': {
+    position: 'absolute',
+    top: '8px',
+    right: '8px',
+    zIndex: '80',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    background: 'var(--vscode-editorWidget-background, #252526)',
+    color: 'var(--vscode-editorWidget-foreground, inherit)',
+    border: '1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35))',
+    borderRadius: '8px',
+    boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+    padding: '6px 8px',
+    fontSize: '0.92em',
+  },
+  '.cm-obsidian-search-row': {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  '.cm-obsidian-search-replace-row[hidden]': { display: 'none' },
+  '.cm-obsidian-search-field-wrap': {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    border: '1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35))',
+    borderRadius: '4px',
+    padding: '0 4px',
+    background: 'var(--vscode-input-background, transparent)',
+  },
+  '.cm-obsidian-search-input': {
+    border: 'none',
+    outline: 'none',
+    background: 'transparent',
+    color: 'inherit',
+    font: 'inherit',
+    padding: '4px 4px',
+    width: '160px',
+  },
+  '.cm-obsidian-search-flags': { display: 'flex', gap: '2px' },
+  '.cm-obsidian-search-spacer': { width: '24px', flex: 'none' },
+  '.cm-obsidian-search-count': {
+    fontSize: '0.85em',
+    opacity: '0.65',
+    whiteSpace: 'nowrap',
+    minWidth: '3em',
+    textAlign: 'right',
+  },
+  '.cm-obsidian-search-icon-btn': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: '22px',
+    height: '22px',
+    padding: '0 4px',
+    border: 'none',
+    borderRadius: '4px',
+    background: 'transparent',
+    color: 'inherit',
+    cursor: 'pointer',
+    fontSize: '0.95em',
+    lineHeight: '1',
+  },
+  '.cm-obsidian-search-icon-btn:hover': {
+    background: 'var(--vscode-list-hoverBackground, rgba(128,128,128,0.18))',
+  },
+  '.cm-obsidian-search-flag-btn.is-active': {
+    background: 'var(--vscode-inputOption-activeBackground, rgba(90,150,255,0.35))',
+    color: 'var(--vscode-inputOption-activeForeground, inherit)',
+  },
+  '.cm-obsidian-search-flag-btn.is-disabled': {
+    opacity: '0.4',
+    cursor: 'default',
+  },
+  '.cm-obsidian-search-chevron': {
+    fontSize: '0.75em',
+    opacity: '0.75',
   },
   // Standalone inline code (`text`) — plain colored monospace text, no chip
   // background/padding/border-radius. Reported against a real Obsidian
@@ -2386,9 +2477,21 @@ const TASK_PRIORITY_ICON = {
 // there's no click-vs-hover ambiguity to gate behind Ctrl), and the referenced task's
 // data already arrived with the query result (`TaskDTO.dependsOnTasks`) instead of a
 // host round-trip like the wikilink preview's transclusion fetch. A single popup `dom`
-// is created once and reused (shown/hidden) across every row, same as HoverPreviewView;
-// appended to `document.body` with `position: fixed`, same as `.dv-filter-popover`
-// above, since it must float above the editor and isn't scoped under any one row.
+// is created once and reused (shown/hidden) across every row, same as HoverPreviewView.
+//
+// Styled entirely via inline `style`, not a `vsTheme` class like `.dv-filter-popover`
+// above: `EditorView.theme()` only ever attaches its generated scoping class to
+// `view.dom` (`.cm-editor` itself), so any rule for a plain class selector only matches
+// elements *inside* `.cm-editor` — this popup is appended straight to `document.body`
+// (so it can float above the editor, same reasoning `.dv-filter-popover` states for
+// itself), which is a sibling of `.cm-editor`, not a descendant, so a `vsTheme` class
+// here would silently never apply. Confirmed by reading `buildTheme`/`finish` in
+// `@codemirror/view`'s own source rather than guessing. Reported as "no hay popup ni
+// nada (aparece en la parte más baja de la pantalla)" — exactly the symptom of an
+// unstyled `position: static` div landing whatever `document.body` happened to lay
+// out for it (bottom of the page, past everything else). `var(--...)` custom-property
+// lookups below still resolve fine via inline styles — that's ordinary CSS custom
+// property inheritance up the real DOM tree, unrelated to CM6's own theme scoping.
 const DEP_HOVER_DELAY = 300; // mirrors HOVER_PREVIEW_DELAY above
 let depHoverPopupEl = null;
 let depHoverShowTimer = null;
@@ -2397,8 +2500,21 @@ let depHoverHideTimer = null;
 function depHoverEnsurePopup() {
   if (depHoverPopupEl) return depHoverPopupEl;
   const pop = document.createElement('div');
-  pop.className = 'cm-dep-hover-preview';
-  pop.style.display = 'none';
+  pop.style.cssText = [
+    'display:none',
+    'position:fixed',
+    'z-index:1000',
+    'min-width:160px',
+    'max-width:360px',
+    'background:var(--vscode-editorWidget-background, var(--background-secondary, #252526))',
+    'color:var(--vscode-editorWidget-foreground, inherit)',
+    'border:1px solid var(--vscode-editorWidget-border, var(--background-modifier-border, rgba(128,128,128,0.4)))',
+    'border-radius:4px',
+    'box-shadow:0 2px 8px rgba(0,0,0,0.3)',
+    'padding:6px 10px',
+    'font-size:0.85em',
+    'line-height:1.4',
+  ].join(';');
   // Keeps the popup open while the pointer is over the popup itself (e.g. to select/copy its
   // text), same as HoverPreviewView's own overPopup flag.
   pop.addEventListener('mouseenter', () => clearTimeout(depHoverHideTimer));
@@ -2415,35 +2531,61 @@ function depHoverScheduleHide() {
   }, 150);
 }
 
-function depHoverShow(anchorEl, info) {
+// `x`/`y` are viewport coordinates (`clientX`/`clientY`, captured at `mouseenter` time — see
+// `attachDependencyHoverPreview` below) — positioning off the cursor rather than the hovered
+// ref span's own `getBoundingClientRect()` (the first version of this) reads as a normal tooltip
+// stuck to the mouse, and incidentally still sits right next to the ref span too, since the
+// pointer has to be over that (small, ~6-character) span for `mouseenter` to have fired at all.
+function depHoverShow(x, y, info) {
   clearTimeout(depHoverHideTimer);
   const pop = depHoverEnsurePopup();
   pop.textContent = '';
 
   const desc = document.createElement('div');
-  desc.className = 'cm-dep-hover-desc';
+  desc.style.cssText = 'white-space:normal;word-break:break-word;';
   const statusPrefix = info.statusSymbol && info.statusSymbol !== ' ' ? `[${info.statusSymbol}] ` : (info.isDone ? '[x] ' : '');
   desc.textContent = statusPrefix + info.description;
   pop.appendChild(desc);
 
   const meta = document.createElement('div');
-  meta.className = 'cm-dep-hover-meta';
+  meta.style.cssText = 'margin-top:4px;opacity:0.6;font-size:0.9em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
   meta.textContent = info.path + ':' + (info.line + 1);
   pop.appendChild(meta);
 
   pop.style.display = 'block';
-  const anchorRect = anchorEl.getBoundingClientRect();
-  const left = Math.min(anchorRect.left, window.innerWidth - pop.offsetWidth - 8);
+  // Offset down-right of the cursor (not right on top of it) so the popup doesn't immediately
+  // cover the pointer and self-trigger its own mouseleave; clamped to the viewport on both axes
+  // so it doesn't run off-screen when hovering a ref near the right or bottom edge.
+  const left = Math.min(x + 12, window.innerWidth - pop.offsetWidth - 8);
+  const top = Math.min(y + 16, window.innerHeight - pop.offsetHeight - 8);
   pop.style.left = Math.max(4, left) + 'px';
-  pop.style.top = (anchorRect.bottom + 4) + 'px';
+  pop.style.top = Math.max(4, top) + 'px';
 }
 
-// `info` is one entry of `TaskDTO.dependsOnTasks` (already resolved host-side) — see the caller
-// in renderTaskRow, which only calls this for an id that actually resolved to a task.
+// Appends a dependency chip's leading emoji (`⛔ `) as its own span, hoverable exactly like an
+// individual id ref when `firstInfo` resolves to something — otherwise plain text. Without this,
+// only the id text itself (the ~6-character ref span) triggered the popup; reported as "el icono
+// claro que se ve, pero si dejo el cursor sobre él, no pasa nada" — the emoji is the visually
+// obvious part of the chip, so a reader naturally hovers *that*, not the small id next to it.
+// Points at the *first* resolved entry when a chip has several ids — there's no single id the
+// emoji itself could unambiguously belong to, and defaulting to the first one is more useful than
+// making the emoji inert.
+function appendDependencyEmoji(container, emoji, firstInfo) {
+  const emojiEl = document.createElement('span');
+  emojiEl.textContent = emoji;
+  if (firstInfo) attachDependencyHoverPreview(emojiEl, firstInfo);
+  container.appendChild(emojiEl);
+}
+
+// `info` is one entry of `TaskDTO.dependsOnTasks`/`TaskDTO.blocking` (already resolved
+// host-side) — see the callers in renderTaskRow, which only call this for an id that actually
+// resolved to a task.
 function attachDependencyHoverPreview(el, info) {
-  el.addEventListener('mouseenter', () => {
+  el.addEventListener('mouseenter', (e) => {
     clearTimeout(depHoverShowTimer);
-    depHoverShowTimer = setTimeout(() => depHoverShow(el, info), DEP_HOVER_DELAY);
+    const x = e.clientX;
+    const y = e.clientY;
+    depHoverShowTimer = setTimeout(() => depHoverShow(x, y, info), DEP_HOVER_DELAY);
   });
   el.addEventListener('mouseleave', () => {
     clearTimeout(depHoverShowTimer);
@@ -2511,6 +2653,18 @@ function renderTaskRow(t) {
     const idEl = document.createElement('span');
     idEl.className = 'cm-tasks-query-id';
     idEl.textContent = '🆔 ' + t.id;
+    // `TaskDTO.blocking` (tasks elsewhere in the vault that depend on *this* one, the inverse of
+    // `dependsOnTasks`) has no chip of its own — an earlier version gave it a separate `➡️` chip,
+    // but a screen recording of someone hunting for that popup showed them hovering *this* badge
+    // and waiting, never reaching the separate chip further along the row; removed per explicit
+    // request ("la funcionalidad de la referencia debe caer sobre 🆔 [id] y consume espacio
+    // físico") once it was clear the id badge was the natural (and only needed) hover target —
+    // it's this task's own identity, the thing every `blocking` entry actually points at. Shows
+    // the first blocking task if there's more than one (no single id a shared hover target could
+    // unambiguously point at otherwise). A no-op when nothing depends on this task yet.
+    if (t.blocking && t.blocking.length > 0) {
+      attachDependencyHoverPreview(idEl, t.blocking[0]);
+    }
     row.appendChild(idEl);
   }
 
@@ -2526,12 +2680,12 @@ function renderTaskRow(t) {
     // the due-date fix: this should read as part of the task's own text.
     const dep = document.createElement('span');
     dep.className = 'cm-tasks-query-depends';
-    dep.append('⛔ ');
     // `dependsOnTasks` (only present from a rebuilt sibling "Tasks" extension, same
     // degrade-gracefully pattern as `id`/`statusSymbol` above) resolves each id to the task it
     // points at. An id with no entry (older host build, or a stale id) falls back to plain
     // unlinked text instead of a hoverable one.
     const resolvedById = new Map((t.dependsOnTasks || []).map(d => [d.id, d]));
+    appendDependencyEmoji(dep, '⛔ ', resolvedById.get(t.dependsOn[0]));
     t.dependsOn.forEach((id, i) => {
       if (i > 0) dep.append(',');
       const info = resolvedById.get(id);
@@ -2565,30 +2719,29 @@ function renderTaskRow(t) {
     row.appendChild(r);
   }
 
-  // Backlink to the file (and heading, if the task sits under one) the task was found in —
-  // clickable like any other wikilink, reusing the `[data-wiki]` pattern the table-cell
-  // wikilink handler already understands (see `linkClickHandler` below) rather than adding a
-  // new message type. Deliberately does NOT carry the `.cm-wiki-link` class real in-document
-  // wikilinks use for styling: `linkClickHandler`'s `isWikiLinkEl` intercepts *any* element with
-  // that class (checked by class alone, walking up from the click target) before the `[data-wiki]`
-  // branch below ever runs, and reads `dataset.target` — which this span never sets, only
-  // `dataset.wiki` — falling back to the element's own *display* text ("File > Heading") as the
-  // literal wikilink target. That's not a valid note name, so `resolveNoteUri` never finds it and
-  // silently creates a blank file named e.g. "20260619 > Insights clave.md" instead of opening
-  // "20260619.md" and scrolling to the heading. Styled with the exact same inline `style` string
-  // `renderCell`'s own wiki-link rendering uses, instead of the class, so it still reads/behaves
-  // like a link without ever matching `isWikiLinkEl`. `data-wiki-base` is set to the task's own
-  // `t.path` (the file this backlink points at, and the file the heading search is scoped to) —
-  // harmless since it trivially resolves to itself, but keeps this consistent with every other
-  // task-related wikilink in this codebase, and correctly tie-breaks toward the right file if
-  // another note elsewhere in the vault happens to share this one's name.
+  // Backlink to the file (and heading, if the task sits under one) the task was found in.
+  // Used to reuse the `[data-wiki]` wikilink-navigation pattern (`open-note`), which has two
+  // problems for this specific case, reported as "debería abrir ese documento en una nueva
+  // pestaña y hacer scroll hasta dejar la posición donde está la tarea a la vista (y con el
+  // cursor al principio de la tarea)": (1) `navigateToTarget` (the `open-note` handler,
+  // extension.ts) disposes the *source* panel after navigating — fine for a normal in-document
+  // wikilink click (that's how note-to-note navigation is supposed to work here), wrong for a
+  // dashboard-style ```tasks``` listing, which the user wants to stay open while jumping to
+  // inspect one result; and (2) it only scrolls to `t.heading`'s line when the target has one,
+  // never to the *task's own* line, and never places the cursor there. Dedicated `data-path`/
+  // `data-line` attributes (own class `cm-tasks-query-backlink-link`, checked in
+  // `linkClickHandler` below) posting `open-task-location` instead — opened as a genuine new
+  // tab (`preview: false` on the host side) and scrolled/cursor-placed via the same
+  // `scroll-to-line` message `openNoteAtLine`/`navigateToTarget`'s own heading-scroll already
+  // use, just aimed at `t.line` instead of a heading's line.
   const noteName = (t.path || '').replace(/\.md$/i, '').split('/').pop();
   if (noteName) {
     const back = document.createElement('span');
     back.className = 'cm-tasks-query-backlink';
     const link = document.createElement('span');
-    link.dataset.wiki = t.heading ? `${noteName}#${t.heading}` : noteName;
-    link.dataset.wikiBase = t.path;
+    link.className = 'cm-tasks-query-backlink-link';
+    link.dataset.path = t.path;
+    link.dataset.line = String(t.line);
     link.style.cssText = 'color:var(--link-color,var(--vscode-textLink-foreground,#4a9eff));text-decoration:underline;cursor:pointer;';
     link.textContent = t.heading ? `${noteName} > ${t.heading}` : noteName;
     back.append('(', link, ')');
@@ -5696,6 +5849,8 @@ const linkClickHandler = EditorView.domEventHandlers({
     if (taskCb) { e.preventDefault(); return true; }
     const taskQueryEditBtn = e.target.closest('.cm-task-query-edit-btn');
     if (taskQueryEditBtn) { e.preventDefault(); return true; }
+    const taskQueryBacklink = e.target.closest('.cm-tasks-query-backlink-link');
+    if (taskQueryBacklink) { e.preventDefault(); return true; }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
@@ -6063,6 +6218,298 @@ const frontmatterAtomicRanges = EditorView.atomicRanges.of(view => {
   return builder.finish();
 });
 
+// ── Find/replace panel (Ctrl+F) ────────────────────────────────────────────────
+// Built on @codemirror/search's own query/state/highlighting machinery
+// (search(), getSearchQuery/setSearchQuery, findNext/findPrevious,
+// selectMatches) rather than hand-rolling cursor iteration and match
+// highlighting from scratch — that part (including the automatic
+// .cm-searchMatch decoration on every match in the viewport) is exactly what
+// that package already gets right. Only the *panel* is custom
+// (`createPanel`, the one documented extension point for this): the
+// library's own default panel is a plain, unstyled `<form>` with English
+// labels and no match counter, and the user asked for a specific look (a
+// small floating card top-right, match counter, case/word/regex toggles,
+// collapsible replace row) matching Obsidian's own panel.
+
+// Simple heuristic case-matching for a plain-text (non-regex) replace: if the
+// matched text is all-caps, all-lowercase, or capitalized, the replacement
+// text is transformed to match. Deliberately not attempted for a regex
+// query — `query.replace` can contain `$1`-style backreferences there, and
+// "preserve case" against an arbitrary regex match has no single obviously
+// correct meaning, so the preserve-case toggle is simply disabled/ignored in
+// that mode (see ObsidianSearchPanel's own commit()/replaceOne()/replaceAll()).
+function matchReplacementCase(source, replacement) {
+  if (!replacement) return replacement;
+  if (source === source.toUpperCase() && source !== source.toLowerCase()) return replacement.toUpperCase();
+  if (source === source.toLowerCase()) return replacement.toLowerCase();
+  if (source[0] && source[0] === source[0].toUpperCase() && source[0] !== source[0].toLowerCase()) {
+    return replacement[0].toUpperCase() + replacement.slice(1);
+  }
+  return replacement;
+}
+
+// Counts total matches and finds the 0-based index of whichever one (if any)
+// exactly matches the current selection — findNext/findPrevious/
+// openSearchPanel all set the selection to precisely a match's own range, so
+// this equality check is how "3 de 12" knows which one is "current" without
+// the library exposing that as its own public concept. Capped at
+// MAX_COUNTED_MATCHES so a very common short query (e.g. a single letter) in
+// a huge document can't make every keystroke re-scan the whole thing
+// unbounded — same defensive cap selectMatches itself uses internally
+// (1000), just surfaced to the display instead of silently refusing to act.
+const MAX_COUNTED_MATCHES = 999;
+function computeMatchInfo(query, state) {
+  if (!query.valid) return { total: 0, index: -1, truncated: false };
+  const sel = state.selection.main;
+  let total = 0, index = -1, truncated = false;
+  const cursor = query.getCursor(state);
+  let r;
+  while (!(r = cursor.next()).done) {
+    if (r.value.from === sel.from && r.value.to === sel.to) index = total;
+    total++;
+    if (total >= MAX_COUNTED_MATCHES) { truncated = true; break; }
+  }
+  return { total, index, truncated };
+}
+
+// Replace-one with case preservation — mirrors @codemirror/search's own
+// replaceNext (only replaces when the selection sits exactly on a match;
+// otherwise just advances to one first, same "press once to select, press
+// again to replace" UX every editor's find/replace uses), the one addition
+// being matchReplacementCase on the inserted text.
+function replaceOnePreservingCase(view) {
+  const query = getSearchQuery(view.state);
+  const { state } = view;
+  if (state.readOnly || !query.valid) return false;
+  const sel = state.selection.main;
+  const cursor = query.getCursor(state, sel.from);
+  const r = cursor.next();
+  if (!r.done && r.value.from === sel.from && r.value.to === sel.to) {
+    const matched = state.sliceDoc(r.value.from, r.value.to);
+    const insert = matchReplacementCase(matched, query.replace);
+    const changes = state.changes({ from: r.value.from, to: r.value.to, insert });
+    const nr = query.getCursor(state, r.value.to).next();
+    view.dispatch({
+      changes,
+      selection: nr.done ? undefined : EditorSelection.single(nr.value.from, nr.value.to).map(changes),
+      userEvent: 'input.replace',
+    });
+    return true;
+  }
+  return findNext(view);
+}
+
+// Replace-all with case preservation — same shape as @codemirror/search's
+// own replaceAll, plus matchReplacementCase per match.
+function replaceAllPreservingCase(view) {
+  const query = getSearchQuery(view.state);
+  const { state } = view;
+  if (state.readOnly || !query.valid) return false;
+  const changes = [];
+  const cursor = query.getCursor(state);
+  let r;
+  while (!(r = cursor.next()).done) {
+    const matched = state.sliceDoc(r.value.from, r.value.to);
+    changes.push({ from: r.value.from, to: r.value.to, insert: matchReplacementCase(matched, query.replace) });
+  }
+  if (!changes.length) return false;
+  view.dispatch({ changes, userEvent: 'input.replace.all' });
+  return true;
+}
+
+class ObsidianSearchPanel {
+  constructor(view) {
+    this.view = view;
+    this.query = getSearchQuery(view.state);
+    this.showReplace = !!this.query.replace;
+    this.preserveCase = false;
+
+    this.dom = document.createElement('div');
+    this.dom.className = 'cm-obsidian-search';
+    // @codemirror/search's own default panel relies on this same pattern —
+    // keydown events on these <input>s never reach CM6's contentDOM-scoped
+    // keymap at all (they're siblings of it, not descendants), so F3/Mod-g/
+    // Escape/etc. (searchKeymap, scoped "search-panel") have to be replayed
+    // by hand via runScopeHandlers, exactly like the library's own panel does.
+    this.dom.addEventListener('keydown', e => {
+      if (runScopeHandlers(view, e, 'search-panel')) { e.preventDefault(); return; }
+      if (e.key === 'Enter' && e.target === this.searchInput) {
+        e.preventDefault();
+        (e.shiftKey ? findPrevious : findNext)(view);
+      } else if (e.key === 'Enter' && e.target === this.replaceInput) {
+        e.preventDefault();
+        this.replaceOne();
+      }
+    });
+
+    // ── Row 1: search ──
+    const row1 = document.createElement('div');
+    row1.className = 'cm-obsidian-search-row';
+
+    this.toggleBtn = this.makeIconButton('▾', 'Mostrar reemplazar', () => this.setShowReplace(!this.showReplace));
+    this.toggleBtn.classList.add('cm-obsidian-search-chevron');
+    row1.appendChild(this.toggleBtn);
+
+    const fieldWrap = document.createElement('div');
+    fieldWrap.className = 'cm-obsidian-search-field-wrap';
+    this.searchInput = document.createElement('input');
+    this.searchInput.className = 'cm-obsidian-search-input';
+    this.searchInput.setAttribute('main-field', 'true');
+    this.searchInput.placeholder = 'Buscar…';
+    this.searchInput.value = this.query.search;
+    this.searchInput.addEventListener('input', () => this.commit());
+    fieldWrap.appendChild(this.searchInput);
+
+    const flags = document.createElement('span');
+    flags.className = 'cm-obsidian-search-flags';
+    this.caseBtn = this.makeFlagButton('Aa', 'Sensible a mayúsculas', () => { this.caseSensitive = !this.caseSensitive; this.commit(); });
+    this.wordBtn = this.makeFlagButton('ab', 'Palabra completa', () => { this.wholeWord = !this.wholeWord; this.commit(); });
+    this.wordBtn.style.textDecoration = 'underline';
+    this.regexBtn = this.makeFlagButton('.*', 'Expresión regular', () => { this.regexp = !this.regexp; this.commit(); });
+    this.caseSensitive = this.query.caseSensitive;
+    this.wholeWord = this.query.wholeWord;
+    this.regexp = this.query.regexp;
+    flags.appendChild(this.caseBtn);
+    flags.appendChild(this.wordBtn);
+    flags.appendChild(this.regexBtn);
+    fieldWrap.appendChild(flags);
+    row1.appendChild(fieldWrap);
+
+    this.countEl = document.createElement('span');
+    this.countEl.className = 'cm-obsidian-search-count';
+    row1.appendChild(this.countEl);
+
+    row1.appendChild(this.makeIconButton('↑', 'Anterior (Shift+Enter)', () => findPrevious(view)));
+    row1.appendChild(this.makeIconButton('↓', 'Siguiente (Enter)', () => findNext(view)));
+    row1.appendChild(this.makeIconButton('☰', 'Seleccionar todas las coincidencias', () => selectMatches(view)));
+    row1.appendChild(this.makeIconButton('×', 'Cerrar', () => closeSearchPanel(view)));
+
+    // ── Row 2: replace ──
+    const row2 = document.createElement('div');
+    row2.className = 'cm-obsidian-search-row cm-obsidian-search-replace-row';
+    this.replaceRow = row2;
+
+    const spacer = document.createElement('span');
+    spacer.className = 'cm-obsidian-search-spacer';
+    row2.appendChild(spacer);
+
+    this.replaceInput = document.createElement('input');
+    this.replaceInput.className = 'cm-obsidian-search-input';
+    this.replaceInput.placeholder = 'Reemplazar…';
+    this.replaceInput.value = this.query.replace;
+    this.replaceInput.addEventListener('input', () => this.commit());
+    row2.appendChild(this.replaceInput);
+
+    this.preserveCaseBtn = this.makeFlagButton('AB', 'Preservar mayúsculas/minúsculas (solo texto plano)', () => {
+      if (this.regexp) { return; }
+      this.preserveCase = !this.preserveCase;
+      this.syncFlagButtons();
+    });
+    row2.appendChild(this.preserveCaseBtn);
+    row2.appendChild(this.makeIconButton('↩', 'Reemplazar', () => this.replaceOne()));
+    row2.appendChild(this.makeIconButton('⇉', 'Reemplazar todo', () => this.replaceAll()));
+
+    this.dom.appendChild(row1);
+    this.dom.appendChild(row2);
+    this.setShowReplace(this.showReplace);
+    this.syncFlagButtons();
+    this.refreshCount();
+  }
+
+  makeIconButton(label, title, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cm-obsidian-search-icon-btn';
+    btn.textContent = label;
+    btn.title = title;
+    btn.addEventListener('mousedown', e => e.preventDefault()); // keep focus in the field
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  makeFlagButton(label, title, onClick) {
+    const btn = this.makeIconButton(label, title, onClick);
+    btn.classList.add('cm-obsidian-search-flag-btn');
+    return btn;
+  }
+
+  syncFlagButtons() {
+    this.caseBtn.classList.toggle('is-active', this.caseSensitive);
+    this.wordBtn.classList.toggle('is-active', this.wholeWord);
+    this.regexBtn.classList.toggle('is-active', this.regexp);
+    this.preserveCaseBtn.classList.toggle('is-active', this.preserveCase);
+    this.preserveCaseBtn.disabled = this.regexp;
+    this.preserveCaseBtn.classList.toggle('is-disabled', this.regexp);
+  }
+
+  setShowReplace(show) {
+    this.showReplace = show;
+    this.replaceRow.hidden = !show;
+    this.toggleBtn.textContent = show ? '▾' : '▸';
+  }
+
+  commit() {
+    const query = new SearchQuery({
+      search: this.searchInput.value,
+      caseSensitive: this.caseSensitive,
+      regexp: this.regexp,
+      wholeWord: this.wholeWord,
+      replace: this.replaceInput.value,
+    });
+    this.syncFlagButtons();
+    if (!query.eq(this.query)) {
+      this.query = query;
+      this.view.dispatch({ effects: setSearchQuery.of(query) });
+    }
+    this.refreshCount();
+  }
+
+  refreshCount() {
+    const { total, index, truncated } = computeMatchInfo(this.query, this.view.state);
+    if (!this.query.search) { this.countEl.textContent = ''; }
+    else if (total === 0) { this.countEl.textContent = 'Sin resultados'; }
+    else {
+      const totalText = truncated ? `${total}+` : String(total);
+      this.countEl.textContent = `${index === -1 ? '?' : index + 1} de ${totalText}`;
+    }
+  }
+
+  replaceOne() {
+    if (this.preserveCase && !this.regexp) { replaceOnePreservingCase(this.view); }
+    else { cmReplaceNext(this.view); }
+    this.refreshCount();
+  }
+
+  replaceAll() {
+    if (this.preserveCase && !this.regexp) { replaceAllPreservingCase(this.view); }
+    else { cmReplaceAll(this.view); }
+    this.refreshCount();
+  }
+
+  update(update) {
+    let queryChanged = false;
+    for (const tr of update.transactions) {
+      for (const effect of tr.effects) {
+        if (effect.is(setSearchQuery) && !effect.value.eq(this.query)) {
+          this.query = effect.value;
+          this.searchInput.value = this.query.search;
+          this.replaceInput.value = this.query.replace;
+          this.caseSensitive = this.query.caseSensitive;
+          this.wholeWord = this.query.wholeWord;
+          this.regexp = this.query.regexp;
+          this.syncFlagButtons();
+          queryChanged = true;
+        }
+      }
+    }
+    if (queryChanged || update.selectionSet || update.docChanged) { this.refreshCount(); }
+  }
+
+  mount() { this.searchInput.focus(); this.searchInput.select(); }
+
+  get top() { return true; }
+}
+
 // ── Source mode (Compartment) ─────────────────────────────────────────────────
 const previewCompartment = new Compartment();
 let sourceMode = false;
@@ -6084,6 +6531,17 @@ function createEditor(parent, content) {
       previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]),
       foldPlugin,
       foldAtomicRanges,
+      // Find/replace panel (Ctrl+F — see obsidianSearchPanelPlugin's own
+      // comment for why the actual keybinding is a real VS Code command
+      // instead of relying on searchKeymap's own Mod-f reaching this webview
+      // reliably). `top: true` so the panel's containing block (.cm-panels-top)
+      // sticks to the *top* of the scroll container as the user scrolls —
+      // ObsidianSearchPanel positions itself absolutely inside that
+      // container, so this is what keeps it pinned near the top-right of the
+      // visible viewport rather than wherever the bottom of the document
+      // happens to be.
+      search({ top: true, createPanel: view => new ObsidianSearchPanel(view) }),
+      keymap.of(searchKeymap),
       linkClickHandler,
       hoverPreviewPlugin,
       tableMenuPlugin,
@@ -6407,6 +6865,9 @@ window.addEventListener('message', ev => {
     }
     case 'toggle-source-mode':
       toggleSourceMode();
+      break;
+    case 'open-search-panel':
+      openSearchPanel(view);
       break;
     case 'tasks-query-result':
       tasksQueryCache.set(msg.query, msg.result);

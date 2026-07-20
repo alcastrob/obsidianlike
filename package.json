@@ -32,7 +32,11 @@
       {
         "viewType": "vaultTool.markdownEditor",
         "displayName": "Obsidian-like: Vista de documento",
-        "selector": [{ "filenamePattern": "*.md" }],
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          }
+        ],
         "priority": "default"
       }
     ],
@@ -56,7 +60,12 @@
         },
         "obsidianLike.attachmentsLocation": {
           "type": "string",
-          "enum": ["vault", "samefolder", "subfolder", "specificfolder"],
+          "enum": [
+            "vault",
+            "samefolder",
+            "subfolder",
+            "specificfolder"
+          ],
           "enumDescriptions": [
             "Carpeta raíz de la bóveda (carpeta de workspace)",
             "Misma carpeta que el archivo .md",
@@ -107,6 +116,10 @@
       {
         "command": "vaultTool.editTaskAtCursor",
         "title": "Obsidian-like: Editar tarea en el cursor"
+      },
+      {
+        "command": "vaultTool.openSearchPanel",
+        "title": "Obsidian-like: Buscar y reemplazar"
       }
     ],
     "menus": {
@@ -127,6 +140,12 @@
       {
         "command": "vaultTool.editTaskAtCursor",
         "key": "shift+alt+e",
+        "when": "activeCustomEditorId == 'vaultTool.markdownEditor'"
+      },
+      {
+        "command": "vaultTool.openSearchPanel",
+        "key": "ctrl+f",
+        "mac": "cmd+f",
         "when": "activeCustomEditorId == 'vaultTool.markdownEditor'"
       },
       {
@@ -158,6 +177,7 @@
     "@codemirror/commands": "^6.0.0",
     "@codemirror/lang-markdown": "^6.0.0",
     "@codemirror/language": "^6.0.0",
+    "@codemirror/search": "^6.7.1",
     "@codemirror/state": "^6.0.0",
     "@codemirror/view": "^6.0.0",
     "@lezer/highlight": "^1.0.0",

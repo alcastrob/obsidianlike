@@ -639,6 +639,14 @@ async function openNoteAtLine(targetUri: vscode.Uri, line?: number): Promise<voi
 // Obsidian-like keeps working standalone if the Tasks extension isn't installed —
 // `getTasksApi()` resolves to `undefined` and the `toggle-task` handler falls back
 // to `naiveToggleTaskLine()`.
+interface DependencyRefDTO {
+  id: string;
+  description: string;
+  path: string;
+  line: number;
+  isDone: boolean;
+  statusSymbol: string;
+}
 interface TaskDTO {
   path: string;
   line: number;
@@ -652,14 +660,10 @@ interface TaskDTO {
   // extension, same degrade-gracefully pattern as `id`/`dependsOn` above. Lets `renderTaskRow`
   // show a hover preview of the referenced task without a second round-trip; an id with no
   // matching entry here (stale, or an older host build) just renders as plain unlinked text.
-  dependsOnTasks?: Array<{
-    id: string;
-    description: string;
-    path: string;
-    line: number;
-    isDone: boolean;
-    statusSymbol: string;
-  }>;
+  dependsOnTasks?: DependencyRefDTO[];
+  // Inverse of `dependsOnTasks`: tasks elsewhere in the vault that depend on *this* one. Same
+  // degrade-gracefully/hover-preview treatment, rendered as its own chip in `renderTaskRow`.
+  blocking?: DependencyRefDTO[];
   isDone: boolean;
   // Added alongside the note-checkbox status-icon fix in `webview-src/editor.js` — `isDone`
   // alone can't distinguish "in progress" from "todo" from a custom status letter, which
@@ -972,6 +976,45 @@ const panelCursorLine: Map<vscode.WebviewPanel, number> = new Map();
 // and `vaultTool.editTaskAtCursor` below) fixes this regardless of the exact underlying
 // mechanism, the same defensive way `panelCursorLine` sidesteps not having a real `TextEditor`.
 const panelScrollTop: Map<vscode.WebviewPanel, number> = new Map();
+// Per-document (keyed by fsPath, not by panel — deactivate() below needs to
+// look this up with no panel/webview reference at all) on-disk mtime as of
+// the last time this extension knows its model matched disk: right after its
+// own successful save, or right after an external-change auto-reload. Module-
+// level (unlike lastOwnContent/pendingApply/etc., which stay closure-local to
+// one resolveCustomTextEditor call) specifically so *both* of this file's two
+// autosave-flush paths — the per-panel idle timer inside resolveCustomTextEditor,
+// and deactivate()'s whole-window-closing flush, which has no access to that
+// closure at all — can consult the same guard before writing. See the long
+// comment at its main call site (scheduleAutoSave) for the cross-window
+// clobber this exists to prevent.
+const lastKnownMtime: Map<string, number> = new Map();
+
+async function refreshKnownMtime(uri: vscode.Uri): Promise<void> {
+  try {
+    lastKnownMtime.set(uri.fsPath, (await vscode.workspace.fs.stat(uri)).mtime);
+  } catch {
+    // Not yet created on disk, or briefly unreadable — leave whatever value
+    // (possibly absent) already there; the next successful save/reload sets
+    // a fresh one.
+  }
+}
+
+// True when the real on-disk file is newer than the last mtime this
+// extension recorded for it — i.e. some other process (most concretely,
+// another VS Code window with the same file open) wrote to it since the
+// *last* time this window's own document model is known to have matched
+// disk. No recorded mtime at all (a brand-new, never-yet-saved document)
+// means there's nothing to conflict with, so this returns false rather than
+// blocking the first save.
+async function isDiskNewerThanKnown(uri: vscode.Uri): Promise<boolean> {
+  const known = lastKnownMtime.get(uri.fsPath);
+  if (known === undefined) { return false; }
+  try {
+    return (await vscode.workspace.fs.stat(uri)).mtime > known;
+  } catch {
+    return false;
+  }
+}
 
 async function buildNoteIndex(): Promise<void> {
   try {
@@ -1135,18 +1178,14 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     // dialog, no error, just quietly-lost work. Reported as "solo estoy
     // escribiendo en una, pero el autosave hace que haya conflictos de
     // escritura con contenido desactualizado."
-    let lastKnownMtimeMs: number | undefined;
+    // warnedStaleOnDisk stays panel-local (just UI-nag prevention, not
+    // correctness — deactivate()'s own flush below has no need to show a
+    // warning at all, it just skips silently) — the actual mtime bookkeeping
+    // lives in the module-level lastKnownMtime map (see its own comment)
+    // specifically so deactivate() can consult the same guard with no access
+    // to this closure.
     let warnedStaleOnDisk = false;
-    const refreshKnownMtime = async () => {
-      try {
-        lastKnownMtimeMs = (await vscode.workspace.fs.stat(document.uri)).mtime;
-      } catch {
-        // Not yet created on disk, or briefly unreadable — leave whatever
-        // value (possibly undefined) already there; the next successful
-        // save/reload will set a fresh one.
-      }
-    };
-    void refreshKnownMtime();
+    void refreshKnownMtime(document.uri);
 
     const fullRange = () =>
       new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
@@ -1213,12 +1252,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           // A stat failure (not yet created, transient FS hiccup) means
           // there's nothing on disk to conflict with, so it falls through to
           // a normal save exactly as before this fix.
-          let diskIsNewer = false;
-          try {
-            const mtime = (await vscode.workspace.fs.stat(document.uri)).mtime;
-            if (lastKnownMtimeMs !== undefined && mtime > lastKnownMtimeMs) { diskIsNewer = true; }
-          } catch { /* nothing on disk yet — proceed */ }
-          if (diskIsNewer) {
+          if (await isDiskNewerThanKnown(document.uri)) {
             // Skip this autosave cycle rather than overwrite — don't retry
             // on a timer (that would just poll indefinitely for a window
             // the user may have walked away from); the next real edit here
@@ -1236,7 +1270,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           warnedStaleOnDisk = false;
           try {
             await document.save();
-            await refreshKnownMtime();
+            await refreshKnownMtime(document.uri);
           } catch (err) {
             vscode.window.showErrorMessage(`No se pudo autoguardar la nota: ${err}`);
           }
@@ -1296,7 +1330,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         // change) — refresh the mtime guard and clear any earlier "another
         // window changed this" warning, since that conflict is resolved now.
         warnedStaleOnDisk = false;
-        void refreshKnownMtime();
+        void refreshKnownMtime(document.uri);
         webviewPanel.webview.postMessage({ type: 'external-update', content: newText });
       }),
 
@@ -1634,6 +1668,42 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             }
           })();
 
+        } else if (msg.type === 'open-task-location') {
+          // Sent by a ```tasks``` query row's backlink (`cm-tasks-query-backlink-link` in
+          // editor.js), carrying the exact (path, line) of the task itself — not routed through
+          // `open-note`/`navigateToTarget` (the generic wikilink-navigation handler) on purpose:
+          // that one disposes the *source* panel after navigating (correct for an in-document
+          // wikilink click, wrong for a dashboard-style listing the user wants to keep open) and
+          // only ever scrolls to a *heading's* line, never a task's own line. Reported as
+          // "debería abrir ese documento en una nueva pestaña y hacer scroll hasta dejar la
+          // posición donde está la tarea a la vista (y con el cursor al principio de la tarea)".
+          (async () => {
+            try {
+              const folder = vscode.workspace.workspaceFolders?.[0];
+              if (!folder) { return; }
+              const targetUri = vscode.Uri.joinPath(folder.uri, msg.path as string);
+              const line = msg.line as number;
+              // `preview: false` is what makes this a genuine new tab rather than reusing/
+              // replacing whatever "preview" (single-click, italicized) tab might already be
+              // open in this column — matches clicking a file in the Explorer with "Enable
+              // Preview" on, not the transient single-use tab a `vscode.openWith` without this
+              // option can produce.
+              await vscode.commands.executeCommand(
+                'vscode.openWith', targetUri, MarkdownDocumentProvider.viewType,
+                { viewColumn: vscode.ViewColumn.Active, preview: false },
+              );
+              // Same delayed-message pattern as `navigateToTarget`/`openNoteAtLine` above: the
+              // target panel's `resolveCustomTextEditor` (and its `panelsByPath` registration)
+              // hasn't necessarily run yet the instant `executeCommand` resolves.
+              const targetPanel = panelsByPath.get(targetUri.fsPath);
+              if (targetPanel) {
+                setTimeout(() => { try { targetPanel.webview.postMessage({ type: 'scroll-to-line', line }); } catch {} }, 350);
+              }
+            } catch (err) {
+              vscode.window.showErrorMessage(`No se pudo abrir la tarea: ${err}`);
+            }
+          })();
+
         } else if (msg.type === 'toggle-task-at-location') {
           (async () => {
             try {
@@ -1729,11 +1799,23 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       // last instant before close; see CLAUDE.md for that residual gap). Awaits
       // pendingApply first so a 'sync' that was still in flight when the tab
       // closed actually lands before the isDirty check below reads it.
-      pendingApply.then(() => {
-        if (document.isDirty) {
-          document.save().then(undefined, err =>
-            vscode.window.showErrorMessage(`No se pudo guardar la nota al cerrar: ${err}`));
+      //
+      // Same cross-window mtime guard as scheduleAutoSave, and for the same
+      // reason: without it, "close this tab without saving to keep the disk
+      // version" (the escape hatch scheduleAutoSave's own warning suggests)
+      // wouldn't actually be true — closing a dirty tab would still flush-save
+      // here regardless, silently overwriting whatever another window had
+      // already written more recently.
+      pendingApply.then(async () => {
+        if (!document.isDirty) { return; }
+        if (await isDiskNewerThanKnown(document.uri)) {
+          vscode.window.showWarningMessage(
+            `"${path.basename(document.uri.fsPath)}" se modificó en otra ventana; se cerró esta pestaña sin guardar tus cambios locales para no sobrescribir esa versión más reciente.`
+          );
+          return;
         }
+        document.save().then(undefined, err =>
+          vscode.window.showErrorMessage(`No se pudo guardar la nota al cerrar: ${err}`));
       });
       subs.forEach(s => s.dispose());
     });
@@ -1961,6 +2043,20 @@ export function activate(context: vscode.ExtensionContext) {
     panel?.webview.postMessage({ type: 'toggle-source-mode' });
   });
 
+  // Ctrl+F for the CM6 find/replace panel (editor.js's ObsidianSearchPanel,
+  // built on @codemirror/search) — a real contributes.keybindings command,
+  // same reasoning/pattern as vaultTool.editTaskAtCursor: a plain in-webview
+  // keymap binding for this chord could easily lose to whatever VS Code's own
+  // webview host does with Ctrl+F (its own generic "find in webview" feature,
+  // or just the class of coarse keybinding-table interception documented on
+  // editTaskAtCursor's own Shift+Alt+E history) before our JS ever sees it. A
+  // real command scoped to activeCustomEditorId is the one path already
+  // proven to reach the webview reliably regardless of that.
+  const openSearchPanelCmd = vscode.commands.registerCommand('vaultTool.openSearchPanel', () => {
+    const panel = activePanels.find(p => p.active) ?? activePanels.find(p => p.visible);
+    panel?.webview.postMessage({ type: 'open-search-panel' });
+  });
+
   // Fallback for drag-and-drop: VS Code shows its own drag-tracking overlay above
   // every webview for the whole duration of any drag targeting the editor area, so
   // the `dragover`/`drop` listeners in editor.js never actually see an OS file
@@ -2152,6 +2248,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, editTaskAtCursorCmd,
+    openSearchPanelCmd,
     openNoteQuickPickCmd, openNoteQuickPickNewTabCmd, openNoteQuickPickSideCmd, openNoteAtLineCmd
   );
 }
@@ -2227,10 +2324,20 @@ async function openNoteFromQuickPick(fsPath: string, mode: OpenMode = 'replace')
 // time this runs — onWillSaveTextDocument's get-content round-trip will then
 // just time out after 5s and fall back to whatever the last 'sync' had already
 // applied, same residual gap as the onDidDispose flush above.
+//
+// Same cross-window mtime guard as scheduleAutoSave/onDidDispose above, and
+// for the same reason: this whole-window shutdown flush has no access to
+// either of those closures, which is exactly why lastKnownMtime/
+// isDiskNewerThanKnown live at module scope instead of per-panel — a doc
+// another window already saved something newer to shouldn't get silently
+// clobbered just because *this* window happened to be the one closing.
 export function deactivate(): Thenable<void> {
   const openPaths = new Set(panelsByPath.keys());
-  const saves = vscode.workspace.textDocuments
-    .filter(doc => openPaths.has(doc.uri.fsPath) && doc.isDirty)
-    .map(doc => doc.save());
+  const dirtyDocs = vscode.workspace.textDocuments
+    .filter(doc => openPaths.has(doc.uri.fsPath) && doc.isDirty);
+  const saves = dirtyDocs.map(async doc => {
+    if (await isDiskNewerThanKnown(doc.uri)) { return; }
+    await doc.save();
+  });
   return Promise.all(saves).then(() => undefined);
 }

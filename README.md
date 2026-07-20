@@ -51,6 +51,15 @@ siempre. Para lograrlo, la extensión activa `files.autoSave` de VS Code
 otros tipos de archivo), ya que es la única forma soportada de que VS Code deje
 de preguntar antes de cerrar una pestaña con cambios.
 
+Si la misma nota está abierta a la vez en **dos ventanas** distintas de VS Code, el
+autoguardado comprueba la fecha de modificación real del fichero antes de escribir: si detecta
+que la otra ventana ya guardó algo más reciente que lo que esta ventana conoce, se salta ese
+guardado automático en vez de sobrescribirlo en silencio, y avisa una sola vez con un mensaje
+explicando que puedes forzar tu versión con `Ctrl+S` o cerrar la pestaña sin guardar para
+conservar la del disco (cerrar sin guardar también respeta esa misma comprobación). No resuelve
+una edición realmente simultánea en ambas ventanas — para eso hay que decidir a mano cuál de las
+dos versiones se queda.
+
 ## Frontmatter YAML → panel "Propiedades"
 
 El bloque `---...---` al principio de la nota se muestra como un panel
@@ -135,12 +144,37 @@ Un `![[...]]` (embed) de uno de estos tres tipos se muestra como una caja peque�
 fichero, clicable de la misma forma — no como texto incrustado, ya que no hay nada de markdown que
 renderizar.
 
+## Buscar y reemplazar (`Ctrl+F` / `Cmd+F`)
+
+Panel flotante arriba a la derecha, igual que en Obsidian: campo de búsqueda con contador de
+coincidencias ("3 de 12"), toggles de sensible a mayúsculas / palabra completa / expresión
+regular, botones anterior/siguiente/seleccionar todas las coincidencias, y una fila de
+"Reemplazar" colapsable (con su propio toggle "AB" para preservar mayúsculas/minúsculas al
+reemplazar en texto plano — no aplica con regex) con botones de reemplazar uno o todos. Queda
+fijo en pantalla al hacer scroll por la nota. El menú nativo **Editar → Buscar** no abre este
+panel — es una limitación de VS Code, no algo pendiente de arreglar (ese ítem de menú invoca
+siempre el comando de búsqueda genérico de VS Code, pensado para un editor de texto normal, y no
+hay forma de redirigirlo desde una extensión); usa `Ctrl+F` o la paleta de comandos
+("Obsidian-like: Buscar y reemplazar").
+
+## Línea horizontal (`---`)
+
+Un `---` (o `***`/`___`) solo en su propia línea se dibuja como una línea horizontal real, igual
+que en Obsidian, en vez de mostrar los guiones tal cual. Los delimitadores `---` del frontmatter
+no se ven afectados — ya tienen su propio tratamiento como panel de "Propiedades" (ver arriba).
+
 ## Transclusiones (`![[nota]]`, `![[carpeta/nota]]`, `![[nota#sección]]`)
 
 Incrusta el contenido de otra nota (completa o solo una sección) dentro de un
 rectángulo con un botón "↗" para abrir la nota de origen (y hacer scroll a la
 sección, si la hay). Se resuelve de forma asíncrona contra el host, igual que
-los bloques ` ```tasks ` de la integración de Tareas.
+los bloques ` ```tasks ` de la integración de Tareas. Dentro de esa sección incrustada,
+una imagen (`![[foto.png]]`) se muestra como imagen real, un enlace a un `.docx`/`.xlsx`/`.pdf`
+se muestra como una caja clicable para abrirlo con la aplicación del sistema, y las líneas de
+tarea (`- [ ] ...`) muestran su checkbox (de solo lectura, ya que editar una tarea transcluida no
+tiene sentido — para eso está la nota de origen) y el tachado de "hecho", en vez de mostrarse
+como texto markdown sin procesar. Una transclusión dentro de otra transclusión no se resuelve de
+forma recursiva.
 
 ## Vista previa al pasar el ratón (`Ctrl`/`Cmd` + hover sobre un `[[wikilink]]`)
 
@@ -227,10 +261,12 @@ Los bloques ` ```tasks ` (con la misma sintaxis de consulta que el plugin Tasks 
 real dentro del propio editor, en la misma columna de ancho de lectura (y con el mismo margen
 izquierdo/derecho) que el resto de la nota: cada fila muestra checkbox, tags como pills, ID,
 prioridad, dependencias, fechas y un backlink clicable a la nota (con el encabezado bajo el que
-está la tarea, si tiene uno) — con un botón ✏️ propio para editar esa tarea concreta sin salir del
-listado. Pasar el cursor sobre el id de una dependencia (`⛔`) muestra un popup con la descripción y
-ubicación de la tarea referenciada, si se resuelve a una tarea real del vault. Encima del listado
-hay un filtro de texto por descripción, y debajo un contador de
+está la tarea, si tiene uno) — al hacer clic, abre esa nota en una pestaña nueva (sin cerrar el
+listado) y hace scroll hasta la línea exacta de la tarea, dejando el cursor al principio de esa
+línea. Con un botón ✏️ propio para editar esa tarea concreta sin salir del
+listado. Pasar el cursor sobre el id de una dependencia (`⛔`), o sobre el `ID` propio de una tarea
+de la que dependen otras, muestra un popup con la descripción y ubicación de la tarea referenciada.
+Encima del listado hay un filtro de texto por descripción, y debajo un contador de
 tareas mostradas, igual que en Obsidian. Igual que en una tarea suelta, una URL suelta dentro de
 la descripción también se muestra como enlace clicable. Añadiendo una línea `zoom factor 80%` a la
 consulta (propio de este port, no del plugin Tasks original) se reduce el tamaño de todo el
@@ -262,6 +298,10 @@ menú nativo desde un webview), así que también incluye Cortar/Copiar/Pegar pa
 opciones — los atajos de teclado (`Ctrl+C`/`X`/`V`) siguen funcionando igual que siempre, esto es
 solo para cuando se usa el botón derecho. No hay barra de herramientas para esto — es, igual que en
 Obsidian, el único punto de entrada para gestionar filas y columnas.
+
+Con el cursor dentro de una celda, copiar/cortar/pegar y cualquier atajo de teclado (incluido
+`Ctrl+S` para pasar a modo fuente, o cualquier otro atajo de VS Code) funcionan con normalidad —
+antes se bloqueaban silenciosamente mientras se estaba editando el contenido de una celda.
 
 ## Dataview (` ```dataview ` / ` ```dql ` / ` ```dataviewjs `) — integración con "Obsidian-like Dataview"
 
