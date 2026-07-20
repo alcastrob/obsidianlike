@@ -5929,6 +5929,19 @@ const linkClickHandler = EditorView.domEventHandlers({
       });
       return true;
     }
+    // A tasks-query row's backlink, same `data-path`/`data-line` convention as the two above —
+    // see the comment by its construction in renderTaskRow for why this isn't routed through
+    // `[data-wiki]`/`open-note` like a normal wikilink.
+    const taskQueryBacklink = e.target.closest('.cm-tasks-query-backlink-link');
+    if (taskQueryBacklink) {
+      e.preventDefault();
+      vscode.postMessage({
+        type: 'open-task-location',
+        path: taskQueryBacklink.dataset.path,
+        line: Number(taskQueryBacklink.dataset.line),
+      });
+      return true;
+    }
     const taskCb = e.target.closest('.cm-task-checkbox');
     if (taskCb) {
       e.preventDefault();
