@@ -82,6 +82,24 @@ function getAttachmentRoots(docUri: vscode.Uri): vscode.Uri[] {
   return [...new Set(roots)].map(r => vscode.Uri.file(r));
 }
 
+// Recursive vault-wide image scan is genuinely O(every file/dir in the vault)
+// (see findImageFiles) — getImageMap used to redo this from scratch, *twice*
+// (once for the configured attachments dir, then again unconditionally for the
+// whole vault "fallback"), on every single file open, since resolveCustomTextEditor
+// calls it synchronously before the webview can paint anything. Reported as
+// "tarda en abrir un fichero" — for a vault with many notes/images this was the
+// single biggest contributor. Cached here instead: the vault-wide scan runs once
+// and is reused across every open, invalidated only when something on disk that
+// could change the result actually happens (an image file created/deleted/moved —
+// see the `**/*.{png,...}` FileSystemWatcher and the explicit invalidations at
+// paste-image/drop-files/insertAttachment/rename below), not on every open.
+let vaultImageFilesCache: string[] | null = null;
+function getVaultImageFiles(vaultRoot: string): string[] {
+  if (vaultImageFilesCache === null) { vaultImageFilesCache = findImageFiles(vaultRoot); }
+  return vaultImageFilesCache;
+}
+function invalidateImageCache(): void { vaultImageFilesCache = null; }
+
 function getImageMap(webview: vscode.Webview, docUri: vscode.Uri): Record<string, string> {
   const map: Record<string, string> = {};
   const addFile = (fullPath: string) => {
@@ -91,13 +109,33 @@ function getImageMap(webview: vscode.Webview, docUri: vscode.Uri): Record<string
     }
   };
 
-  // 1) The configured attachments location takes priority.
   const configuredDir = getSaveDir(docUri.fsPath);
-  for (const fullPath of findImageFiles(configuredDir)) { addFile(fullPath); }
-
-  // 2) Fall back to a recursive search of the whole vault for anything not found above.
   const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? path.dirname(docUri.fsPath);
-  for (const fullPath of findImageFiles(vaultRoot)) { addFile(fullPath); }
+
+  // Same two-tier priority as before (configured dir's own images win a
+  // basename collision over anything else in the vault), just computed by
+  // partitioning one cached vault-wide list instead of running two fresh
+  // recursive fs scans. Preserves relative ordering within each tier (both
+  // tiers are filtered from the *same* single recursive traversal, so files
+  // under configuredDir come out in the same relative order a dedicated scan
+  // of just that directory would have produced). Prefix comparison is
+  // lowercased since Windows paths are case-insensitive and drive-letter
+  // casing in particular isn't guaranteed consistent between the two sources.
+  const configuredDirNorm = (path.normalize(configuredDir) + path.sep).toLowerCase();
+  const vaultRootNorm = (path.normalize(vaultRoot) + path.sep).toLowerCase();
+  const configuredDirInsideVault = configuredDirNorm.startsWith(vaultRootNorm);
+
+  if (configuredDirInsideVault) {
+    const all = getVaultImageFiles(vaultRoot);
+    for (const f of all) { if ((path.normalize(f).toLowerCase() + path.sep).startsWith(configuredDirNorm)) { addFile(f); } }
+    for (const f of all) { addFile(f); }
+  } else {
+    // Rare: an absolute `specificfolder` outside the vault root entirely isn't
+    // covered by the vault-wide cache at all — fall back to a direct (small,
+    // uncached — it's just the one configured folder, not the whole vault) scan.
+    for (const fullPath of findImageFiles(configuredDir)) { addFile(fullPath); }
+    for (const fullPath of getVaultImageFiles(vaultRoot)) { addFile(fullPath); }
+  }
 
   return map;
 }
@@ -301,6 +339,12 @@ async function fixUpLinksForMovedNote(oldUri: vscode.Uri, newUri: vscode.Uri): P
 // need to be discovered under the *new* location and individually rebased onto
 // their corresponding pre-move path before `fixUpLinksForMovedNote` can process them.
 async function handleWorkspaceRename(files: ReadonlyArray<{ oldUri: vscode.Uri; newUri: vscode.Uri }>): Promise<void> {
+  // A renamed/moved image (or a whole folder containing one) changes the vault
+  // image cache's paths — invalidate unconditionally rather than checking each
+  // file's extension, since this only fires on an actual rename (rare compared
+  // to file opens, the case the cache exists to speed up) so the cost of an
+  // occasionally-unnecessary invalidation is negligible.
+  invalidateImageCache();
   for (const { oldUri, newUri } of files) {
     let isDirectory = false;
     try { isDirectory = fs.statSync(newUri.fsPath).isDirectory(); } catch { continue; } // moved again/deleted since; skip
@@ -1607,6 +1651,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             const saveDir = getSaveDir(document.uri.fsPath);
             if (!fs.existsSync(saveDir)) { fs.mkdirSync(saveDir, { recursive: true }); }
             fs.writeFileSync(path.join(saveDir, filename), buffer);
+            invalidateImageCache(); // always a .png — no extension check needed
             const fileUri    = vscode.Uri.file(path.join(saveDir, filename));
             const webviewUri = webviewPanel.webview.asWebviewUri(fileUri).toString();
             webviewPanel.webview.postMessage({ type: 'image-pasted', filename, uri: webviewUri });
@@ -1632,6 +1677,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
                 const buffer  = Buffer.from(base64, 'base64');
                 const filename = uniqueAttachmentName(saveDir, f.name);
                 fs.writeFileSync(path.join(saveDir, filename), buffer);
+                if (IMAGE_EXT_RE.test(filename)) { invalidateImageCache(); }
                 const uri = webviewPanel.webview.asWebviewUri(vscode.Uri.file(path.join(saveDir, filename))).toString();
                 results.push({ filename, uri });
               } catch (err) {
@@ -1819,6 +1865,18 @@ export function activate(context: vscode.ExtensionContext) {
   mdWatcher.onDidDelete(() => buildNoteIndex());
   context.subscriptions.push(mdWatcher);
 
+  // Invalidates the vault-wide image cache (see getVaultImageFiles) whenever an
+  // image is added or removed anywhere in the vault by any means this watcher
+  // can see — an explorer drag, an external tool, git operations, etc. — as a
+  // catch-all alongside the more immediate explicit invalidations at the
+  // paste-image/drop-files/insertAttachment/rename call sites. A content-only
+  // change doesn't affect the file *list* the cache holds, so onDidChange is
+  // deliberately not subscribed here.
+  const imageWatcher = vscode.workspace.createFileSystemWatcher('**/*.{png,jpg,jpeg,gif,svg,webp,bmp}');
+  imageWatcher.onDidCreate(() => invalidateImageCache());
+  imageWatcher.onDidDelete(() => invalidateImageCache());
+  context.subscriptions.push(imageWatcher);
+
   // Fires for explorer drag/cut-paste/F2 renames and moves (including whole
   // folders), and also for the in-app title-edit rename (which itself applies via
   // WorkspaceEdit.renameFile()) — see the comment above fixUpLinksForMovedNote.
@@ -1919,6 +1977,7 @@ export function activate(context: vscode.ExtensionContext) {
           const filename = uniqueAttachmentName(saveDir, path.basename(src.fsPath));
           const destPath = path.join(saveDir, filename);
           fs.copyFileSync(src.fsPath, destPath);
+          if (IMAGE_EXT_RE.test(filename)) { invalidateImageCache(); }
           results.push({ filename, uri: panel.webview.asWebviewUri(vscode.Uri.file(destPath)).toString() });
         } catch (err) {
           vscode.window.showErrorMessage(`No se pudo adjuntar "${src.fsPath}": ${err}`);

@@ -38,6 +38,22 @@ Esta revisión cubre únicamente este repositorio. Las extensiones hermanas
 `_clearunusedimages`, ver `make.bat`) viven en repos separados y no están
 auditadas aquí.
 
+## Rendimiento
+
+Dos cachés evitan trabajo repetido innecesario, ambas invalidadas solo cuando lo que
+cachean puede haber cambiado de verdad (nunca por tiempo):
+
+- **Mapa de imágenes** (`getImageMap`): el escaneo recursivo de toda la bóveda en busca
+  de `![[archivo]]` se cachea (`getVaultImageFiles`) en vez de repetirse desde cero en
+  cada apertura de nota, que era el mayor causante reportado de que abrir un fichero
+  "tardara". Se invalida al pegar/soltar/adjuntar una imagen, al renombrar o mover
+  ficheros, y mediante un `FileSystemWatcher` que cubre cualquier otra forma de crear o
+  borrar una imagen en la bóveda (Explorador, herramienta externa, git...).
+- **Cabeceras y secciones plegadas** (`collectHeadings`/`computeFoldedSpans`): se
+  recalculaban en cada pulsación, movimiento del cursor o scroll — ahora se cachean por
+  identidad del árbol de sintaxis (y, en el segundo caso, por qué cabeceras están
+  plegadas), así que solo se recalculan cuando el documento cambia de verdad.
+
 ## Autoguardado
 
 El editor guarda la nota en disco por su cuenta: tras `obsidianLike.autoSaveDelay`

@@ -5589,6 +5589,7 @@ class FoldToggle extends WidgetType {
     outer.addEventListener('click', e => {
       e.preventDefault(); e.stopPropagation();
       if (foldedSet.has(lf)) foldedSet.delete(lf); else foldedSet.add(lf);
+      foldedSetVersion++; // invalidates computeFoldedSpans' own cache — see there
       if (currentView) currentView.dispatch({ effects: foldEffect.of(lf) });
     });
     return outer;
@@ -5596,9 +5597,28 @@ class FoldToggle extends WidgetType {
   ignoreEvent() { return false; }
 }
 
+// This used to re-walk the *entire* syntax tree from scratch on every call —
+// and foldPlugin's own update() calls it on every docChanged, viewportChanged,
+// AND selectionSet, i.e. on essentially every keystroke, cursor move, and
+// scroll tick, not just when headings could actually have changed. Reported
+// as general sluggishness while typing/scrolling, worse the longer the note.
+// Headings only ever change when the document's parsed structure changes —
+// cached here keyed on syntaxTree(state)'s own object identity, not
+// state.doc: CM6 hands back the *same* Tree reference for repeated calls
+// against an unchanged state, and only a genuine edit (or the incremental
+// parser catching up on a large document in the background) produces a new
+// one — matching the exact signal livePreviewPlugin/imgPlugin's own
+// `syntaxTree(u.startState) !== syntaxTree(u.state)` rebuild check already
+// relies on elsewhere in this file, so a cursor move or scroll with nothing
+// tree-relevant changed reliably hits the cache instead of ever risking
+// stale data relative to what an uncached call would have produced.
+let headingsCacheTree = null;
+let headingsCacheResult = null;
 function collectHeadings(state) {
+  const tree = syntaxTree(state);
+  if (headingsCacheTree === tree) { return headingsCacheResult; }
   const hs = [];
-  syntaxTree(state).iterate({
+  tree.iterate({
     enter(node) {
       const m = /^ATXHeading([1-6])$/.exec(node.name);
       if (m) {
@@ -5608,6 +5628,8 @@ function collectHeadings(state) {
       }
     }
   });
+  headingsCacheTree = tree;
+  headingsCacheResult = hs;
   return hs;
 }
 
@@ -5620,7 +5642,21 @@ function collectHeadings(state) {
 // jump — see the comments on both, below, for why folded content needing
 // real cursor-navigation protection (not just visual height:0 hiding) turned
 // out to need three separate consumers of this one source of truth, not one.
+// Cached the same way collectHeadings is (see its own comment) — the result
+// only depends on the syntax tree and which headings are currently folded, so
+// it's keyed on both syntaxTree(state)'s identity and foldedSetVersion (a
+// counter bumped only where foldedSet itself is actually mutated, i.e. the
+// fold-toggle click handler above); a doc edit already changes the tree
+// reference too, so foldedSetVersion doesn't need bumping there separately.
+let foldedSetVersion = 0;
+let foldedSpansCacheTree = null;
+let foldedSpansCacheVersion = -1;
+let foldedSpansCacheResult = null;
 function computeFoldedSpans(state, headings) {
+  const tree = syntaxTree(state);
+  if (foldedSpansCacheTree === tree && foldedSpansCacheVersion === foldedSetVersion) {
+    return foldedSpansCacheResult;
+  }
   headings = headings || collectHeadings(state);
   const spans = [];
   for (let i = 0; i < headings.length; i++) {
@@ -5635,6 +5671,9 @@ function computeFoldedSpans(state, headings) {
     }
     if (foldEnd > h.lineTo) { spans.push({ from: h.lineTo + 1, to: foldEnd }); }
   }
+  foldedSpansCacheTree = tree;
+  foldedSpansCacheVersion = foldedSetVersion;
+  foldedSpansCacheResult = spans;
   return spans;
 }
 
