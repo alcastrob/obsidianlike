@@ -1,16 +1,19 @@
 {
-  "name": "vault-tool",
-  "displayName": "Vault Tool",
+  "name": "obsidian-like",
+  "displayName": "Obsidian-like",
   "description": "Herramienta local para gestionar el vault de notas (sustituto de Obsidian)",
   "version": "0.0.1",
-  "publisher": "angel-local",
+  "publisher": "angelCastro",
+  "icon": "media/obsidian-icon-violeta.png",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onCommand:vaultTool.openNoteAtLine"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "themes": [
@@ -28,20 +31,30 @@
     "customEditors": [
       {
         "viewType": "vaultTool.markdownEditor",
-        "displayName": "Vault: Vista de documento",
+        "displayName": "Obsidian-like: Vista de documento",
         "selector": [{ "filenamePattern": "*.md" }],
         "priority": "default"
       }
     ],
     "configuration": {
-      "title": "Vault Tool",
+      "title": "Obsidian-like",
       "properties": {
-        "vaultTool.markdownFont": {
+        "obsidianLike.markdownFont": {
           "type": "string",
           "default": "",
           "markdownDescription": "Fuente para archivos Markdown. Acepta el mismo formato que `editor.fontFamily` (ej: `'iA Writer Quattro S', Georgia, serif`). Vacío usa la fuente general del editor."
         },
-        "vaultTool.attachmentsLocation": {
+        "obsidianLike.codeFont": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Fuente monoespaciada para código inline (`` `texto` ``) y bloques de código. Acepta el mismo formato que `editor.fontFamily`. Vacío usa la fuente monoespaciada del tema de Obsidian o, en su defecto, la del editor."
+        },
+        "obsidianLike.codeFontSize": {
+          "type": "number",
+          "default": 14,
+          "description": "Tamaño en píxeles para código inline y bloques de código."
+        },
+        "obsidianLike.attachmentsLocation": {
           "type": "string",
           "enum": ["vault", "samefolder", "subfolder", "specificfolder"],
           "enumDescriptions": [
@@ -53,21 +66,80 @@
           "default": "vault",
           "description": "Dónde buscar los archivos adjuntos referenciados con ![[nombre]]"
         },
-        "vaultTool.attachmentsFolder": {
+        "obsidianLike.attachmentsFolder": {
           "type": "string",
           "default": "attachments",
           "description": "Nombre de la subcarpeta (modo 'subfolder') o ruta completa/relativa a la bóveda (modo 'specificfolder')"
+        },
+        "obsidianLike.obsidianTheme": {
+          "type": "string",
+          "default": "",
+          "description": "Nombre del tema de Obsidian a aplicar. Carga .obsidian/themes/{nombre}/theme.css desde la carpeta raíz del vault."
+        },
+        "obsidianLike.autoSaveDelay": {
+          "type": "number",
+          "default": 3000,
+          "description": "Milisegundos de inactividad (sin cambios) tras los que la nota se guarda automáticamente en disco. Este autoguardado propio del editor sustituye a files.autoSave para las notas abiertas aquí, evitando el conflicto entre ambos que puede provocar pérdida de texto."
         }
       }
     },
     "commands": [
       {
         "command": "vaultTool.listNotes",
-        "title": "Vault Tool: Listar notas del vault"
+        "title": "Obsidian-like: Listar notas del vault"
       },
       {
         "command": "vaultTool.openKanban",
-        "title": "Vault Tool: Abrir Kanban del vault"
+        "title": "Obsidian-like: Abrir Kanban del vault"
+      },
+      {
+        "command": "vaultTool.toggleSourceMode",
+        "title": "Obsidian-like: Alternar vista fuente / WYSIWYG"
+      },
+      {
+        "command": "vaultTool.insertAttachment",
+        "title": "Obsidian-like: Insertar como adjunto en la nota activa"
+      },
+      {
+        "command": "vaultTool.openNoteQuickPick",
+        "title": "Obsidian-like: Abrir nota…"
+      },
+      {
+        "command": "vaultTool.editTaskAtCursor",
+        "title": "Obsidian-like: Editar tarea en el cursor"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "vaultTool.insertAttachment",
+          "group": "6_copypath"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "vaultTool.openNoteQuickPick",
+        "key": "ctrl+o",
+        "mac": "cmd+o",
+        "when": "activeCustomEditorId == 'vaultTool.markdownEditor'"
+      },
+      {
+        "command": "vaultTool.editTaskAtCursor",
+        "key": "shift+alt+e",
+        "when": "activeCustomEditorId == 'vaultTool.markdownEditor'"
+      },
+      {
+        "command": "vaultTool._openNoteQuickPickInNewTab",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "vaultToolQuickPickActive"
+      },
+      {
+        "command": "vaultTool._openNoteQuickPickToSide",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "vaultToolQuickPickActive"
       }
     ],
     "configurationDefaults": {
@@ -75,18 +147,27 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run build-webview",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "npm run compile && vsce package --allow-missing-repository"
+    "build-webview": "esbuild webview-src/editor.js --bundle --minify --outfile=out/editor.bundle.js --platform=browser --format=iife",
+    "package": "npm run compile && npm run build-webview && vsce package --allow-missing-repository"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.0.0",
+    "@codemirror/commands": "^6.0.0",
+    "@codemirror/lang-markdown": "^6.0.0",
+    "@codemirror/language": "^6.0.0",
+    "@codemirror/state": "^6.0.0",
+    "@codemirror/view": "^6.0.0",
+    "@lezer/highlight": "^1.0.0",
     "marked": "^9.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.20.0",
     "typescript": "^5.4.0"
   }
 }

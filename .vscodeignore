@@ -1,0 +1,9 @@
+# Source (el bundle ya incluye todo)
+node_modules/
+webview-src/
+src/
+.vscode/
+.claude/
+tsconfig.json
+.gitignore
+out/extension.js.map
