@@ -228,7 +228,9 @@ real dentro del propio editor, en la misma columna de ancho de lectura (y con el
 izquierdo/derecho) que el resto de la nota: cada fila muestra checkbox, tags como pills, ID,
 prioridad, dependencias, fechas y un backlink clicable a la nota (con el encabezado bajo el que
 está la tarea, si tiene uno) — con un botón ✏️ propio para editar esa tarea concreta sin salir del
-listado. Encima del listado hay un filtro de texto por descripción, y debajo un contador de
+listado. Pasar el cursor sobre el id de una dependencia (`⛔`) muestra un popup con la descripción y
+ubicación de la tarea referenciada, si se resuelve a una tarea real del vault. Encima del listado
+hay un filtro de texto por descripción, y debajo un contador de
 tareas mostradas, igual que en Obsidian. Igual que en una tarea suelta, una URL suelta dentro de
 la descripción también se muestra como enlace clicable. Añadiendo una línea `zoom factor 80%` a la
 consulta (propio de este port, no del plugin Tasks original) se reduce el tamaño de todo el

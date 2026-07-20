@@ -648,6 +648,18 @@ interface TaskDTO {
   // doesn't send them yet — see `statusSymbol` above for the same pattern.
   id?: string;
   dependsOn?: string[];
+  // Resolved info for each entry of `dependsOn` — only present from a rebuilt sibling "Tasks"
+  // extension, same degrade-gracefully pattern as `id`/`dependsOn` above. Lets `renderTaskRow`
+  // show a hover preview of the referenced task without a second round-trip; an id with no
+  // matching entry here (stale, or an older host build) just renders as plain unlinked text.
+  dependsOnTasks?: Array<{
+    id: string;
+    description: string;
+    path: string;
+    line: number;
+    isDone: boolean;
+    statusSymbol: string;
+  }>;
   isDone: boolean;
   // Added alongside the note-checkbox status-icon fix in `webview-src/editor.js` — `isDone`
   // alone can't distinguish "in progress" from "todo" from a custom status letter, which
@@ -1109,6 +1121,33 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     let pendingFlush: Promise<void> | undefined;
     let lastOwnContent: string = document.getText();
 
+    // Tracks the on-disk mtime as of the last time *this* window's document
+    // model was known to match disk — either right after this window's own
+    // successful save, or right after an external-change auto-reload (see
+    // onDidChangeTextDocument below). Two separate VS Code *windows* (two
+    // independent extension-host processes) opening the same file each keep
+    // their own completely independent vscode.TextDocument snapshot with no
+    // shared state at all — if window A saves newer content while window B
+    // sits idle-but-dirty (its own model never resynced, since VS Code only
+    // auto-reloads a *clean* document on an external disk change), B's own
+    // idle autosave timer blindly calling document.save() would silently
+    // overwrite A's newer disk content with B's stale in-memory one — no
+    // dialog, no error, just quietly-lost work. Reported as "solo estoy
+    // escribiendo en una, pero el autosave hace que haya conflictos de
+    // escritura con contenido desactualizado."
+    let lastKnownMtimeMs: number | undefined;
+    let warnedStaleOnDisk = false;
+    const refreshKnownMtime = async () => {
+      try {
+        lastKnownMtimeMs = (await vscode.workspace.fs.stat(document.uri)).mtime;
+      } catch {
+        // Not yet created on disk, or briefly unreadable — leave whatever
+        // value (possibly undefined) already there; the next successful
+        // save/reload will set a fresh one.
+      }
+    };
+    void refreshKnownMtime();
+
     const fullRange = () =>
       new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
 
@@ -1167,10 +1206,41 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     const scheduleAutoSave = () => {
       clearTimeout(autoSaveTimer);
       autoSaveTimer = setTimeout(() => {
-        if (document.isDirty) {
-          document.save().then(undefined, err =>
-            vscode.window.showErrorMessage(`No se pudo autoguardar la nota: ${err}`));
-        }
+        if (!document.isDirty) { return; }
+        void (async () => {
+          // Stat the real file before writing, not after — this is the
+          // actual guard against the cross-window clobber described above.
+          // A stat failure (not yet created, transient FS hiccup) means
+          // there's nothing on disk to conflict with, so it falls through to
+          // a normal save exactly as before this fix.
+          let diskIsNewer = false;
+          try {
+            const mtime = (await vscode.workspace.fs.stat(document.uri)).mtime;
+            if (lastKnownMtimeMs !== undefined && mtime > lastKnownMtimeMs) { diskIsNewer = true; }
+          } catch { /* nothing on disk yet — proceed */ }
+          if (diskIsNewer) {
+            // Skip this autosave cycle rather than overwrite — don't retry
+            // on a timer (that would just poll indefinitely for a window
+            // the user may have walked away from); the next real edit here
+            // re-arms scheduleAutoSave and re-checks then instead.
+            if (!warnedStaleOnDisk) {
+              warnedStaleOnDisk = true;
+              vscode.window.showWarningMessage(
+                `"${path.basename(document.uri.fsPath)}" se modificó en otra ventana. ` +
+                'El autoguardado se ha saltado para no sobrescribir esos cambios — ' +
+                'guarda manualmente (Ctrl+S) para forzar tu versión, o cierra esta pestaña sin guardar para conservar la de disco.'
+              );
+            }
+            return;
+          }
+          warnedStaleOnDisk = false;
+          try {
+            await document.save();
+            await refreshKnownMtime();
+          } catch (err) {
+            vscode.window.showErrorMessage(`No se pudo autoguardar la nota: ${err}`);
+          }
+        })();
       }, getAutoSaveDelay());
     };
 
@@ -1221,6 +1291,12 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         const normalize = (s: string) => s.replace(/\r\n/g, '\n');
         if (normalize(newText) === normalize(lastOwnContent)) { return; }
         lastOwnContent = newText;
+        // This window's model just resynced with whatever is actually on
+        // disk (VS Code auto-reloads a *clean* document on an external
+        // change) — refresh the mtime guard and clear any earlier "another
+        // window changed this" warning, since that conflict is resolved now.
+        warnedStaleOnDisk = false;
+        void refreshKnownMtime();
         webviewPanel.webview.postMessage({ type: 'external-update', content: newText });
       }),
 

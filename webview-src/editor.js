@@ -136,6 +136,11 @@ const vsTheme = EditorView.theme({
   '.cm-list-marker-raw': {
     display: 'inline-block', width: `${LIST_BULLET_MARKER_WIDTH_EM}em`,
   },
+  '.cm-hr': {
+    border: 'none',
+    borderTop: '2px solid var(--hr-color, var(--background-modifier-border, rgba(128,128,128,0.3)))',
+    margin: '1.5em 0',
+  },
   // YAML frontmatter "Properties" panel (PropertiesWidget). PropertiesWidget
   // only ever renders on line 1 (parseFrontmatter requires it), so this
   // negative top margin — pulling it up into `.cm-content`'s own 16px top
@@ -368,6 +373,12 @@ const vsTheme = EditorView.theme({
     whiteSpace: 'nowrap',
     marginLeft: '0.3em',
   },
+  // One id inside a `.cm-tasks-query-depends` chip that resolved to a real task (see
+  // `attachDependencyHoverPreview` below) — dotted underline is the only visual hint it's
+  // hoverable, since it isn't otherwise clickable/navigable like a wikilink.
+  '.cm-tasks-query-depends-ref': {
+    borderBottom: '1px dotted currentColor',
+  },
   '.cm-tasks-query-tag, .cm-tasks-query-id': {
     display: 'inline-block',
     padding: '0 0.5em',
@@ -555,6 +566,35 @@ const vsTheme = EditorView.theme({
     color: 'var(--vscode-button-secondaryForeground, inherit)',
     border: '1px solid var(--background-modifier-border, rgba(128,128,128,0.4))',
     borderRadius: '4px',
+  },
+  // Task-dependency reference hover popup (attachDependencyHoverPreview, near renderTaskRow) —
+  // appended to document.body like `.dv-filter-popover` above, same reasoning: it must float
+  // above the editor and isn't scoped under any single query row.
+  '.cm-dep-hover-preview': {
+    position: 'fixed',
+    zIndex: '1000',
+    minWidth: '160px',
+    maxWidth: '360px',
+    background: 'var(--vscode-editorWidget-background, var(--background-secondary, #252526))',
+    color: 'var(--vscode-editorWidget-foreground, inherit)',
+    border: '1px solid var(--vscode-editorWidget-border, var(--background-modifier-border, rgba(128,128,128,0.4)))',
+    borderRadius: '4px',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+    padding: '6px 10px',
+    fontSize: '0.85em',
+    lineHeight: '1.4',
+  },
+  '.cm-dep-hover-desc': {
+    whiteSpace: 'normal',
+    wordBreak: 'break-word',
+  },
+  '.cm-dep-hover-meta': {
+    marginTop: '4px',
+    opacity: '0.6',
+    fontSize: '0.9em',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
   '.cm-dataview-query .dv-link': {
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4a9eff)))',
@@ -1480,27 +1520,21 @@ class TableWidget extends WidgetType {
       });
 
       cell.addEventListener('keydown', e => {
-        // Stops every keystroke here from bubbling up to CM6's own contentDOM-
-        // level keymap (defaultKeymap/historyKeymap/the Mod-b/Mod-i bindings),
-        // not just the Tab/Enter/Escape ones this handler itself acts on.
-        // Without this, a plain Backspace/Delete inside a cell reached CM6's
-        // deleteCharBackward/deleteCharForward binding first — which targets
-        // *the widget's own single anchor position* in the document, not the
-        // cell's own text, so it visibly did nothing there, but it still
-        // called preventDefault() on the keydown (confirmed with a real
-        // EditorView in jsdom, throwaway script, not checked in: the document
-        // was correctly untouched, but `event.defaultPrevented` was `true`
-        // even so). A prevented keydown never reaches the browser's own
-        // default action for that key, which for a focused contentEditable
-        // element *is* the actual character deletion — so Backspace/Delete
-        // appeared to just do nothing at all. Reported as "el cursor se mueve
-        // por las celdas, pero no puedo ni añadir ni borrar contenido."
-        // Mousedown on this same cell already gets the identical treatment
-        // just above, for the analogous reason (CM6's own cursor-placement
-        // handling, not a keymap command, competing for the same event there).
-        e.stopPropagation();
+        // CM6 already ignores every keydown originating inside this table
+        // (see TableWidget.ignoreEvent above) — its own keymap
+        // (defaultKeymap/historyKeymap/Mod-b/Mod-i) never sees these events
+        // at all now, so there's nothing left for a blanket
+        // e.stopPropagation() here to defend against, and — importantly —
+        // not calling it means a key we don't otherwise act on (Ctrl+S,
+        // plain typing, Backspace, Ctrl+C/V/X, ...) keeps bubbling normally
+        // to the browser's native contentEditable handling and to whatever
+        // sits above CM6 (VS Code's own keybinding forwarding). Only
+        // Tab/Enter/Escape are ours to fully consume — cell-to-cell
+        // navigation, not document editing — so only those three still call
+        // stopPropagation, each right alongside their own preventDefault.
         if (e.key === 'Tab') {
           e.preventDefault();
+          e.stopPropagation();
           if (e.shiftKey) {
             if (isHeader) { if (colIndex > 0) commitAndGo(true, -1, colIndex - 1, false); return; }
             if (colIndex > 0) { commitAndGo(false, rowIndex, colIndex - 1, false); return; }
@@ -1520,6 +1554,7 @@ class TableWidget extends WidgetType {
           commitAndGo(false, rowIndex + 1, 0, true); // past the last cell of the last row: grow the table
         } else if (e.key === 'Enter') {
           e.preventDefault();
+          e.stopPropagation();
           if (isHeader) {
             if (t.rows.length > 0) { commitAndGo(false, 0, colIndex, false); } else { commitAndGo(false, 0, colIndex, true); }
             return;
@@ -1527,6 +1562,7 @@ class TableWidget extends WidgetType {
           if (rowIndex < lastRowIndex) { commitAndGo(false, rowIndex + 1, colIndex, false); return; }
           commitAndGo(false, rowIndex + 1, colIndex, true); // past the last row: grow the table
         } else if (e.key === 'Escape') {
+          e.stopPropagation();
           cell.textContent = isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex];
           cell.blur();
         }
@@ -1563,7 +1599,39 @@ class TableWidget extends WidgetType {
     wrap.appendChild(table);
     return wrap;
   }
-  ignoreEvent() { return false; }
+  // CM6's InputState gates ALL of its own event handling (built-in commands
+  // AND every domEventHandlers-registered extension handler, e.g.
+  // tableContextMenuHandler's `contextmenu` listener) behind this per-event
+  // check (`eventBelongsToEditor`, @codemirror/view) — not just clicks, as
+  // the name might suggest. Cells are real `contentEditable` elements meant
+  // to be edited natively; CM6 having its own opinion about keydown/paste/
+  // copy/cut inside them only gets in the way: `handlers.paste`/`.copy`/
+  // `.cut` (its built-ins for those three) and its keymap (Backspace/Ctrl+B/
+  // Ctrl+Z/etc. via defaultKeymap/historyKeymap) all act on *the document*,
+  // not the cell's own text — but still call `preventDefault()` regardless
+  // of whether they did anything, which silently blocks the browser's own
+  // native action for that same key on the focused contentEditable element.
+  // Reported as "no puedo ni copiar ni pegar texto" in a cell, and
+  // separately as Ctrl+S (and, by extension, any other keybinding) not
+  // firing while the cursor was in a cell — the previous fix for the first
+  // symptom was `e.stopPropagation()` in wireCell's own keydown listener,
+  // which does stop CM6's keymap from seeing the event, but stopPropagation
+  // is all-or-nothing: it also stops the event from ever reaching whatever
+  // listener VS Code's own webview host uses (above contentDOM, in the same
+  // document) to relay a keydown into its keybinding service — silently
+  // swallowing Ctrl+S and everything like it. Returning `true` here for
+  // just these four event types (via `ignoreEvent`, CM6's own sanctioned
+  // opt-out) means CM6 skips them entirely: no command runs, nothing gets
+  // prevented, and the event keeps bubbling normally past contentDOM,
+  // restoring both native copy/paste/typing and outer keybinding forwarding
+  // at once — without touching mousedown/click/contextmenu/dragover/drop,
+  // which CM6 (and this file's own tableContextMenuHandler/linkClickHandler)
+  // still need to see for the row/column context menu and cursor-placement
+  // suppression to keep working.
+  ignoreEvent(event) {
+    return event.type === 'keydown' || event.type === 'paste' ||
+           event.type === 'copy' || event.type === 'cut';
+  }
 }
 
 // ── YAML frontmatter → "Properties" panel ──────────────────────────────────────
@@ -1751,10 +1819,6 @@ class PropertiesWidget extends WidgetType {
       cb.className = 'cm-properties-checkbox';
       cb.checked = prop.value;
       cb.addEventListener('mousedown', e => e.stopPropagation());
-      // Space toggles a focused checkbox via the browser's own default
-      // action — stopped here for the same reason every text input below
-      // does on its own keydown (see that comment for the full story).
-      cb.addEventListener('keydown', e => e.stopPropagation());
       cb.addEventListener('change', () => {
         const next = this.properties.slice();
         next[idx] = { ...prop, value: cb.checked };
@@ -1776,22 +1840,14 @@ class PropertiesWidget extends WidgetType {
         this.commit(next);
       };
       input.addEventListener('blur', commitValue);
+      // PropertiesWidget.ignoreEvent (below) already makes CM6 skip every
+      // keydown/paste/copy/cut originating inside this panel entirely, so
+      // there's nothing left here to defend the input's own native typing/
+      // deletion/paste against — see that method's comment for the full
+      // story (same fix as TableWidget's identical bug). Only Enter is ours
+      // to consume, to commit-and-blur instead of doing nothing (a plain
+      // text <input> has no native action for Enter anyway).
       input.addEventListener('keydown', e => {
-        // Stops every keystroke here from bubbling up to CM6's own
-        // contentDOM-level keymap (defaultKeymap/historyKeymap/Mod-b/Mod-i),
-        // same bug and same fix as wireCell's identical comment for table
-        // cells: without this, Backspace/Delete (and anything else CM6
-        // binds) reached CM6's own command first, which — even though it
-        // has nothing meaningful to do at wherever the document cursor
-        // happens to be — still calls preventDefault() on the keydown,
-        // which suppresses the *browser's* own default action for that key,
-        // which for a focused <input> is the actual character deletion.
-        // Confirmed with a real EditorView in jsdom (throwaway script, not
-        // checked in): the document was correctly untouched by CM6, but
-        // `event.defaultPrevented` was still `true`, meaning the input's own
-        // native Backspace never got a chance to run either. Reported as
-        // "en modo WYSIWYG no puedo editar el frontmatter."
-        e.stopPropagation();
         if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
       });
       valueEl.appendChild(input);
@@ -1830,8 +1886,6 @@ class PropertiesWidget extends WidgetType {
     input.placeholder = '+';
     input.addEventListener('mousedown', e => e.stopPropagation());
     input.addEventListener('keydown', e => {
-      // Same fix, same reasoning, as the text-input keydown handler above.
-      e.stopPropagation();
       if (e.key !== 'Enter' && e.key !== ',') return;
       e.preventDefault();
       const value = input.value.trim();
@@ -1871,8 +1925,6 @@ class PropertiesWidget extends WidgetType {
     const cancel = () => { input.style.display = 'none'; label.style.display = ''; input.value = ''; };
     input.addEventListener('blur', cancel);
     input.addEventListener('keydown', e => {
-      // Same fix, same reasoning, as the text-input keydown handler above.
-      e.stopPropagation();
       if (e.key === 'Escape') { e.preventDefault(); cancel(); return; }
       if (e.key !== 'Enter') return;
       e.preventDefault();
@@ -1884,7 +1936,19 @@ class PropertiesWidget extends WidgetType {
     });
     return row;
   }
-  ignoreEvent() { return false; }
+  // Same fix/reasoning as TableWidget.ignoreEvent (see that comment for the
+  // full story): CM6's own keymap/paste/copy/cut handling only ever gets in
+  // the way of these real <input>/<checkbox> elements' native behavior, and
+  // a bare e.stopPropagation() to defend against it (the previous fix, now
+  // removed from every keydown listener above) also silently blocked
+  // keybindings like Ctrl+S from ever reaching whatever listens for them
+  // above CM6. Returning true for just these four event types lets CM6
+  // ignore them entirely while leaving mousedown/click (cursor-placement
+  // suppression, pill removal, "+ Añadir propiedad" toggling) untouched.
+  ignoreEvent(event) {
+    return event.type === 'keydown' || event.type === 'paste' ||
+           event.type === 'copy' || event.type === 'cut';
+  }
 }
 
 // ── Image widget ──────────────────────────────────────────────────────────────
@@ -1926,6 +1990,21 @@ class BulletWidget extends WidgetType {
     span.className = 'cm-list-bullet';
     span.textContent = '•';
     return span;
+  }
+  ignoreEvent() { return false; }
+}
+
+// ── Horizontal rule widget ──────────────────────────────────────────────────
+// Renders "---"/"***"/"___" as an actual <hr>, matching Obsidian's live
+// preview. Single-line replace (like TableWidget's header line), not
+// block:true — the whole match is one document line, so there's nothing to
+// collapse across multiple lines the way a table body needs.
+class HorizontalRuleWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() {
+    const hr = document.createElement('hr');
+    hr.className = 'cm-hr';
+    return hr;
   }
   ignoreEvent() { return false; }
 }
@@ -2299,6 +2378,79 @@ const TASK_PRIORITY_ICON = {
   Highest: '🔺', High: '⏫', Medium: '🔼', Low: '🔽', Lowest: '⏬',
 };
 
+// ── Task-dependency reference hover popup ───────────────────────────────────
+// Hovering a resolved dependency id inside a ```tasks``` row's `⛔` chip (see
+// renderTaskRow below) shows the referenced task's own description — mirrors the
+// [[wikilink]] Ctrl+hover preview (HoverPreviewView) further up this file, but simpler:
+// no modifier key needed (a dependency id isn't otherwise clickable/navigable, so
+// there's no click-vs-hover ambiguity to gate behind Ctrl), and the referenced task's
+// data already arrived with the query result (`TaskDTO.dependsOnTasks`) instead of a
+// host round-trip like the wikilink preview's transclusion fetch. A single popup `dom`
+// is created once and reused (shown/hidden) across every row, same as HoverPreviewView;
+// appended to `document.body` with `position: fixed`, same as `.dv-filter-popover`
+// above, since it must float above the editor and isn't scoped under any one row.
+const DEP_HOVER_DELAY = 300; // mirrors HOVER_PREVIEW_DELAY above
+let depHoverPopupEl = null;
+let depHoverShowTimer = null;
+let depHoverHideTimer = null;
+
+function depHoverEnsurePopup() {
+  if (depHoverPopupEl) return depHoverPopupEl;
+  const pop = document.createElement('div');
+  pop.className = 'cm-dep-hover-preview';
+  pop.style.display = 'none';
+  // Keeps the popup open while the pointer is over the popup itself (e.g. to select/copy its
+  // text), same as HoverPreviewView's own overPopup flag.
+  pop.addEventListener('mouseenter', () => clearTimeout(depHoverHideTimer));
+  pop.addEventListener('mouseleave', depHoverScheduleHide);
+  document.body.appendChild(pop);
+  depHoverPopupEl = pop;
+  return pop;
+}
+
+function depHoverScheduleHide() {
+  clearTimeout(depHoverHideTimer);
+  depHoverHideTimer = setTimeout(() => {
+    if (depHoverPopupEl) depHoverPopupEl.style.display = 'none';
+  }, 150);
+}
+
+function depHoverShow(anchorEl, info) {
+  clearTimeout(depHoverHideTimer);
+  const pop = depHoverEnsurePopup();
+  pop.textContent = '';
+
+  const desc = document.createElement('div');
+  desc.className = 'cm-dep-hover-desc';
+  const statusPrefix = info.statusSymbol && info.statusSymbol !== ' ' ? `[${info.statusSymbol}] ` : (info.isDone ? '[x] ' : '');
+  desc.textContent = statusPrefix + info.description;
+  pop.appendChild(desc);
+
+  const meta = document.createElement('div');
+  meta.className = 'cm-dep-hover-meta';
+  meta.textContent = info.path + ':' + (info.line + 1);
+  pop.appendChild(meta);
+
+  pop.style.display = 'block';
+  const anchorRect = anchorEl.getBoundingClientRect();
+  const left = Math.min(anchorRect.left, window.innerWidth - pop.offsetWidth - 8);
+  pop.style.left = Math.max(4, left) + 'px';
+  pop.style.top = (anchorRect.bottom + 4) + 'px';
+}
+
+// `info` is one entry of `TaskDTO.dependsOnTasks` (already resolved host-side) — see the caller
+// in renderTaskRow, which only calls this for an id that actually resolved to a task.
+function attachDependencyHoverPreview(el, info) {
+  el.addEventListener('mouseenter', () => {
+    clearTimeout(depHoverShowTimer);
+    depHoverShowTimer = setTimeout(() => depHoverShow(el, info), DEP_HOVER_DELAY);
+  });
+  el.addEventListener('mouseleave', () => {
+    clearTimeout(depHoverShowTimer);
+    depHoverScheduleHide();
+  });
+}
+
 // Renders a single TaskDTO as a checklist row. Mirrors TaskCheckboxWidget's DOM
 // shape — a native <input type="checkbox"> for the plain unchecked/checked
 // states, or a status-icon <span> otherwise (see STATUS_ICON/TaskCheckboxWidget
@@ -2374,7 +2526,22 @@ function renderTaskRow(t) {
     // the due-date fix: this should read as part of the task's own text.
     const dep = document.createElement('span');
     dep.className = 'cm-tasks-query-depends';
-    dep.textContent = '⛔ ' + t.dependsOn.join(',');
+    dep.append('⛔ ');
+    // `dependsOnTasks` (only present from a rebuilt sibling "Tasks" extension, same
+    // degrade-gracefully pattern as `id`/`statusSymbol` above) resolves each id to the task it
+    // points at. An id with no entry (older host build, or a stale id) falls back to plain
+    // unlinked text instead of a hoverable one.
+    const resolvedById = new Map((t.dependsOnTasks || []).map(d => [d.id, d]));
+    t.dependsOn.forEach((id, i) => {
+      if (i > 0) dep.append(',');
+      const info = resolvedById.get(id);
+      if (!info) { dep.append(id); return; }
+      const ref = document.createElement('span');
+      ref.className = 'cm-tasks-query-depends-ref';
+      ref.textContent = id;
+      attachDependencyHoverPreview(ref, info);
+      dep.appendChild(ref);
+    });
     row.appendChild(dep);
   }
   if (t.dueDate) {
@@ -3555,6 +3722,17 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
 
           if (active.has(ln)) return;
 
+          // ── Horizontal rule ("---"/"***"/"___" on its own line) ──────────
+          // The frontmatter delimiters are their own "---" lines too, but
+          // those are already fully bailed out of this walk above (any node
+          // with `node.to <= fm.to`), so a HorizontalRule only ever reaches
+          // this branch when it's a real thematic break in the document body.
+          if (n === 'HorizontalRule') {
+            const line = state.doc.lineAt(node.from);
+            decs.push({ from: line.from, to: line.to, dec: Decoration.replace({ widget: new HorizontalRuleWidget() }) });
+            return false;
+          }
+
           if (n === 'HeaderMark') {
             let end = node.to;
             if (state.doc.sliceString(end, end + 1) === ' ') end++;
@@ -4011,6 +4189,39 @@ function renderMarkdownTable(lines, startIdx) {
   return { el: wrap, next: i };
 }
 
+// A "![[...]]" embed found on its own line inside transcluded content. Until
+// now this fell through to the generic paragraph case (renderMarkdownBlock's
+// own line-accumulation, feeding renderCell — which only understands inline
+// markdown, not "![[...]]" embed syntax) and rendered as inert escaped text,
+// e.g. a literal "![[foto.png]]" instead of the actual image. Reused
+// ImageWidget/ExternalFileWidget's own toDOM() rather than re-implementing
+// either: same imageMap lookup imgPlugin itself uses (basename fallback
+// included), same clickable open-externally box for a non-image attachment.
+// Returns null for anything this doesn't recognize (an unresolved image, or
+// a nested note transclusion) — the caller then falls back to the original
+// plain-text rendering, unchanged.
+function renderEmbedBlock(raw) {
+  const pipeIdx = raw.indexOf('|');
+  const targetPart = (pipeIdx >= 0 ? raw.slice(0, pipeIdx) : raw).trim();
+  const param = pipeIdx >= 0 ? raw.slice(pipeIdx + 1).trim() : '';
+  const filename = targetPart.split('#')[0].trim();
+  if (IMG_EXT.test(filename)) {
+    const basename = filename.split('/').pop();
+    const src = imageMap[filename] || imageMap[basename] || '';
+    if (!src) return null;
+    let width = null, caption = null;
+    if (param) {
+      if (/^\d+(?:px)?$/i.test(param)) width = parseInt(param, 10) + 'px';
+      else caption = param;
+    }
+    return new ImageWidget(src, filename, width, caption).toDOM();
+  }
+  if (isExternalFileTarget(filename)) {
+    return new ExternalFileWidget(targetPart).toDOM();
+  }
+  return null;
+}
+
 function renderMarkdownBlock(text) {
   const frag = document.createDocumentFragment();
   const lines = (text || '').split(/\r\n|\n/);
@@ -4068,6 +4279,14 @@ function renderMarkdownBlock(text) {
       i++;
       continue;
     }
+    // A "![[...]]" embed alone on its own line — see renderEmbedBlock's own
+    // comment. Checked before the generic bullet-list branch below since a
+    // line starting with "!" never matches that branch's own "[-*+]" test.
+    const embedM = /^\s*!\[\[([^\]]+)\]\]\s*$/.exec(line);
+    if (embedM) {
+      const node = renderEmbedBlock(embedM[1]);
+      if (node) { flushPara(); frag.appendChild(node); i++; continue; }
+    }
     if (/^\s*[-*+]\s+/.test(line)) {
       flushPara();
       const ul = document.createElement('ul');
@@ -4076,7 +4295,38 @@ function renderMarkdownBlock(text) {
         const lm = /^\s*[-*+]\s+(.*)$/.exec(lines[i]);
         if (!lm) break;
         const li = document.createElement('li');
-        li.innerHTML = renderCell(lm[1]);
+        // Task checkbox lines ("- [ ] .../- [x] ...") get the same
+        // checkbox + done styling as the live editor's TaskCheckboxWidget
+        // (read-only here — reused via a plain disabled <input>/status-icon
+        // <span>, same convention already used for a dataview TASK block's
+        // rows, since editing a transcluded task in place doesn't make
+        // sense). Previously fell through to the plain-<li> branch below,
+        // which just ran the whole line (including its own "[ ] "/"[x] "
+        // literal text) through renderCell — no checkbox, no strikethrough.
+        const taskM = TASK_LINE_RE.exec(lines[i]);
+        if (taskM) {
+          const statusChar = taskM[3];
+          const isDone = /[xX-]/.test(statusChar);
+          li.className = `cm-task-line${isDone ? ' cm-task-done' : ''}`;
+          li.style.listStyle = 'none';
+          if (statusChar === ' ') {
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.className = 'cm-task-checkbox';
+            cb.disabled = true;
+            li.appendChild(cb);
+          } else {
+            const icon = document.createElement('span');
+            icon.className = 'cm-task-checkbox';
+            icon.textContent = STATUS_ICON[statusChar] || statusChar;
+            li.appendChild(icon);
+          }
+          const desc = document.createElement('span');
+          desc.innerHTML = renderCell(taskM[4]);
+          li.appendChild(desc);
+        } else {
+          li.innerHTML = renderCell(lm[1]);
+        }
         ul.appendChild(li);
         i++;
       }
