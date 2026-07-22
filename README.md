@@ -131,6 +131,14 @@ correctamente como directorio en Windows.
   varios `[[enlaces]]` en la misma línea, el resto se sigue mostrando renderizado
   normalmente aunque uno esté activado.
 
+## Enlaces a una cabecera del mismo documento (`[[#Encabezado]]`)
+
+Un wikilink sin nombre de nota, solo `#Encabezado`, apunta a una cabecera dentro de la propia
+nota (no a otro fichero): se muestra como un enlace resuelto normal (no como enlace roto) cuando
+esa cabecera existe en el documento, y al hacer clic hace scroll hasta ella en vez de intentar
+abrir o crear un fichero. Escribir `[[#` también ofrece autocompletado con las cabeceras de la
+propia nota, igual que `[[Nota#` lo hace con las de otra nota.
+
 ## Enlaces a `.docx`, `.xlsx` y `.pdf`
 
 Un wikilink a un fichero de estos tres tipos (`[[informe.docx]]`, `[[presupuesto.xlsx]]`,
@@ -213,6 +221,13 @@ drop"; no confirmado como 100% fiable). El camino garantizado: clic derecho
 sobre uno o varios archivos en el explorador de VS Code → "Obsidian-like:
 Insertar como adjunto en la nota activa".
 
+## Duplicar archivo
+
+Clic derecho sobre uno o varios archivos en el explorador de VS Code →
+"Obsidian-like: Duplicar archivo" crea una copia junto al original, añadiendo
+`_copia` al nombre (p. ej. `Nota.md` → `Nota_copia.md`). Si ya existe una copia
+con ese nombre, añade un número (`Nota_copia 2.md`, etc.) en vez de sobrescribirla.
+
 ## Navegación vertical del cursor (flechas arriba/abajo)
 
 Subir/bajar con el cursor se mueve por **fila visual en pantalla**, no por línea
@@ -240,8 +255,26 @@ La barra de color vertical junto a cada cabecera reproduce el estilo del tema
 de Obsidian configurado (color, ancho, alto igual al del texto). El pequeño
 indicador de nivel ("H1", "H2"...) permanece oculto y solo aparece al pasar el
 ratón sobre la cabecera (la barra o el propio texto), igual que en Obsidian —
-también sirve para plegar/desplegar la sección. Detalle técnico completo en
-`CLAUDE.md`.
+también sirve para plegar/desplegar la sección. Un `[texto entre corchetes]`
+dentro de una cabecera se ve exactamente igual que el resto de la línea
+(mismo tamaño, grosor, tipografía y color) en vez de destacar con un estilo
+distinto. Detalle técnico completo en `CLAUDE.md`.
+
+## Texto resaltado (`==texto==`)
+
+El texto encerrado entre dos signos `=` se muestra resaltado (fondo amarillo por
+defecto, o el color que defina el tema de Obsidian vía `--text-highlight-bg`),
+igual que en Obsidian. Los signos `==` se ocultan salvo en la línea activa o en
+modo fuente, igual que los marcadores de negrita/cursiva/tachado.
+
+## Listas numeradas — renumerado automático
+
+Al borrar (o añadir) un elemento en medio de una lista numerada, el resto de la
+lista se renumera automáticamente para seguir siendo consecutiva — por ejemplo,
+borrar el punto "2." de una lista 1/2/3 convierte el antiguo "3." en "2." sin
+tener que tocarlo a mano. Respeta el número con el que empezó la lista (si
+empieza en "5.", sigue empezando ahí) y no afecta a sublistas anidadas con su
+propio nivel de numeración.
 
 ## Tareas (`- [ ] ...`) — integración con "Obsidian-like Tasks"
 
@@ -291,17 +324,46 @@ columna en la fila de abajo. Tabular más allá de la última celda de la últim
 en la última fila) añade una fila nueva en blanco automáticamente, para poder seguir rellenando la
 tabla sin salir del teclado.
 
-Clic derecho sobre una celda abre un menú para añadir/eliminar la fila o columna bajo el cursor;
-clic derecho en cualquier otro punto del editor ofrece crear una tabla nueva. Este menú propio
-sustituye al menú contextual nativo de VS Code dentro del editor (no hay forma de añadir un ítem al
-menú nativo desde un webview), así que también incluye Cortar/Copiar/Pegar para no perder esas
-opciones — los atajos de teclado (`Ctrl+C`/`X`/`V`) siguen funcionando igual que siempre, esto es
-solo para cuando se usa el botón derecho. No hay barra de herramientas para esto — es, igual que en
-Obsidian, el único punto de entrada para gestionar filas y columnas.
+Fuera de edición, una celda muestra el texto con **negrita**/*cursiva*/~~tachado~~/`código`/
+`==resaltado==` ya renderizados, igual que el resto de la nota; al hacer clic para editarla vuelve
+a mostrar la sintaxis markdown en crudo, y al salir de la celda se renderiza de nuevo. Un `<br>`
+dentro de una celda se muestra como un salto de línea real (la sintaxis de tabla no admite un salto
+de línea literal dentro de una celda, así que esta es la forma estándar de conseguirlo). Un `|`
+escapado como `\|` se trata como un carácter literal de la celda, nunca como separador de columna
+— y se muestra como un `|` normal, sin el carácter de escape, tanto al editar como en la vista
+renderizada.
+
+Clic derecho sobre una celda abre un menú para añadir/eliminar la fila o columna bajo el cursor, y
+para copiar la tabla entera en un formato que Excel/Outlook reconocen como tabla real (ver más
+abajo); clic derecho en cualquier otro punto del editor ofrece crear una tabla nueva, o pegar el
+contenido del portapapeles como una tabla nueva. Este menú propio sustituye al menú contextual
+nativo de VS Code dentro del editor (no hay forma de añadir un ítem al menú nativo desde un
+webview), así que también incluye Cortar/Copiar/Pegar para no perder esas opciones — los atajos de
+teclado (`Ctrl+C`/`X`/`V`) siguen funcionando igual que siempre, esto es solo para cuando se usa el
+botón derecho. No hay barra de herramientas para esto — es, igual que en Obsidian, el único punto
+de entrada para gestionar filas y columnas.
 
 Con el cursor dentro de una celda, copiar/cortar/pegar y cualquier atajo de teclado (incluido
 `Ctrl+S` para pasar a modo fuente, o cualquier otro atajo de VS Code) funcionan con normalidad —
 antes se bloqueaban silenciosamente mientras se estaba editando el contenido de una celda.
+
+### Selección de varias celdas
+
+Arrastrando el ratón desde una celda hasta otra (o hacienda Mayús+clic) se selecciona un rango
+rectangular de celdas, igual que en una hoja de cálculo. Con el rango seleccionado, `Ctrl+C` copia
+todas esas celdas de una vez (como texto separado por tabulaciones y como una tabla HTML real, para
+pegar en Excel/Outlook/Sheets tal cual), y `Ctrl+V` pega el contenido del portapapeles empezando en
+la esquina superior izquierda del rango, ampliando la tabla con filas/columnas nuevas si el
+contenido pegado no cabe.
+
+### Copiar/pegar como tabla (interoperabilidad con Excel/Outlook)
+
+- **"Copiar como tabla"** (menú contextual de una tabla renderizada): copia la tabla completa al
+  portapapeles en un formato que Excel/Outlook/Sheets reconocen como tabla real — al pegarlo ahí
+  aparece como una cuadrícula de verdad, no como texto con los `|` visibles.
+- **"Pegar como tabla"** (menú contextual fuera de una tabla): lee el portapapeles — si contiene
+  una tabla copiada desde Excel/Outlook/Sheets (o cualquier otra tabla HTML), o simplemente texto
+  separado por tabulaciones — y la inserta como una tabla markdown nueva en la posición del cursor.
 
 ## Dataview (` ```dataview ` / ` ```dql ` / ` ```dataviewjs `) — integración con "Obsidian-like Dataview"
 

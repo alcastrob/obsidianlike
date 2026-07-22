@@ -110,6 +110,10 @@
         "title": "Obsidian-like: Insertar como adjunto en la nota activa"
       },
       {
+        "command": "vaultTool.duplicateFile",
+        "title": "Obsidian-like: Duplicar archivo"
+      },
+      {
         "command": "vaultTool.openNoteQuickPick",
         "title": "Obsidian-like: Abrir nota…"
       },
@@ -126,6 +130,10 @@
       "explorer/context": [
         {
           "command": "vaultTool.insertAttachment",
+          "group": "6_copypath"
+        },
+        {
+          "command": "vaultTool.duplicateFile",
           "group": "6_copypath"
         }
       ]

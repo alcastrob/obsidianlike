@@ -573,9 +573,50 @@ async function navigateToTarget(
   // text rendered on that document's behalf for *another* file (a tasks-query row's description,
   // see `data-wiki-base`/renderCell in editor.js). Without this, a wikilink inside such text would
   // resolve (or, worse, get silently created as a blank file) relative to the wrong note entirely.
-  baseDirOverride?: string
+  baseDirOverride?: string,
+  // The file a bare `[[#section]]` (no note name at all) refers to — "this document itself,"
+  // which is `currentDocUri` for a link typed directly into the open note, but the *other* file
+  // a tasks-query row's own description belongs to when this call is on behalf of that row (see
+  // baseDirOverride's own comment above — same reasoning, just the full file instead of only its
+  // directory). Defaults to currentDocUri when not given.
+  selfUri?: vscode.Uri
 ): Promise<void> {
   const { notePart, section } = splitTarget(raw);
+
+  // `[[#section]]` — no note part at all. This isn't a vault-wide note lookup: it's a reference
+  // to a heading within the current document (or, via selfUri, whichever other document this
+  // link is rendered on behalf of). Resolving it through resolveNoteUri would search for a note
+  // literally named "" and — on the create-if-missing path — silently create a nameless ".md"
+  // file next to the current note; reported as clicking such a link creating a blank, unnamed
+  // file instead of navigating anywhere.
+  if (!notePart.trim()) {
+    const targetUri = selfUri ?? currentDocUri;
+    if (!section) { return; } // nothing to navigate to without a section
+    let scrollLine: number | undefined;
+    try {
+      const text = (await vscode.workspace.openTextDocument(targetUri)).getText();
+      const match = parseHeadings(text).find(h => h.text.toLowerCase() === section.toLowerCase());
+      if (match) { scrollLine = match.line; }
+    } catch { /* target unreadable — nothing to scroll to */ }
+    if (scrollLine == null) {
+      vscode.window.showWarningMessage(`No se encontró la sección "${section}" en este documento.`);
+      return;
+    }
+    if (targetUri.fsPath === currentDocUri.fsPath) {
+      // Already open right here in sourcePanel — just scroll it, no navigation/dispose needed.
+      try { sourcePanel.webview.postMessage({ type: 'scroll-to-line', line: scrollLine }); } catch {}
+      return;
+    }
+    const col = sourcePanel.viewColumn ?? vscode.ViewColumn.Active;
+    await vscode.commands.executeCommand('vscode.openWith', targetUri, MarkdownDocumentProvider.viewType, col);
+    const targetPanel = panelsByPath.get(targetUri.fsPath);
+    if (targetPanel) {
+      setTimeout(() => { try { targetPanel.webview.postMessage({ type: 'scroll-to-line', line: scrollLine }); } catch {} }, 350);
+    }
+    setTimeout(() => { try { sourcePanel.dispose(); } catch {} }, 150);
+    return;
+  }
+
   const currentDir = baseDirOverride ?? path.dirname(currentDocUri.fsPath);
   let targetUri = await resolveNoteUri(notePart, currentDir);
 
@@ -1440,7 +1481,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
           const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
           const baseDirOverride =
             basePathRel && vaultRoot ? path.dirname(path.join(vaultRoot, basePathRel)) : undefined;
-          if (raw) { void navigateToTarget(raw, document.uri, webviewPanel, true, baseDirOverride); }
+          // Same idea as baseDirOverride, but the *full* file — needed for a bare `[[#section]]`
+          // link (see navigateToTarget's own selfUri handling), which refers to "this document,"
+          // not baseDirOverride's mere directory.
+          const selfUri = basePathRel && vaultRoot ? vscode.Uri.file(path.join(vaultRoot, basePathRel)) : undefined;
+          if (raw) { void navigateToTarget(raw, document.uri, webviewPanel, true, baseDirOverride, selfUri); }
 
         } else if (msg.type === 'open-external-file') {
           // Sent instead of open-note for a [[file.ext]] wiki-link or a
@@ -1481,7 +1526,10 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             const { notePart, section } = splitTarget(raw);
             const currentDir = path.dirname(document.uri.fsPath);
             try {
-              const targetUri = await resolveNoteUri(notePart, currentDir);
+              // `![[#section]]` — no note part at all: a self-transclusion of a section of
+              // *this* document, not a vault-wide note lookup (which would search for a note
+              // literally named "" and always report "not found").
+              const targetUri = notePart.trim() ? await resolveNoteUri(notePart, currentDir) : document.uri;
               if (!targetUri) {
                 webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: 'not-found' });
                 return;
@@ -2100,6 +2148,34 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  // Explorer-context-menu command that duplicates one or more selected files, appending
+  // "_copia" to the base filename (before its extension) — e.g. "Note.md" -> "Note_copia.md".
+  // Same `clicked`/`selected` argument shape as insertAttachmentCmd above (both come from
+  // `contributes.menus.explorer/context`). A name collision (an existing "X_copia.ext")
+  // reuses uniqueAttachmentName's own " N" disambiguation loop, just seeded from the "_copia"
+  // name instead of the original.
+  const duplicateFileCmd = vscode.commands.registerCommand(
+    'vaultTool.duplicateFile',
+    async (clicked?: vscode.Uri, selected?: vscode.Uri[]) => {
+      const uris = selected && selected.length > 0 ? selected : (clicked ? [clicked] : []);
+      if (uris.length === 0) {
+        vscode.window.showWarningMessage('Selecciona uno o más archivos en el explorador primero.');
+        return;
+      }
+      for (const src of uris) {
+        try {
+          const dir = path.dirname(src.fsPath);
+          const ext = path.extname(src.fsPath);
+          const base = path.basename(src.fsPath, ext);
+          const destName = uniqueAttachmentName(dir, `${base}_copia${ext}`);
+          fs.copyFileSync(src.fsPath, path.join(dir, destName));
+        } catch (err) {
+          vscode.window.showErrorMessage(`No se pudo duplicar "${src.fsPath}": ${err}`);
+        }
+      }
+    }
+  );
+
   // "Edit task at cursor" — a real `contributes.keybindings` entry (so it shows up, and can be
   // reassigned, in VS Code's own Keyboard Shortcuts UI), unlike the CM6-only keymap this
   // replaced. That first version worked but couldn't be discovered or rebound from the UI at
@@ -2247,7 +2323,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, editTaskAtCursorCmd,
+    listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, duplicateFileCmd, editTaskAtCursorCmd,
     openSearchPanelCmd,
     openNoteQuickPickCmd, openNoteQuickPickNewTabCmd, openNoteQuickPickSideCmd, openNoteAtLineCmd
   );

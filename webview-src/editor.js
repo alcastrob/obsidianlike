@@ -119,6 +119,13 @@ const vsTheme = EditorView.theme({
     textUnderlineOffset: '2px',
     cursor: 'pointer',
   },
+  // ==highlighted text== — matches Obsidian's own default highlight look.
+  '.cm-highlight': {
+    backgroundColor: 'var(--text-highlight-bg, rgba(255, 208, 0, 0.4))',
+    color: 'var(--text-highlight-fg, inherit)',
+    borderRadius: '2px',
+    padding: '0 1px',
+  },
   // Collapsed table rows (lines 2..N replaced by empty + height:0) — full
   // zeroing rule lives at the end of this stylesheet, see the comment there.
   // List item lines — indentation per nesting depth + spacing before the first item.
@@ -936,6 +943,13 @@ const vsTheme = EditorView.theme({
     margin: '4px 0',
     background: 'var(--vscode-editorWidget-border, rgba(128,128,128,0.25))',
   },
+  // Multi-cell range selection (drag or Shift-click across table cells) — see
+  // applyTableSelectionHighlight/wireCell's own mousedown handling in TableWidget.
+  '.cm-table-cell-selected': {
+    backgroundColor: 'var(--text-selection, rgba(70,130,220,0.25)) !important',
+    outline: '1px solid var(--interactive-accent, rgba(70,130,220,0.7))',
+    outlineOffset: '-1px',
+  },
   // Find/replace panel (ObsidianSearchPanel, @codemirror/search's own
   // createPanel hook). `.cm-panels`/`.cm-panels-top` are CM6's own generic
   // panel-row container (@codemirror/view's base theme gives it a full-width
@@ -1378,6 +1392,12 @@ function renderCell(raw, basePath) {
   let s = raw
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // A literal "<br>" (also "<br/>"/"<br />", case-insensitive) is the standard way to force a
+  // line break inside a markdown table cell, whose own raw syntax can't contain a real newline
+  // without breaking the row — restored to a real line break *after* escaping (so it survives as
+  // an actual <br> element) rather than showing as literal, escaped "&lt;br&gt;" text. Only this
+  // one specific tag shape is let through; every other "<...>" in the raw text stays escaped/inert.
+  s = s.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
   // Protect inline code from further processing
   const codes = [];
   s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return `\x00C${codes.length - 1}\x00`; });
@@ -1397,6 +1417,7 @@ function renderCell(raw, basePath) {
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
   s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+  s = s.replace(/==([^=\n]+?)==/g, '<mark class="cm-highlight">$1</mark>');
   // Standard markdown links [text](url), *and* a bare `https://...` URL with no [text]() around
   // it at all (e.g. a task description someone just pasted a link into) — both render as the
   // same clickable span, showing only the link text (or, for a bare URL, the URL itself — there's
@@ -1441,7 +1462,24 @@ function renderCell(raw, basePath) {
 // duplicated so a row/column edit and a fresh render always agree on exactly
 // what a "cell" is.
 function parseTableRow(line) {
-  return line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+  // A literal "\|" is an escaped pipe — the author's way of putting a real "|" character inside
+  // a cell without it being read as a column separator — so it's protected from the split below.
+  // Unlike an earlier version of this fix, the escape itself is *not* kept in the resulting cell
+  // text (restored to a plain "|" instead of "\|") — the backslash is a serialization detail of
+  // the raw markdown file, not something a WYSIWYG cell should ever show while editing or
+  // rendering; reported directly ("tiene que verse un | sin el caracter de escape"). The
+  // *content* model (this function's return value, and everywhere else in this file that reads
+  // t.header/t.rows) always holds the clean character; serializeTableRow re-escapes it on the
+  // way back out, so the round trip through the actual .md file stays valid regardless. Every
+  // *real* separator needs at least one whitespace character on each side, mirroring what
+  // serializeTableRow itself always writes ("| " between cells, " |" at the very end) — so a
+  // bare, unescaped "|" glued directly onto surrounding text (not meant as a delimiter at all)
+  // isn't mistaken for one.
+  const ESCAPED_PIPE = '\x00ESCPIPE\x00';
+  let s = line.replace(/\\\|/g, ESCAPED_PIPE);
+  s = s.replace(/^\s*\|/, '');
+  s = s.replace(/\s\|\s*$/, '');
+  return s.split(/\s\|\s/).map(c => c.trim().split(ESCAPED_PIPE).join('|'));
 }
 
 // { header: string[], delim: string[], rows: string[][] } from a table's raw
@@ -1454,7 +1492,11 @@ function parseTableSrc(src) {
 }
 
 function serializeTableRow(cells) {
-  return '| ' + cells.map(c => (c || '').trim()).join(' | ') + ' |';
+  // Inverse of parseTableRow's own unescaping: a literal "|" in a cell's *content* (the clean
+  // character the WYSIWYG view/edit always shows) must round-trip back out as "\|", or it would
+  // either get misread as a real column separator on the next parse (if it happens to land with
+  // whitespace on both sides) or, at best, silently change what founds a "real" separator.
+  return '| ' + cells.map(c => (c || '').trim().replace(/\|/g, '\\|')).join(' | ') + ' |';
 }
 
 function serializeTable(t) {
@@ -1494,15 +1536,40 @@ function deleteTableColumn(t, colIndex) {
 // A table cell is directly `contentEditable` — typing into it commits straight back to the
 // document (via `mutateTableAt`, same helper the row/column context-menu actions already use),
 // instead of the table ever falling back to raw `| pipe | source |` text the way it used to
-// whenever the cursor landed on one of its lines. Cells intentionally show plain, unformatted
-// text rather than `renderCell`'s rendered HTML (bold/links/tags/wikilinks) while this widget is
-// active — a contentEditable region holding rendered sub-elements makes "what does typing/
-// backspace do to the underlying markdown" far harder to get right (and easy to silently corrupt
-// on commit, since committing has to turn edited HTML back into markdown, not just read
-// `textContent`), and plain text editing here is also just how Obsidian's own Live Preview treats
-// a table cell being edited — rich rendering only reappears once you actually run a query/render
-// pass elsewhere (this extension has no per-cell focus/blur formatted<->raw toggle at all, on
-// purpose, to keep the round-trip simple and robust).
+// whenever the cursor landed on one of its lines.
+//
+// A table cell shows *rendered* inline formatting (bold/italic/strikethrough/inline-code) while
+// not focused, and swaps to the raw markdown text for editing on focus (see wireCell's own
+// focus/blur listeners below) — same "raw while active, rendered otherwise" convention used
+// everywhere else in this file (headings, wiki-links, ...), just applied per-cell instead of
+// per-line. Deliberately a separate, narrower function from renderCell rather than reusing it
+// outright: renderCell also renders wiki-links/#tags/bare-URLs as blue, clickable-*looking* spans,
+// but a cell's own `mousedown` listener (wireCell, below) calls `e.stopPropagation()` so a click
+// never bubbles up to `linkClickHandler`'s own `[data-wiki]`/`.cm-md-link` handling — rendering
+// those here would look interactive while doing nothing at all on click, which is worse than
+// plain text. Bold/italic/strikethrough/code have no such click affordance to fake, so they're
+// safe to render unconditionally.
+function renderTableCellDisplay(raw) {
+  let s = (raw || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // See renderCell's own identical line for why: "<br>" is the standard way to force a line
+  // break inside a table cell's raw markdown (which can't contain a real newline), so it's
+  // restored to a real <br> element after escaping instead of showing as literal text.
+  s = s.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return `\x00C${codes.length - 1}\x00`; });
+  s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
+  s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+  s = s.replace(/==(.+?)==/g, '<mark class="cm-highlight">$1</mark>');
+  s = s.replace(/\x00C(\d+)\x00/g, (_, i) =>
+    `<code style="font-family:monospace;background:rgba(128,128,128,0.18);padding:1px 4px;border-radius:3px;">${codes[+i]}</code>`
+  );
+  return s;
+}
+
 function commitTableCell(view, tableFrom, isHeader, rowIndex, colIndex, value) {
   mutateTableAt(view, tableFrom + 1, t => {
     if (isHeader) { t.header[colIndex] = value; }
@@ -1532,6 +1599,62 @@ function focusTableCell(view, tableFrom, isHeader, rowIndex, colIndex) {
     sel.removeAllRanges();
     sel.addRange(range);
   }
+}
+
+// ── Multi-cell selection (spreadsheet-style range select/copy/paste) ─────────
+// Each cell is its own independent `contentEditable` element (see the comment at the top of
+// this section), which is great for single-cell editing but gives no built-in way to select a
+// *rectangle* of cells the way a real spreadsheet does — dragging across contentEditable
+// elements just produces an ordinary browser text selection spanning arbitrary characters
+// across them, not a discrete set of whole cells. `tableCellSelection` (module-level — only one
+// table can have an active range at a time, same reasoning as `activeLinkFrom` elsewhere in this
+// file) tracks that range instead: `{ tableFrom, anchorRow, anchorCol, focusRow, focusCol }`,
+// row `-1` meaning the header (mirrors the `-1` convention `wireCell`'s own `rowIndex` already
+// uses for it). `dragState` tracks an in-progress mouse drag before it's known whether it's a
+// genuine range drag or just a plain single-cell click (see wireCell's own mousedown handler).
+let tableCellSelection = null;
+let dragState = null;
+
+// Applies (or clears, if there's no active selection for this table) the `.cm-table-cell-
+// selected` class to every cell in `tableEl` — called after every change to `tableCellSelection`
+// affecting this table, and once at the end of `toDOM()` so a selection survives the widget
+// rebuild a commit/paste triggers (mutateTableAt always produces a *new* table element; the
+// selection itself is module state that isn't torn down along with the old DOM).
+function applyTableSelectionHighlight(tableEl) {
+  const tableFrom = Number(tableEl.dataset.tableFrom);
+  const sel = tableCellSelection && tableCellSelection.tableFrom === tableFrom ? tableCellSelection : null;
+  const rMin = sel ? Math.min(sel.anchorRow, sel.focusRow) : null;
+  const rMax = sel ? Math.max(sel.anchorRow, sel.focusRow) : null;
+  const cMin = sel ? Math.min(sel.anchorCol, sel.focusCol) : null;
+  const cMax = sel ? Math.max(sel.anchorCol, sel.focusCol) : null;
+  tableEl.querySelectorAll('th[data-col], td[data-col]').forEach(cell => {
+    const isHeader = cell.tagName === 'TH';
+    const row = isHeader ? -1 : Number(cell.closest('tr').dataset.row);
+    const col = Number(cell.dataset.col);
+    const inRange = !!sel && row >= rMin && row <= rMax && col >= cMin && col <= cMax;
+    cell.classList.toggle('cm-table-cell-selected', inRange);
+  });
+}
+
+// A plain mousedown *inside* the table with an active selection is handled by wireCell's own
+// listener (which decides whether to keep, replace, or extend the range) — this only needs to
+// clear the selection when the user clicks *away* from it entirely: elsewhere in the document,
+// a different table, or outside the editor altogether. Installed once, lazily, the same
+// single-flight-guard pattern as `ensureDataviewNoticeContainer`/`dvPopoverOutsideHandlerInstalled`
+// elsewhere in this file.
+let tableSelectionOutsideHandlerInstalled = false;
+function ensureTableSelectionOutsideHandler() {
+  if (tableSelectionOutsideHandlerInstalled) return;
+  tableSelectionOutsideHandlerInstalled = true;
+  document.addEventListener('mousedown', e => {
+    if (!tableCellSelection) return;
+    const ownTable = e.target.closest && e.target.closest(`table.cm-table[data-table-from="${tableCellSelection.tableFrom}"]`);
+    if (ownTable) return;
+    const prevFrom = tableCellSelection.tableFrom;
+    tableCellSelection = null;
+    const staleTable = document.querySelector(`table.cm-table[data-table-from="${prevFrom}"]`);
+    if (staleTable) applyTableSelectionHighlight(staleTable);
+  }, true);
 }
 
 class TableWidget extends WidgetType {
@@ -1588,7 +1711,40 @@ class TableWidget extends WidgetType {
     const wireCell = (cell, isHeader, rowIndex, colIndex) => {
       cell.contentEditable = 'true';
       cell.dataset.col = String(colIndex);
-      cell.addEventListener('mousedown', e => e.stopPropagation());
+      const row = isHeader ? -1 : rowIndex;
+      cell.addEventListener('mousedown', e => {
+        e.stopPropagation();
+        const tableEl = cell.closest('table');
+        if (e.shiftKey && tableCellSelection && tableCellSelection.tableFrom === this.from) {
+          // Extend the *existing* range's own anchor to this cell instead of starting a new
+          // one — matches Shift-click's usual "grow the selection from wherever it already
+          // started" meaning in a spreadsheet, rather than always anchoring at the last-clicked
+          // cell.
+          tableCellSelection = { tableFrom: this.from, anchorRow: tableCellSelection.anchorRow,
+            anchorCol: tableCellSelection.anchorCol, focusRow: row, focusCol: colIndex };
+          applyTableSelectionHighlight(tableEl);
+          e.preventDefault(); // don't also move the text caret/focus into this cell
+          return;
+        }
+        // A plain (non-shift) mousedown always starts fresh — if a range was already
+        // selected, this click means "I want to edit/select just this cell," so it's cleared
+        // immediately; if the drag that follows *does* move to a different cell (tracked by
+        // the table-level mousemove listener below), a new range takes over from here.
+        if (tableCellSelection) { tableCellSelection = null; applyTableSelectionHighlight(tableEl); }
+        dragState = { tableFrom: this.from, anchorRow: row, anchorCol: colIndex, moved: false };
+        const onMouseUp = () => {
+          document.removeEventListener('mouseup', onMouseUp);
+          if (dragState && dragState.tableFrom === this.from && dragState.moved) {
+            // A genuine range was just dragged out — focus the table itself (no single cell
+            // stays focused while a multi-cell range is active) so a following Ctrl+C/Ctrl+V
+            // has somewhere to fire from; see the table's own copy/paste listeners below.
+            tableEl.tabIndex = -1;
+            tableEl.focus();
+          }
+          dragState = null;
+        };
+        document.addEventListener('mouseup', onMouseUp);
+      });
 
       const commitAndGo = (nextIsHeader, nextRow, nextCol, insertRowFirst) => {
         const value = cell.textContent;
@@ -1603,11 +1759,19 @@ class TableWidget extends WidgetType {
         focusTableCell(this.view, this.from, nextIsHeader, nextRow, nextCol);
       };
 
+      // Rendered (bold/italic/strikethrough/code) while not focused, raw markdown while
+      // being edited — see renderTableCellDisplay's own comment for why this is a
+      // dedicated function rather than reusing renderCell wholesale.
+      cell.addEventListener('focus', () => {
+        cell.textContent = isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex];
+      });
+
       cell.addEventListener('blur', () => {
         const value = cell.textContent;
         if (value !== (isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex])) {
           commitTableCell(this.view, this.from, isHeader, rowIndex, colIndex, value);
         }
+        cell.innerHTML = renderTableCellDisplay(value);
       });
 
       cell.addEventListener('keydown', e => {
@@ -1665,7 +1829,7 @@ class TableWidget extends WidgetType {
     t.header.forEach((h, i) => {
       const th = document.createElement('th');
       th.style.cssText = CELL + TH_EXTRA + `text-align:${aligns[i] || 'left'};`;
-      th.textContent = h;
+      th.innerHTML = renderTableCellDisplay(h);
       wireCell(th, true, -1, i);
       hRow.appendChild(th);
     });
@@ -1680,13 +1844,99 @@ class TableWidget extends WidgetType {
       row.forEach((cell, i) => {
         const td = document.createElement('td');
         td.style.cssText = CELL + `text-align:${aligns[i] || 'left'};`;
-        td.textContent = cell;
+        td.innerHTML = renderTableCellDisplay(cell);
         wireCell(td, false, ri, i);
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
+
+    // Extending an in-progress drag: fires continuously while the mouse button is held (see
+    // wireCell's own mousedown, which starts `dragState` and clears any stale selection) —
+    // moving onto a *different* cell than the drag started on is what actually turns a plain
+    // click into a range selection; a drag that never leaves its own starting cell stays a
+    // normal single-cell click.
+    table.addEventListener('mousemove', e => {
+      if (!(e.buttons & 1)) { dragState = null; return; } // button released — nothing to extend
+      if (!dragState || dragState.tableFrom !== this.from) return; // no drag, or it belongs to another table
+      const cellEl = e.target.closest && e.target.closest('td,th');
+      if (!cellEl) return;
+      const overRow = cellEl.tagName === 'TH' ? -1 : Number(cellEl.closest('tr').dataset.row);
+      const overCol = Number(cellEl.dataset.col);
+      if (!dragState.moved && overRow === dragState.anchorRow && overCol === dragState.anchorCol) return;
+      dragState.moved = true;
+      tableCellSelection = { tableFrom: this.from, anchorRow: dragState.anchorRow,
+        anchorCol: dragState.anchorCol, focusRow: overRow, focusCol: overCol };
+      // A cell mid-edit would otherwise keep silently holding the text cursor underneath the
+      // highlight — blur it so a following Ctrl+C/Ctrl+V acts on the *range*, not on whatever
+      // was still focused when the drag started.
+      if (document.activeElement && table.contains(document.activeElement)) { document.activeElement.blur(); }
+      applyTableSelectionHighlight(table);
+    });
+
+    // Copy/paste across the *whole selected range* — only intervenes when a multi-cell (or
+    // even single-cell-but-explicitly-selected-as-a-range) selection is active; with no active
+    // range this returns early and the native per-cell copy/paste (already working via each
+    // cell's own contentEditable text, see TableWidget.ignoreEvent) proceeds completely
+    // unchanged. `e.clipboardData.setData`/`getData` — not the async navigator.clipboard API —
+    // since these fire as real browser `copy`/`paste` events (native Ctrl+C/Ctrl+V, or the
+    // table-menu's own execCommand-driven ones), which is the standard, permission-free way to
+    // override clipboard content in response to one.
+    table.addEventListener('copy', e => {
+      const sel = tableCellSelection;
+      if (!sel || sel.tableFrom !== this.from) return;
+      const rMin = Math.min(sel.anchorRow, sel.focusRow), rMax = Math.max(sel.anchorRow, sel.focusRow);
+      const cMin = Math.min(sel.anchorCol, sel.focusCol), cMax = Math.max(sel.anchorCol, sel.focusCol);
+      if (rMin === rMax && cMin === cMax) return; // exactly one cell — plain native copy is fine
+      const rows = [];
+      for (let r = rMin; r <= rMax; r++) {
+        const rowVals = [];
+        for (let c = cMin; c <= cMax; c++) {
+          rowVals.push(r === -1 ? (t.header[c] || '') : ((t.rows[r] && t.rows[r][c]) || ''));
+        }
+        rows.push(rowVals);
+      }
+      e.clipboardData.setData('text/plain', buildClipboardTsv(rows));
+      e.clipboardData.setData('text/html', buildClipboardHtmlTable(rows));
+      e.preventDefault();
+    });
+    table.addEventListener('paste', e => {
+      const sel = tableCellSelection;
+      if (!sel || sel.tableFrom !== this.from) return;
+      e.preventDefault();
+      const html = e.clipboardData.getData('text/html');
+      let rows = html ? parseHtmlTableToRows(html) : null;
+      if (!rows) {
+        const text = e.clipboardData.getData('text/plain');
+        if (text) rows = tsvTextToRows(text);
+      }
+      if (!rows || rows.length === 0) return;
+      const rMin = Math.min(sel.anchorRow, sel.focusRow), cMin = Math.min(sel.anchorCol, sel.focusCol);
+      const wideness = Math.max(...rows.map(r => r.length));
+      mutateTableAt(this.view, this.from + 1, tt => {
+        // Grow the table first (extra columns, then extra rows) if the pasted block is bigger
+        // than what's already there, mirroring how a spreadsheet paste extends the sheet to fit.
+        while (tt.header.length < cMin + wideness) { insertTableColumn(tt, tt.header.length); }
+        while (tt.rows.length < rMin + rows.length) { insertTableRow(tt, tt.rows.length); }
+        rows.forEach((rowVals, ri) => {
+          const targetRow = rMin + ri;
+          rowVals.forEach((val, ci) => {
+            const targetCol = cMin + ci;
+            if (targetRow === -1) { tt.header[targetCol] = val; }
+            else if (tt.rows[targetRow]) { tt.rows[targetRow][targetCol] = val; }
+          });
+        });
+      });
+      // Extends the visible selection to cover the pasted extent (matching spreadsheet UX) —
+      // the mutation above rebuilds the whole widget from scratch, so this only needs to update
+      // the module-level state; the fresh toDOM() call (below) re-applies the highlight itself.
+      tableCellSelection = { tableFrom: this.from, anchorRow: rMin, anchorCol: cMin,
+        focusRow: rMin + rows.length - 1, focusCol: cMin + wideness - 1 };
+    });
+
+    ensureTableSelectionOutsideHandler();
+    applyTableSelectionHighlight(table);
     wrap.appendChild(table);
     return wrap;
   }
@@ -3176,41 +3426,36 @@ class DataviewQueryWidget extends WidgetType {
   }
 }
 
-// Matches .cm-header-N's own font-size defaults exactly (see vsTheme) — used
-// to give .cm-wiki-link-raw/.cm-plain-brackets the *correct* size when the
-// bracket sits inside a heading, instead of just resetting to `inherit`
-// (which collapsed it to the surrounding paragraph size — see the comment
-// where this is used, below).
-const HEADING_SIZE_DEFAULT = { 1: '1.75em', 2: '1.4em', 3: '1.15em', 4: '1.1em', 5: '1em', 6: '0.95em' };
-function headingLevelOf(node) {
-  let cur = node.node.parent;
-  while (cur) {
-    const m = /^ATXHeading([1-6])$/.exec(cur.name);
-    if (m) return +m[1];
-    cur = cur.parent;
-  }
-  return null;
-}
-// Inline `style` (not a class) so it reliably wins regardless of stylesheet
-// order or !important ties, same reasoning as the list hanging-indent fix
-// above headingLevelOf's own caller. Needed because .cm-wiki-link-raw/
-// .cm-plain-brackets reset color/text-decoration/cursor with !important on
-// `.selector, .selector *` (to beat mdHighlight's own generated classes on
-// the *nested* span for those properties — see the comment on that rule) —
-// but mdHighlight's own tags.heading1..6 rule also lands on that same nested
-// span when the bracket sits inside a heading (confirmed: highlightTree
-// combines multiple active tags' classes onto one span, e.g.
-// "cm-header cm-header-1 tok-link tok-processingInstruction" together, not
-// separate sibling spans), and its font-size *isn't* !important — so an
-// earlier version of this that also reset font-size via that same
-// `!important` class rule was silently flattening a heading's font size back
-// down to the paragraph default, since `!important` unconditionally beats a
-// non-!important rule regardless of which element actually carries it.
-function plainBracketFontSizeStyle(node) {
-  const level = headingLevelOf(node);
-  return level
-    ? `font-size: var(--h${level}-size, ${HEADING_SIZE_DEFAULT[level]}) !important`
-    : 'font-size: inherit !important';
+// `.cm-wiki-link-raw`/`.cm-plain-brackets` (below) used to carry an inline `style` here
+// restoring font-size (then, briefly today, also weight/family/color/line-height/style) when
+// the bracket sits inside a heading — removed entirely. Reported as "corchetes enormes": opening
+// and closing a bracket on a heading line made the brackets *and* their enclosed text render
+// nearly twice the heading's own size.
+//
+// Root cause, confirmed with a real EditorView in jsdom (throwaway script, not checked in) that
+// dumped the actual class list and the actual injected stylesheet text for "# [Test] Heading":
+// every one of the bracket's own inner pieces — "[", the enclosed text, "]" — each get their own
+// nested `<span class="cm-header cm-header-1 ...">` from mdHighlight's own highlightTree (heading
+// tagging reaches the bracket's contents exactly like it reaches the rest of the heading line),
+// and `.cm-header-1`'s own font-size rule (`.ͼo .cm-header-1`, a *two-class* compound selector)
+// reliably wins there over any of tags.link/tags.url/tags.processingInstruction's own single-
+// class auto-generated combo rules — by CSS specificity, unconditionally, independent of
+// stylesheet load order (2 classes always beats 1). In other words: **every inner span was
+// already rendering at the correct heading size on its own, with no help needed.** The inline
+// style this function used to return was applied to the *outer* wrapping span (`cm-wiki-link-
+// raw`/`cm-plain-brackets`, added by livePreviewPlugin — a *different* element than the inner
+// mdHighlight-generated spans it wraps, confirmed nested, not merged, by the same dump). Because
+// its own font-size was *also* declared in `em` — relative to *its own* parent's font-size — and
+// the inner spans' `1.75em` is in turn relative to *that already-enlarged* outer span, the two
+// multiplied together (≈1.75 × 1.75 ≈ 3× the base size) instead of composing to the single
+// intended heading size. The original bug this function was introduced to fix (an *earlier*,
+// broader version of the shared reset rule below applying `font-size: inherit !important` via a
+// `.selector *` descendant selector, which *does* reach the inner spans directly and *does* beat
+// their own non-!important rule) was already fixed by narrowing that rule to exclude font-size —
+// nothing here was ever actually needed to keep a bracket inside a heading correctly sized;
+// restoring it here on the *outer* span only ever added the compounding on top.
+function plainBracketFontSizeStyle() {
+  return '';
 }
 
 // Decoration.line() spec that makes a line take zero visual space — used
@@ -4009,11 +4254,81 @@ const mdLinkPlugin = ViewPlugin.fromClass(class {
   }
 }, { decorations: v => v.decorations });
 
+// ── ==highlight== plugin ──────────────────────────────────────────────────────
+// `==text==` isn't real CommonMark/GFM syntax, so lezer-markdown never parses it into a
+// syntax-tree node — unlike bold/italic/strikethrough (EmphasisMark/StrikethroughMark, handled
+// in livePreviewPlugin's own tree walk via mdHighlight's tag-based styling), there's nothing to
+// hook a tag onto here. Implemented the same way mdLinkPlugin/wikiLinkPlugin already handle their
+// own non-tree-based syntax: a plain regex scan over the viewport. Unlike mdLinkPlugin's
+// whole-match widget replacement (which shows fully raw text with no styling at all while
+// active), this mirrors bold/italic/strikethrough's actual convention instead — the highlighted
+// *text* stays visually marked regardless of cursor position (a `Decoration.mark` over the inner
+// span, not gated on `active`), and only the raw "==" markers hide on non-active lines, exactly
+// like `**`/`*`/`~~` do for their own markers.
+const highlightMarkPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this._build(view); }
+  update(u) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged) {
+      this.decorations = this._build(u.view);
+    }
+  }
+  _build(view) {
+    const { state } = view;
+    const active = getActiveLines(state);
+    const { from: vf, to: vt } = view.viewport;
+    const str = state.doc.sliceString(vf, vt);
+    const re = /==([^=\n]+?)==/g;
+    const all = [];
+    let m;
+    while ((m = re.exec(str)) !== null) {
+      const mFrom = vf + m.index;
+      const mTo   = mFrom + m[0].length;
+      const ln = state.doc.lineAt(mFrom).number;
+      all.push({ from: mFrom + 2, to: mTo - 2, dec: Decoration.mark({ class: 'cm-highlight' }) });
+      if (!active.has(ln)) {
+        all.push({ from: mFrom,     to: mFrom + 2, dec: Decoration.replace({}) });
+        all.push({ from: mTo - 2,   to: mTo,       dec: Decoration.replace({}) });
+      }
+    }
+    all.sort((a, b) => a.from - b.from || a.to - b.to);
+    const builder = new RangeSetBuilder();
+    let lastTo = -1;
+    for (const { from, to, dec } of all) {
+      if (from < lastTo) continue;
+      try { builder.add(from, to, dec); lastTo = Math.max(lastTo, to); } catch (_) {}
+    }
+    return builder.finish();
+  }
+}, { decorations: v => v.decorations });
+
 // ── Wiki-link plugin ──────────────────────────────────────────────────────────
 // Dispatched by the `note-index` message handler so wikiLinkPlugin re-checks
 // which links resolve — unlike docChanged/selectionSet/viewportChanged, a
 // noteIndex update carries no doc/viewport change of its own to key off of.
 const noteIndexRebuildEffect = StateEffect.define();
+
+// { level, text } for every ATX heading in the *currently open* document —
+// mirrors the host's parseHeadings() (same "1-6 #'s, text, optional trailing
+// #'s" shape) but reads the already-open CM6 state directly rather than a
+// vscode.workspace.openTextDocument round-trip, since this document's own
+// text is already right here. Backs same-document `[[#section]]` links (see
+// noteTargetExists and WikiSuggestView.recompute below) — those don't name a
+// note at all, so there's nothing to look up in noteIndex/get-headings for.
+function currentDocHeadings(state) {
+  const headings = [];
+  syntaxTree(state).iterate({
+    enter(node) {
+      const m = /^ATXHeading([1-6])$/.exec(node.name);
+      if (m) {
+        const line = state.doc.lineAt(node.from);
+        const hm = /^ {0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line.text);
+        headings.push({ level: +m[1], text: hm ? hm[1].trim() : '' });
+        return false;
+      }
+    }
+  });
+  return headings;
+}
 
 // Mirrors resolveNoteUri's rules host-side (splitTarget + splitDirHint): a
 // target may carry a "#section" suffix (irrelevant to existence) and a single
@@ -4022,14 +4337,27 @@ const noteIndexRebuildEffect = StateEffect.define();
 // note's directory, since "no hint" existence is "some note has this name
 // anywhere" (same-dir-first vs. vault-wide fallback both resolve if either
 // matches) and "with hint" existence just needs a name+parent-dir match.
-function noteTargetExists(rawTarget) {
+//
+// `state` (optional, the CM6 state of the currently open document) is only
+// consulted for the `[[#section]]` case below — a target with no note part
+// at all isn't a note lookup, it's a same-document heading reference, so
+// checking it against noteIndex (which only tracks note names) always
+// resolved to "no note is named ''" and rendered every such link as broken,
+// even when the section heading genuinely exists in this very document.
+function noteTargetExists(rawTarget, state) {
   // A .docx/.xlsx/.pdf target isn't in noteIndex (that only tracks .md notes)
   // — there's no cheap client-side way to check whether it actually exists in
   // the vault without a new round-trip, so it's treated as always-resolved
   // rather than incorrectly dimming a link that in fact opens fine (host-side
   // resolution at click time is what actually matters for whether it works).
   if (isExternalFileTarget(rawTarget)) return true;
-  const notePart = rawTarget.split('#')[0];
+  const hashIdx = rawTarget.indexOf('#');
+  const notePart = hashIdx === -1 ? rawTarget : rawTarget.slice(0, hashIdx);
+  if (!notePart) {
+    const section = (hashIdx === -1 ? '' : rawTarget.slice(hashIdx + 1)).trim().toLowerCase();
+    if (!section || !state) return true;
+    return currentDocHeadings(state).some(h => h.text.toLowerCase() === section);
+  }
   const segments = notePart.replace(/\\/g, '/').split('/').filter(Boolean);
   const noteName = segments.pop() || notePart;
   const dirHint = segments.length > 0 ? segments[segments.length - 1] : null;
@@ -4154,7 +4482,7 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
       if (isLinkActivated(mFrom, mTo)) continue;
       const name  = m[1];
       const alias = m[2];
-      const linkClass = 'cm-wiki-link' + (noteTargetExists(name) ? '' : ' cm-wiki-link-missing');
+      const linkClass = 'cm-wiki-link' + (noteTargetExists(name, state) ? '' : ' cm-wiki-link-missing');
       all.push({ from: mFrom,     to: mFrom + 2, dec: Decoration.replace({}) });
       // No alias: `name` may still carry a "#section" (e.g. "Note#Heading") —
       // show only the section text, same as an alias hides "target|" and
@@ -4793,6 +5121,168 @@ function insertTableTemplate(view, pos) {
   view.focus();
 }
 
+// ── Table <-> external clipboard (Excel/Outlook) interop ──────────────────────
+// Excel/Outlook (and most spreadsheet/office apps) recognize a copied range as "a table" by its
+// `text/html` clipboard payload containing a real `<table>` — plain text (even tab-separated)
+// pastes there as one block of text instead. Conversely, when THEY put something on the
+// clipboard, it also carries a `text/html` `<table>` (richer, preserves the original grid)
+// alongside a `text/plain` tab-separated fallback. These helpers are the shared conversion layer
+// between that world and this editor's own markdown table source / plain `string[][]` shapes —
+// used by "Copiar como tabla"/"Pegar como tabla" below (the generic right-click menu, operating
+// on a text selection or the system clipboard as a whole).
+
+function escapeHtmlText(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// rows: string[][] (plain cell text) -> a real HTML <table> string for the `text/html` clipboard
+// MIME type. A literal newline inside a cell becomes a <br> — Excel/Outlook both render that as
+// a line break within the cell, and renderCell/renderTableCellDisplay already render a "<br>"
+// found in a *markdown* cell back as one (see their own comments), so this stays consistent with
+// that convention in the other direction.
+function buildClipboardHtmlTable(rows) {
+  const trs = rows.map((row, ri) => {
+    const tag = ri === 0 ? 'th' : 'td';
+    const cells = row.map(c => `<${tag}>${escapeHtmlText(c).replace(/\r\n|\n/g, '<br>')}</${tag}>`).join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+  return `<table><tbody>${trs}</tbody></table>`;
+}
+
+// rows: string[][] -> tab-separated text (Excel/Sheets' own plain-text clipboard shape).
+function buildClipboardTsv(rows) {
+  return rows.map(row => row.map(c => String(c == null ? '' : c).replace(/\r?\n/g, ' ')).join('\t')).join('\n');
+}
+
+// Plain tab-separated clipboard text (from Excel/Sheets, or another app's own text/plain
+// fallback) -> string[][]. Only reached when no text/html table was found (see pasteAsTable
+// below), so this only needs to handle the common "cells separated by tabs, rows separated by
+// newlines" shape — a real spreadsheet copy always carries text/html too, so anything more
+// exotic (quoted commas, embedded tabs, ...) is out of scope here.
+function tsvTextToRows(text) {
+  return text.replace(/\r\n/g, '\n').split('\n').filter(l => l.length > 0).map(l => l.split('\t'));
+}
+
+// A `text/html` clipboard payload (Excel/Outlook/Sheets/Word all produce one when copying a
+// range) -> string[][] of each cell's own text content. DOMParser runs entirely offline with no
+// script execution, so this is safe against arbitrary clipboard HTML.
+function parseHtmlTableToRows(html) {
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const table = doc.querySelector('table');
+    if (!table) return null;
+    const rows = [...table.querySelectorAll('tr')]
+      .map(tr => [...tr.querySelectorAll('td,th')].map(td => td.textContent.replace(/\u00a0/g, ' ').trim()))
+      .filter(r => r.length > 0);
+    return rows.length > 0 ? rows : null;
+  } catch (_) { return null; }
+}
+
+// string[][] (first row treated as the header) -> a markdown pipe-table's raw source text.
+// Escapes a literal "|" in any cell — parseTableRow's own escaping only protects an *already*-
+// escaped "\|" found in hand-typed/pasted markdown source; this is the inverse direction,
+// turning arbitrary external text into markdown that will itself parse back correctly — and
+// turns a real line break within a cell into a literal "<br>" (see buildClipboardHtmlTable's own
+// comment for the matching case in the other direction), since raw table-row syntax can't
+// contain one.
+function rowsToMarkdownTable(rows) {
+  const esc = c => String(c == null ? '' : c).replace(/\|/g, '\\|').replace(/\r\n|\n/g, '<br>').trim();
+  const colCount = Math.max(1, ...rows.map(r => r.length));
+  const pad = row => { const r = row.slice(0, colCount).map(esc); while (r.length < colCount) r.push(''); return r; };
+  const header = rows.length > 0 ? pad(rows[0]) : Array(colCount).fill('');
+  const delim = Array(colCount).fill('---');
+  const dataRows = rows.slice(1).map(pad);
+  return [header, delim, ...dataRows].map(serializeTableRow).join('\n');
+}
+
+// "Pegar como tabla" — reads the clipboard (the async Clipboard API this file's own
+// copySelection/pasteAtCursor already rely on as their own fallback), prefers a text/html
+// <table> (Excel/Outlook/Sheets copy one alongside their plain-text fallback, preserving the
+// real grid) and falls back to parsing text/plain as tab-separated text otherwise, then inserts
+// the result as a real markdown table at `pos` — same placement rule as insertTableTemplate
+// (own line if blank, otherwise a new block after the current line).
+async function pasteAsTable(view, pos) {
+  let rows = null;
+  try {
+    if (navigator.clipboard && navigator.clipboard.read) {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        if (item.types.includes('text/html')) {
+          rows = parseHtmlTableToRows(await (await item.getType('text/html')).text());
+          if (rows) break;
+        }
+      }
+      if (!rows) {
+        for (const item of items) {
+          if (item.types.includes('text/plain')) {
+            const text = await (await item.getType('text/plain')).text();
+            if (text.trim()) rows = tsvTextToRows(text);
+            break;
+          }
+        }
+      }
+    } else if (navigator.clipboard && navigator.clipboard.readText) {
+      const text = await navigator.clipboard.readText();
+      if (text.trim()) rows = tsvTextToRows(text);
+    }
+  } catch (_) { /* clipboard read denied/unavailable */ }
+
+  if (!rows || rows.length === 0) {
+    new DataviewNotice('El portapapeles no contiene una tabla ni texto separado por tabulaciones.');
+    return;
+  }
+
+  const line = view.state.doc.lineAt(Math.min(pos, view.state.doc.length));
+  const lineEmpty = line.text.trim() === '';
+  const insertFrom = lineEmpty ? line.from : line.to;
+  const prefix = lineEmpty ? '' : '\n\n';
+  const insert = prefix + rowsToMarkdownTable(rows) + '\n';
+  view.dispatch({
+    changes: { from: insertFrom, to: insertFrom, insert },
+    selection: EditorSelection.cursor(insertFrom + insert.length),
+  });
+  view.focus();
+}
+
+// "Copiar como tabla" — lives in a *rendered* table's own right-click menu (alongside add/
+// remove row/column, see tableContextMenuHandler below), not the generic empty-space one: it
+// operates on the whole table the user right-clicked, resolved the same way every other item in
+// that menu already finds it (findTableRangeAt via `pos`), not on whatever happens to be
+// text-selected. Writes both a text/html <table> and a tab-separated text/plain fallback to the
+// clipboard — so pasting the result into Excel/Outlook lands as a real table/grid instead of a
+// block of text with visible "|" characters.
+async function copyTableAsClipboard(view, pos) {
+  const range = findTableRangeAt(view.state, pos);
+  const t = range && parseTableSrc(view.state.doc.sliceString(range.fromLine.from, range.toLine.to));
+  if (!t) {
+    new DataviewNotice('No se encontró una tabla en esa posición.');
+    return;
+  }
+  // parseTableSrc/parseTableRow already hand back the clean, unescaped "|" character — only
+  // "<br>" (rowsToMarkdownTable's own line-break escape) still needs undoing here, back into a
+  // real newline, so Excel/Outlook read it as a line break within the cell rather than literal
+  // markdown source.
+  const unescape = c => String(c == null ? '' : c).replace(/<br\s*\/?>/gi, '\n');
+  const rows = [t.header, ...t.rows].map(row => row.map(unescape));
+  const tsv = buildClipboardTsv(rows);
+  const html = buildClipboardHtmlTable(rows);
+  try {
+    if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== 'undefined') {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/plain': new Blob([tsv], { type: 'text/plain' }),
+        'text/html': new Blob([html], { type: 'text/html' }),
+      })]);
+      return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(tsv);
+      new DataviewNotice('Copiado como texto separado por tabulaciones (el formato de tabla enriquecida no está disponible aquí).');
+    }
+  } catch (_) {
+    new DataviewNotice('No se pudo copiar al portapapeles.');
+  }
+}
+
 // ── Cortar/Copiar/Pegar for the custom context menu ─────────────────────────
 // tableContextMenuHandler suppresses VS Code's own native context menu
 // wherever it has something to offer (see its own comment), which meant Cut/
@@ -4952,6 +5442,8 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
         items.push({ label: 'Añadir fila abajo',  action: () => mutateTableAt(view, pos, t => insertTableRow(t, rowIndex + 1)) });
         items.push({ label: 'Eliminar fila',      action: () => mutateTableAt(view, pos, t => deleteTableRow(t, rowIndex)) });
       }
+      items.push({ separator: true });
+      items.push({ label: 'Copiar como tabla', action: () => copyTableAsClipboard(view, pos) });
       e.preventDefault();
       menu.show(e.clientX, e.clientY, items);
       return true;
@@ -4975,6 +5467,7 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       { label: 'Pegar',  action: () => pasteAtCursor(view) },
       { separator: true },
       { label: 'Crear tabla', action: () => insertTableTemplate(view, pos) },
+      { label: 'Pegar como tabla', action: () => pasteAsTable(view, pos) },
     ]);
     return true;
   },
@@ -5258,14 +5751,29 @@ class WikiSuggestView {
     }
 
     const notePart = ctx.raw.slice(0, hashIdx);
-    if (!notePart) { this.close(); return; }
     this.mode = 'headings';
     this.notePart = notePart;
     this.query = ctx.raw.slice(hashIdx + 1);
     this.open = true;
+    this.selected = 0;
+
+    // Bare "[[#" — no note name at all — means "a heading in this same
+    // document," not a lookup of some other note's headings. Those are
+    // already available synchronously off the live CM6 state (no
+    // get-headings host round-trip needed, and nothing to be "not found").
+    if (!notePart) {
+      this.loading = false;
+      const q = this.query.toLowerCase();
+      this.items = currentDocHeadings(this.view.state)
+        .filter(h => h.text.toLowerCase().includes(q))
+        .slice(0, WIKI_SUGGEST_SCAN_MAX)
+        .map(h => ({ type: 'heading', level: h.level, text: h.text }));
+      this.render();
+      return;
+    }
+
     this.loading = true;
     this.items = [];
-    this.selected = 0;
     this.render();
 
     const token = ++this.headingsToken;
@@ -6523,6 +7031,94 @@ class ObsidianSearchPanel {
   get top() { return true; }
 }
 
+// ── Ordered-list auto-renumbering ──────────────────────────────────────────────
+// Deleting (or adding) an item in the middle of a numbered list should shift every
+// following sibling item's own number to stay sequential — e.g. deleting item "2." from a
+// 1/2/3 list should turn the old "3." into "2." automatically, matching Obsidian's own live-
+// numbering behavior. lezer-markdown has no notion of "this list's numbering just became
+// inconsistent" to react to, so this reacts the same regex-driven way mdLinkPlugin/
+// highlightMarkPlugin already handle syntax lezer doesn't parse: after a genuine user edit,
+// rewrite the run's numbers to be sequential, starting from whatever number the *first* item
+// in the run already has (so a list deliberately started at, say, "5." keeps starting there).
+// Registered outside previewCompartment (unlike the decoration plugins above) — renumbering is
+// a real edit to the document's own text, not a rendering choice, so it applies in source mode
+// (raw markdown, no live-preview decorations) exactly the same as in live preview.
+const ORDERED_MARKER_RE = /^(\s*)(\d+)([.)])(\s+)/;
+
+// Finds the full contiguous run of ordered-list-item lines (same indent as the line at
+// `lineNumber`, tolerating blank lines and more-deeply-indented content — nested sub-lists,
+// wrapped continuation text — in between without ending the run) containing that line.
+// Returns null if that line isn't itself part of an ordered list at all.
+function findOrderedListRun(doc, lineNumber) {
+  const anchor = doc.line(lineNumber);
+  const anchorMarker = ORDERED_MARKER_RE.exec(anchor.text);
+  const indent = anchorMarker ? anchorMarker[1].length : -1;
+  if (indent === -1) return null;
+  const belongs = text => {
+    if (!text.trim()) return true; // blank line — allowed inside a "loose" list
+    const m = ORDERED_MARKER_RE.exec(text);
+    if (m && m[1].length === indent) return true; // sibling item, same nesting depth
+    // Deeper-indented content (nested sub-list, wrapped continuation text) belongs to
+    // whichever item precedes it — skip over it without ending the run.
+    return /^\s*/.exec(text)[0].length > indent;
+  };
+  let first = lineNumber, last = lineNumber;
+  while (first > 1 && belongs(doc.line(first - 1).text)) first--;
+  while (last < doc.lines && belongs(doc.line(last + 1).text)) last++;
+  // A blank line only "belongs" *between* two real items — trim any that got swept in
+  // at either edge with no item of this run left on that side.
+  while (first < last && !doc.line(first).text.trim()) first++;
+  while (last > first && !doc.line(last).text.trim()) last--;
+  return { first, last, indent };
+}
+
+const orderedListRenumberPlugin = ViewPlugin.fromClass(class {
+  update(u) {
+    if (!u.docChanged) return;
+    // Only a genuine insert/delete triggers this — never this plugin's *own* renumbering
+    // dispatch below (tagged with a distinct userEvent, so this check is false for it) or an
+    // external-update/autosave reconciliation, either of which could otherwise loop or fight
+    // with an edit still in flight.
+    if (!u.transactions.some(t => t.isUserEvent('input') || t.isUserEvent('delete'))) return;
+    const view = u.view;
+    // Deferred to a microtask: CM6 disallows dispatching a new transaction synchronously from
+    // inside a ViewPlugin's own update() call (it's still mid-way through processing the one
+    // that triggered this) — same reasoning WikiSuggestView's render() defers its own layout
+    // reads via requestMeasure rather than reading synchronously inside update(). By the next
+    // microtask tick the triggering transaction has fully landed, so re-deriving everything
+    // fresh from view.state here (rather than trying to reuse anything computed during the
+    // update() call) is both simpler and immune to any staleness from the deferral.
+    Promise.resolve().then(() => {
+      const state = view.state;
+      const doc = state.doc;
+      const anchorLine = doc.lineAt(Math.min(state.selection.main.head, doc.length)).number;
+      const seen = new Set();
+      const changes = [];
+      // The cursor's own line plus one neighbour on each side — covers a merged-line backspace
+      // (the cursor now sits where the deleted line used to start) and an Enter-split insertion
+      // alike, without re-scanning the whole document on every keystroke.
+      for (let ln = Math.max(1, anchorLine - 1); ln <= Math.min(doc.lines, anchorLine + 1); ln++) {
+        const run = findOrderedListRun(doc, ln);
+        if (!run || seen.has(run.first)) continue;
+        seen.add(run.first);
+        let expected = null;
+        for (let l = run.first; l <= run.last; l++) {
+          const line = doc.line(l);
+          const m = ORDERED_MARKER_RE.exec(line.text);
+          if (!m) continue;
+          if (expected == null) expected = +m[2]; // first item's own number sets the start
+          if (+m[2] !== expected) {
+            const numFrom = line.from + m[1].length;
+            changes.push({ from: numFrom, to: numFrom + m[2].length, insert: String(expected) });
+          }
+          expected++;
+        }
+      }
+      if (changes.length > 0) { view.dispatch({ changes, userEvent: 'ordered-list.renumber' }); }
+    });
+  }
+});
+
 // ── Source mode (Compartment) ─────────────────────────────────────────────────
 const previewCompartment = new Compartment();
 let sourceMode = false;
@@ -6541,9 +7137,10 @@ function createEditor(parent, content) {
       // rebuild for this same transaction already sees the fresh activation
       // state — see the comment above wikiLinkActivationTracker's definition.
       wikiLinkActivationTracker,
-      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]),
+      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]),
       foldPlugin,
       foldAtomicRanges,
+      orderedListRenumberPlugin,
       // Find/replace panel (Ctrl+F — see obsidianSearchPanelPlugin's own
       // comment for why the actual keybinding is a real VS Code command
       // instead of relying on searchKeymap's own Mod-f reaching this webview
@@ -6730,7 +7327,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]
+      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);
