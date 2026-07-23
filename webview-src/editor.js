@@ -37,7 +37,11 @@ let syncTimer = null;
 // value wide enough to fit a 3-digit ordered marker read as an oversized gap
 // after a plain bullet, compared to Obsidian's own compact spacing.
 const LIST_BULLET_MARKER_WIDTH_EM  = 1.0;
-const LIST_ORDERED_MARKER_WIDTH_EM = 1.6;
+// Was 1.6 — reported directly against a real Obsidian screenshot ("no se ve
+// igual") showing a much tighter gap between an ordered marker ("1.") and
+// the text after it than this produced. Tightened; still wide enough for a
+// 2-digit marker ("10.") without the text visibly overlapping it.
+const LIST_ORDERED_MARKER_WIDTH_EM = 1.2;
 
 // ── Theme (CSS variables from VS Code) ────────────────────────────────────────
 const vsTheme = EditorView.theme({
@@ -135,9 +139,17 @@ const vsTheme = EditorView.theme({
   '.cm-list-depth-3': { paddingLeft: '4.5em' },
   '.cm-list-depth-4': { paddingLeft: '6em' },
   '.cm-list-first': { marginTop: '0.5em' },
+  // Marker color: real Obsidian themes drive this via --list-marker-color
+  // (falling back to the theme's own accent color, then a plain muted gray)
+  // — reported against a reference Obsidian screenshot showing ordered-list
+  // numbers in a distinct, non-body-text color, which neither .cm-list-bullet
+  // nor .cm-list-marker-raw (below) ever set before this: an inactive bullet
+  // (BulletWidget) got a flat --text-muted, and an ordered marker / active
+  // bullet (.cm-list-marker-raw) got no color rule at all, silently
+  // inheriting plain body text color instead of reading as a marker.
   '.cm-list-bullet': {
     display: 'inline-block', width: `${LIST_BULLET_MARKER_WIDTH_EM}em`,
-    color: 'var(--text-muted, inherit)',
+    color: 'var(--list-marker-color, var(--text-accent, var(--text-muted, inherit)))',
   },
   // Raw (unrendered) list marker text — an active-line bullet ("- "/"* "/"+ ")
   // or any ordered marker ("1. ", "10. ", ...), neither of which ever becomes
@@ -147,6 +159,7 @@ const vsTheme = EditorView.theme({
   // different widths, so this class-level width is just a fallback.
   '.cm-list-marker-raw': {
     display: 'inline-block', width: `${LIST_BULLET_MARKER_WIDTH_EM}em`,
+    color: 'var(--list-marker-color, var(--text-accent, var(--text-muted, inherit)))',
   },
   '.cm-hr': {
     border: 'none',
@@ -1532,6 +1545,24 @@ function deleteTableColumn(t, colIndex) {
   t.delim.splice(colIndex, 1);
   for (const row of t.rows) row.splice(colIndex, 1);
 }
+// Plural variants backing the table context menu's "Eliminar filas"/"Eliminar
+// columnas" items, shown instead of the singular ones when a right-click lands
+// inside a multi-row/-column cell selection (see tableContextMenuHandler).
+// Descending sort so each splice() doesn't shift the position of an
+// index still waiting to be removed later in the same pass.
+function deleteTableRows(t, rowIndices) {
+  const sorted = [...new Set(rowIndices)].filter(i => i >= 0 && i < t.rows.length).sort((a, b) => b - a);
+  for (const idx of sorted) t.rows.splice(idx, 1);
+}
+function deleteTableColumns(t, colIndices) {
+  const sorted = [...new Set(colIndices)].filter(i => i >= 0 && i < t.header.length).sort((a, b) => b - a);
+  for (const idx of sorted) {
+    if (t.header.length <= 1) break; // never delete the last remaining column
+    t.header.splice(idx, 1);
+    t.delim.splice(idx, 1);
+    for (const row of t.rows) row.splice(idx, 1);
+  }
+}
 
 // A table cell is directly `contentEditable` — typing into it commits straight back to the
 // document (via `mutateTableAt`, same helper the row/column context-menu actions already use),
@@ -1714,6 +1745,14 @@ class TableWidget extends WidgetType {
       const row = isHeader ? -1 : rowIndex;
       cell.addEventListener('mousedown', e => {
         e.stopPropagation();
+        // A right-click (button 2) mousedown fires right before its own `contextmenu`
+        // event — without this guard it fell through to the plain-click branch below,
+        // which unconditionally clears any active multi-cell selection before
+        // tableContextMenuHandler's `contextmenu` listener ever got a chance to see it,
+        // so right-clicking a selected range always looked like a single-cell click to
+        // the menu. Left completely untouched here; the browser's native contextmenu
+        // event does its own thing regardless of what this handler does.
+        if (e.button !== 0) return;
         const tableEl = cell.closest('table');
         if (e.shiftKey && tableCellSelection && tableCellSelection.tableFrom === this.from) {
           // Extend the *existing* range's own anchor to this cell instead of starting a new
@@ -3636,9 +3675,17 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             // formula reserves regardless of active/inactive state.
             const isOrderedItem = node.node.parent && node.node.parent.name === 'OrderedList';
             const markerW = isOrderedItem ? LIST_ORDERED_MARKER_WIDTH_EM : LIST_BULLET_MARKER_WIDTH_EM;
-            const indentEm = depth * 1.5 + markerW;
-            const firstLineStyle = `padding-left:${indentEm}em;text-indent:-${markerW}em`;
-            const contLineStyle = `padding-left:${indentEm}em`;
+            // Per-level nesting indent used to be a hardcoded 1.5em multiplier,
+            // ignoring the vault theme's own --list-indent (a real Obsidian CSS
+            // var — Border, e.g., sets it to 2em). Reading it via calc() means a
+            // theme that customizes list indentation is actually respected here,
+            // instead of this editor always reserving a fixed amount regardless
+            // of what the loaded theme asks for. Falls back to 2em (Obsidian's
+            // own conventional default) when no theme (or an unrelated one) is
+            // loaded, so unstyled/default vaults aren't affected by this change.
+            const nestPart = `calc(var(--list-indent, 2em) * ${depth})`;
+            const firstLineStyle = `padding-left:calc(${nestPart} + ${markerW}em);text-indent:-${markerW}em`;
+            const contLineStyle = `padding-left:calc(${nestPart} + ${markerW}em)`;
             // Task checkbox lines read flush with the surrounding prose's left margin
             // instead of indented like a regular list item — a checklist isn't "a sublist
             // of the document", Obsidian's own Tasks plugin renders a top-level one the
@@ -3647,9 +3694,9 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             // (depth 2+ — a subtask under another task, or under a plain bullet) still
             // reads one level deeper than its parent; only the true top level (depth 1)
             // lands at 0.
-            const taskIndentEm = (depth - 1) * 1.5 + markerW;
-            const taskFirstLineStyle = `padding-left:${taskIndentEm}em;text-indent:-${markerW}em`;
-            const taskContLineStyle = `padding-left:${taskIndentEm}em`;
+            const taskNestPart = `calc(var(--list-indent, 2em) * ${depth - 1})`;
+            const taskFirstLineStyle = `padding-left:calc(${taskNestPart} + ${markerW}em);text-indent:-${markerW}em`;
+            const taskContLineStyle = `padding-left:calc(${taskNestPart} + ${markerW}em)`;
 
             // ── Task checkbox lines ──────────────────────────────────────────
             // Detected via plain-text regex (not AST) per the line text, so this
@@ -5425,6 +5472,33 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       const pos = view.posAtDOM(tableEl);
       const hasSelection = !view.state.selection.main.empty;
 
+      // If there's an active multi-cell selection (see "Multi-cell selection"
+      // above tableCellSelection's own definition) *and the right-clicked cell
+      // is actually inside it*, offer to delete every row/column it spans
+      // instead of just the one cell that happens to be under the pointer —
+      // requested directly: "cuando selecciono varias celdas... que se permita
+      // eliminar todas las filas/columnas de las celdas seleccionadas". A
+      // right-click outside the current selection intentionally falls back to
+      // the plain single row/column behavior below, same as clicking outside
+      // it already clears the selection elsewhere in this file.
+      const activeSel = tableCellSelection && tableCellSelection.tableFrom === Number(tableEl.dataset.tableFrom)
+        ? tableCellSelection : null;
+      let selRowIndices = null, selColIndices = null;
+      if (activeSel) {
+        const rMin = Math.min(activeSel.anchorRow, activeSel.focusRow), rMax = Math.max(activeSel.anchorRow, activeSel.focusRow);
+        const cMin = Math.min(activeSel.anchorCol, activeSel.focusCol), cMax = Math.max(activeSel.anchorCol, activeSel.focusCol);
+        const clickedRow = isHeader ? -1 : rowIndex;
+        if (clickedRow >= rMin && clickedRow <= rMax && colIndex >= cMin && colIndex <= cMax) {
+          // Header row (-1) is excluded — deleting it was never supported by
+          // this menu (nothing above it, see the singular row branch below),
+          // so a selection spanning header+data rows only deletes the data ones.
+          const rows = [];
+          for (let r = Math.max(rMin, 0); r <= rMax; r++) rows.push(r);
+          if (rows.length > 1) selRowIndices = rows;
+          if (cMax > cMin) selColIndices = Array.from({ length: cMax - cMin + 1 }, (_, i) => cMin + i);
+        }
+      }
+
       const items = [
         { label: 'Cortar',  action: () => cutSelection(view), disabled: !hasSelection },
         { label: 'Copiar',  action: () => copySelection(view), disabled: !hasSelection },
@@ -5432,7 +5506,9 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
         { separator: true },
         { label: 'Añadir columna a la izquierda', action: () => mutateTableAt(view, pos, t => insertTableColumn(t, colIndex)) },
         { label: 'Añadir columna a la derecha',   action: () => mutateTableAt(view, pos, t => insertTableColumn(t, colIndex + 1)) },
-        { label: 'Eliminar columna',               action: () => mutateTableAt(view, pos, t => deleteTableColumn(t, colIndex)) },
+        selColIndices
+          ? { label: 'Eliminar columnas', action: () => { const cols = selColIndices; tableCellSelection = null; mutateTableAt(view, pos, t => deleteTableColumns(t, cols)); } }
+          : { label: 'Eliminar columna',  action: () => mutateTableAt(view, pos, t => deleteTableColumn(t, colIndex)) },
         { separator: true },
       ];
       if (isHeader) {
@@ -5440,7 +5516,9 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       } else if (rowIndex >= 0) {
         items.push({ label: 'Añadir fila arriba', action: () => mutateTableAt(view, pos, t => insertTableRow(t, rowIndex)) });
         items.push({ label: 'Añadir fila abajo',  action: () => mutateTableAt(view, pos, t => insertTableRow(t, rowIndex + 1)) });
-        items.push({ label: 'Eliminar fila',      action: () => mutateTableAt(view, pos, t => deleteTableRow(t, rowIndex)) });
+        items.push(selRowIndices
+          ? { label: 'Eliminar filas', action: () => { const rows = selRowIndices; tableCellSelection = null; mutateTableAt(view, pos, t => deleteTableRows(t, rows)); } }
+          : { label: 'Eliminar fila',  action: () => mutateTableAt(view, pos, t => deleteTableRow(t, rowIndex)) });
       }
       items.push({ separator: true });
       items.push({ label: 'Copiar como tabla', action: () => copyTableAsClipboard(view, pos) });
@@ -7105,7 +7183,16 @@ const orderedListRenumberPlugin = ViewPlugin.fromClass(class {
         for (let l = run.first; l <= run.last; l++) {
           const line = doc.line(l);
           const m = ORDERED_MARKER_RE.exec(line.text);
-          if (!m) continue;
+          // findOrderedListRun's own "belongs" check already treats a deeper-indented
+          // line (a nested sub-list, wrapped continuation text) as tolerated *filler*
+          // within [first,last] without making it a member of *this* run's sequence —
+          // this loop has to honor that same boundary, or a nested item that happens to
+          // itself start with a bare `\d+[.)]` marker gets swept into the outer run's
+          // numbering and has its own (correctly independent) number stomped to match
+          // the outer sequence. Was missing here: `ORDERED_MARKER_RE` matches a marker
+          // regardless of indent, so without this check every level-N+1 item inside a
+          // level-N run's line range got treated as if it were level-N's own next item.
+          if (!m || m[1].length !== run.indent) continue;
           if (expected == null) expected = +m[2]; // first item's own number sets the start
           if (+m[2] !== expected) {
             const numFrom = line.from + m[1].length;
@@ -7118,6 +7205,110 @@ const orderedListRenumberPlugin = ViewPlugin.fromClass(class {
     });
   }
 });
+
+// ── List item indent/outdent via Tab/Shift-Tab (nest into / out of a sub-list) ──
+// Reported: pressing Tab right after an ordered marker ("3. |Subelemento") only
+// added leading whitespace — CommonMark already treats a deep-enough-indented
+// line as nested content of the preceding item, so the line *looked* indented,
+// but its own marker text stayed "3." instead of restarting at "1." for the new
+// nested list, and the outer list's remaining items (e.g. "4.") never shifted
+// down to fill the gap the demoted item left behind.
+//
+// Bullet-marker equivalent of ORDERED_MARKER_RE — reindenting a bullet item
+// needs no renumbering, but still needs its own marker/indent shape to rebuild
+// it at a different indent.
+const BULLET_MARKER_RE = /^(\s*)([-*+])( +)/;
+
+// Parses a line's own list marker (ordered or bullet) into enough to rebuild it
+// at a different indent: `{ indent, prefixLen, type, punct|bullet }`. `prefixLen`
+// is the full marker match length (indent + marker + trailing space) — i.e.
+// where this line's own *content* starts, the same quantity CommonMark itself
+// requires a nested item's content to be indented at least as far as for it to
+// parse as belonging to the preceding item at all.
+function parseListMarkerLine(text) {
+  const om = ORDERED_MARKER_RE.exec(text);
+  if (om) return { indent: om[1].length, prefixLen: om[0].length, type: 'ordered', punct: om[3] };
+  const bm = BULLET_MARKER_RE.exec(text);
+  if (bm) return { indent: bm[1].length, prefixLen: bm[0].length, type: 'bullet', bullet: bm[2] };
+  return null;
+}
+
+// Rebuilds `line`'s own leading marker to sit at `newIndent` spaces, reusing its
+// own marker type/punctuation/bullet character unchanged — an ordered item
+// always restarts at "1" (whatever run it ends up adjacent to, if any, gets
+// renumbered sequentially by orderedListRenumberPlugin right after this
+// dispatches — same as any other edit that changes an ordered list's
+// structure, since this is tagged with the 'input' userEvent prefix that
+// plugin's own update() already watches for).
+function rebuildListLine(view, line, marker, newIndent) {
+  const content = line.text.slice(marker.prefixLen);
+  const newMarkerText = marker.type === 'ordered' ? `1${marker.punct} ` : `${marker.bullet} `;
+  const newPrefix = ' '.repeat(newIndent) + newMarkerText;
+  const cursorInLine = view.state.selection.main.head - line.from;
+  const newCursorInLine = cursorInLine <= marker.prefixLen
+    ? newPrefix.length
+    : newPrefix.length + (cursorInLine - marker.prefixLen);
+  view.dispatch({
+    changes: { from: line.from, to: line.to, insert: newPrefix + content },
+    selection: { anchor: line.from + newCursorInLine },
+    userEvent: 'input.indent',
+  });
+  return true;
+}
+
+// Tab on a list-item line: nests it one level deeper under the nearest
+// preceding *sibling* item (same indent, walking back past any of that
+// sibling's own already-nested content/blank lines — the same tolerance
+// findOrderedListRun already uses for "this belongs to the item above it").
+// No sibling directly above at this exact indent → nothing sensible to nest
+// under, so this returns false and falls through to Tab's default behavior
+// instead of silently doing nothing or something surprising.
+function demoteListLine(view) {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (!sel.empty) return false;
+  const line = state.doc.lineAt(sel.head);
+  const marker = parseListMarkerLine(line.text);
+  if (!marker) return false;
+  let ln = line.number - 1;
+  while (ln >= 1) {
+    const text = state.doc.line(ln).text;
+    if (!text.trim()) { ln--; continue; }
+    const m = parseListMarkerLine(text);
+    if (m && m.indent === marker.indent) return rebuildListLine(view, line, marker, m.prefixLen);
+    if (/^\s*/.exec(text)[0].length > marker.indent) { ln--; continue; } // nested content of that sibling — keep looking past it
+    break; // shallower (or non-list) line reached first — no sibling to nest under
+  }
+  return false;
+}
+
+// Shift-Tab: the inverse — un-nests the line to sit as a sibling of its own
+// current parent (the nearest preceding line with *less* indent) instead of as
+// that parent's child. No shallower list-item line above at all → this item is
+// already at the top level, nothing to promote out of.
+function promoteListLine(view) {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (!sel.empty) return false;
+  const line = state.doc.lineAt(sel.head);
+  const marker = parseListMarkerLine(line.text);
+  if (!marker || marker.indent === 0) return false;
+  let ln = line.number - 1;
+  while (ln >= 1) {
+    const text = state.doc.line(ln).text;
+    if (text.trim()) {
+      const m = parseListMarkerLine(text);
+      if (m && m.indent < marker.indent) return rebuildListLine(view, line, marker, m.indent);
+    }
+    ln--;
+  }
+  return false;
+}
+
+const listIndentKeymap = Prec.highest(keymap.of([
+  { key: 'Tab', run: demoteListLine },
+  { key: 'Shift-Tab', run: promoteListLine },
+]));
 
 // ── Source mode (Compartment) ─────────────────────────────────────────────────
 const previewCompartment = new Compartment();
@@ -7141,6 +7332,7 @@ function createEditor(parent, content) {
       foldPlugin,
       foldAtomicRanges,
       orderedListRenumberPlugin,
+      listIndentKeymap,
       // Find/replace panel (Ctrl+F — see obsidianSearchPanelPlugin's own
       // comment for why the actual keybinding is a real VS Code command
       // instead of relying on searchKeymap's own Mod-f reaching this webview
