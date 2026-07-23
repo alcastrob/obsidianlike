@@ -926,3 +926,4 @@ If running on a corporate network that intercepts TLS:
 ```bash
 npm install --strict-ssl=false
 ```
+Nunca, bajo ningún concepto, añadas 'By Claude Code' o similar al interactuar con Git o GitHub.
