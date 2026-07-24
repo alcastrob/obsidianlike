@@ -176,7 +176,11 @@ no se ven afectados — ya tienen su propio tratamiento como panel de "Propiedad
 Incrusta el contenido de otra nota (completa o solo una sección) dentro de un
 rectángulo con un botón "↗" para abrir la nota de origen (y hacer scroll a la
 sección, si la hay). Se resuelve de forma asíncrona contra el host, igual que
-los bloques ` ```tasks ` de la integración de Tareas. Dentro de esa sección incrustada,
+los bloques ` ```tasks ` de la integración de Tareas. Al incrustar una sección
+(`![[nota#Cabecera]]`), se incluye todo el contenido hasta la siguiente cabecera
+del **mismo rango o superior** (o el final del fichero) — las cabeceras de rango
+inferior anidadas dentro (por ejemplo, los `##`/`###` bajo un `#`) se incluyen
+con todo su contenido, no cortan la transclusión. Dentro de esa sección incrustada,
 una imagen (`![[foto.png]]`) se muestra como imagen real, un enlace a un `.docx`/`.xlsx`/`.pdf`
 se muestra como una caja clicable para abrirlo con la aplicación del sistema, y las líneas de
 tarea (`- [ ] ...`) muestran su checkbox (de solo lectura, ya que editar una tarea transcluida no
