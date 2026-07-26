@@ -1231,6 +1231,8 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     const fullRange = () =>
       new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
 
+    const normalizeEol = (s: string) => s.replace(/\r\n/g, '\n');
+
     // Serializes every full-document replace (both the regular debounced 'sync'
     // from the webview and the fresher content fetched in onWillSaveTextDocument
     // below) through a single promise chain, so they always apply in the order
@@ -1320,6 +1322,17 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     };
 
     const applySync = (content: string) => {
+      // 'sync' also arrives as a no-op echo from 'trigger-sync' (sent on every
+      // onDidChangeViewState where the panel becomes inactive — i.e. on every
+      // tab switch away from this note, not just on real edits): the webview
+      // always replies with its full current content regardless of whether
+      // anything changed. Applying that unconditionally still marked the
+      // document dirty (a WorkspaceEdit replace is dirty-marking even when the
+      // replacement text is identical) and armed the autosave timer, so simply
+      // switching tabs — with zero keystrokes — produced a spurious "unsaved
+      // changes" dot and a real disk write a few seconds later. Skipping when
+      // the content hasn't actually changed avoids both.
+      if (normalizeEol(content) === normalizeEol(lastOwnContent)) { return; }
       queueReplace(content);
       // Own debounced autosave (obsidianLike.autoSaveDelay) instead of relying on
       // VS Code's native files.autoSave, which raced with this exact sync path.
@@ -1363,8 +1376,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         // lastOwnContent currently holds. See the comment above queueReplace.
         if (applyingOwnEdit) { return; }
         const newText = e.document.getText();
-        const normalize = (s: string) => s.replace(/\r\n/g, '\n');
-        if (normalize(newText) === normalize(lastOwnContent)) { return; }
+        if (normalizeEol(newText) === normalizeEol(lastOwnContent)) { return; }
         lastOwnContent = newText;
         // This window's model just resynced with whatever is actually on
         // disk (VS Code auto-reloads a *clean* document on an external

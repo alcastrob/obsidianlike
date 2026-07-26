@@ -51,6 +51,12 @@ siempre. Para lograrlo, la extensión activa `files.autoSave` de VS Code
 otros tipos de archivo), ya que es la única forma soportada de que VS Code deje
 de preguntar antes de cerrar una pestaña con cambios.
 
+Cambiar de pestaña (sin editar nada) ya no marca la nota que dejas atrás como "con cambios sin
+guardar" ni dispara un guardado de fondo — antes, el mecanismo interno que sincroniza el contenido
+del editor al cerrar/perder el foco de una pestaña reenviaba el contenido igual aunque no hubiera
+cambiado, y VS Code marca "sucio" un documento en cuanto se le aplica cualquier edición, aunque el
+texto resultante sea idéntico.
+
 Si la misma nota está abierta a la vez en **dos ventanas** distintas de VS Code, el
 autoguardado comprueba la fecha de modificación real del fichero antes de escribir: si detecta
 que la otra ventana ya guardó algo más reciente que lo que esta ventana conoce, se salta ese
