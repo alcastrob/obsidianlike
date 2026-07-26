@@ -176,7 +176,11 @@ no se ven afectados — ya tienen su propio tratamiento como panel de "Propiedad
 Incrusta el contenido de otra nota (completa o solo una sección) dentro de un
 rectángulo con un botón "↗" para abrir la nota de origen (y hacer scroll a la
 sección, si la hay). Se resuelve de forma asíncrona contra el host, igual que
-los bloques ` ```tasks ` de la integración de Tareas. Dentro de esa sección incrustada,
+los bloques ` ```tasks ` de la integración de Tareas. Al incrustar una sección
+(`![[nota#Cabecera]]`), se incluye todo el contenido hasta la siguiente cabecera
+del **mismo rango o superior** (o el final del fichero) — las cabeceras de rango
+inferior anidadas dentro (por ejemplo, los `##`/`###` bajo un `#`) se incluyen
+con todo su contenido, no cortan la transclusión. Dentro de esa sección incrustada,
 una imagen (`![[foto.png]]`) se muestra como imagen real, un enlace a un `.docx`/`.xlsx`/`.pdf`
 se muestra como una caja clicable para abrirlo con la aplicación del sistema, y las líneas de
 tarea (`- [ ] ...`) muestran su checkbox (de solo lectura, ya que editar una tarea transcluida no
@@ -267,14 +271,26 @@ defecto, o el color que defina el tema de Obsidian vía `--text-highlight-bg`),
 igual que en Obsidian. Los signos `==` se ocultan salvo en la línea activa o en
 modo fuente, igual que los marcadores de negrita/cursiva/tachado.
 
-## Listas numeradas — renumerado automático
+## Listas numeradas — renumerado automático, sangría con `Tab`
 
 Al borrar (o añadir) un elemento en medio de una lista numerada, el resto de la
 lista se renumera automáticamente para seguir siendo consecutiva — por ejemplo,
 borrar el punto "2." de una lista 1/2/3 convierte el antiguo "3." en "2." sin
 tener que tocarlo a mano. Respeta el número con el que empezó la lista (si
 empieza en "5.", sigue empezando ahí) y no afecta a sublistas anidadas con su
-propio nivel de numeración.
+propio nivel de numeración — cada nivel de anidamiento se renumera de forma
+independiente.
+
+Con el cursor en una línea de lista (numerada o de viñetas), `Tab` la anida
+como sublista bajo el elemento hermano justo encima (numerada: reinicia en
+"1.", uniéndose a la numeración de esa sublista si ya existe una ahí debajo;
+de viñetas: conserva su propio marcador). `Mayús+Tab` hace lo contrario, la
+saca de la sublista. En ambos casos, la lista de la que sale y la sublista en
+la que entra se renumeran automáticamente para no dejar huecos.
+
+El color e indentación de los marcadores de lista respetan las variables del
+tema de Obsidian cargado (`--list-marker-color`, `--list-indent`) cuando están
+definidas, en vez de un valor fijo.
 
 ## Tareas (`- [ ] ...`) — integración con "Obsidian-like Tasks"
 
@@ -355,6 +371,12 @@ todas esas celdas de una vez (como texto separado por tabulaciones y como una ta
 pegar en Excel/Outlook/Sheets tal cual), y `Ctrl+V` pega el contenido del portapapeles empezando en
 la esquina superior izquierda del rango, ampliando la tabla con filas/columnas nuevas si el
 contenido pegado no cabe.
+
+Con una selección así activa, el clic derecho sobre cualquier celda de ese rango cambia "Eliminar
+fila"/"Eliminar columna" del menú contextual por "Eliminar filas"/"Eliminar columnas" — borra de una
+vez todas las filas (o columnas) que abarca la selección, no solo la de la celda bajo el cursor. Un
+clic derecho fuera de la selección activa, o con una sola celda seleccionada, muestra las opciones
+en singular de siempre.
 
 ### Copiar/pegar como tabla (interoperabilidad con Excel/Outlook)
 
