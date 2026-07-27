@@ -89,6 +89,32 @@
           "type": "number",
           "default": 3000,
           "description": "Milisegundos de inactividad (sin cambios) tras los que la nota se guarda automáticamente en disco. Este autoguardado propio del editor sustituye a files.autoSave para las notas abiertas aquí, evitando el conflicto entre ambos que puede provocar pérdida de texto."
+        },
+        "obsidianLike.highlighterColors": {
+          "type": "array",
+          "default": [
+            { "name": "Amarillo", "color": "#ffd700" },
+            { "name": "Verde", "color": "#a3e635" },
+            { "name": "Azul", "color": "#7dd3fc" },
+            { "name": "Rojo", "color": "#fca5a5" },
+            { "name": "Morado", "color": "#d8b4fe" },
+            { "name": "Naranja", "color": "#fdba74" },
+            { "name": "Cian", "color": "#67e8f9" },
+            { "name": "Rosa", "color": "#f9a8d4" }
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "color": { "type": "string" }
+            }
+          },
+          "description": "Paleta de colores del resaltador de texto (estilo plugin Highlightr), usada por la barra flotante que aparece al seleccionar texto y por el menú contextual. Cada entrada es { name, color }."
+        },
+        "obsidianLike.highlighterUseCssClasses": {
+          "type": "boolean",
+          "default": false,
+          "description": "Si está activo, el resaltador escribe `<mark class=\"hltr-nombre\">` en vez de `<mark style=\"background-color:...\">` (igual que la opción 'use CSS classes' del plugin Highlightr) — útil si prefieres definir los colores vía un snippet CSS del vault en lugar de en línea."
         }
       }
     },

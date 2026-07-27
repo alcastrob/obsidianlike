@@ -1150,6 +1150,12 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     const getFontSize = (): number =>
       vscode.workspace.getConfiguration('editor').get<number>('fontSize', 14);
 
+    const getHighlighterColors = (): Array<{ name: string; color: string }> =>
+      vscode.workspace.getConfiguration('obsidianLike').get('highlighterColors', []);
+
+    const getHighlighterUseCssClasses = (): boolean =>
+      vscode.workspace.getConfiguration('obsidianLike').get<boolean>('highlighterUseCssClasses', false);
+
     const scriptUri = webviewPanel.webview.asWebviewUri(
       vscode.Uri.joinPath(extensionUri, 'out', 'editor.bundle.js')
     );
@@ -1187,7 +1193,9 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       scriptUri.toString(),
       path.basename(document.uri.fsPath, '.md'),
       imgMap,
-      breadcrumb
+      breadcrumb,
+      getHighlighterColors(),
+      getHighlighterUseCssClasses()
     );
 
     // Send initial data after webview is ready.
@@ -1366,6 +1374,14 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
         }
         if (e.affectsConfiguration('obsidianLike.obsidianTheme')) {
           webviewPanel.webview.postMessage({ type: 'theme-css', css: getThemeCss() });
+        }
+        if (e.affectsConfiguration('obsidianLike.highlighterColors') ||
+            e.affectsConfiguration('obsidianLike.highlighterUseCssClasses')) {
+          webviewPanel.webview.postMessage({
+            type: 'highlighter-settings',
+            colors: getHighlighterColors(),
+            useCssClasses: getHighlighterUseCssClasses(),
+          });
         }
       }),
 
@@ -1891,11 +1907,14 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
     scriptUri: string,
     title: string,
     imageMap:  Record<string, string> = {},
-    breadcrumb: Array<{ name: string; fsPath: string }> = []
+    breadcrumb: Array<{ name: string; fsPath: string }> = [],
+    highlighterColors: Array<{ name: string; color: string }> = [],
+    highlighterUseCssClasses = false
   ): string {
     const init = JSON.stringify({
       content, font, codeFont, codeFontSize, fontSize, noteIndex, title, imageMap, breadcrumb,
       recentNotes: recentNoteEntries(),
+      highlighterColors, highlighterUseCssClasses,
     });
     return `<!DOCTYPE html>
 <html lang="es">

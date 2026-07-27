@@ -29,6 +29,26 @@ let noteHistory = init.recentNotes || [];
 let imageMap  = init.imageMap  || {};
 let syncTimer = null;
 
+// ── Highlightr-style highlighting (https://github.com/chetachiezikeuzor/Highlightr-Plugin) ──
+// The Highlightr plugin wraps a selection in `<mark style="background-color: <color>">text</mark>`
+// (or, in its "use CSS classes" mode, `<mark class="hltr-<name>">text</mark>`) — real inline HTML,
+// since a plain `==highlight==` (already supported natively above) has no way to carry an arbitrary
+// per-instance color. Colors are user-configurable (`obsidianLike.highlighterColors`), pushed down
+// from the host via window.__vaultInitial the same way noteIndex/imageMap already are, and kept live
+// via the 'highlighter-settings' message (see its handler further down) on a config change.
+const DEFAULT_HIGHLIGHTER_COLORS = [
+  { name: 'Amarillo', color: '#ffd700' },
+  { name: 'Verde',    color: '#a3e635' },
+  { name: 'Azul',     color: '#7dd3fc' },
+  { name: 'Rojo',     color: '#fca5a5' },
+  { name: 'Morado',   color: '#d8b4fe' },
+  { name: 'Naranja',  color: '#fdba74' },
+  { name: 'Cian',     color: '#67e8f9' },
+  { name: 'Rosa',     color: '#f9a8d4' },
+];
+let highlighterColors = (init.highlighterColors && init.highlighterColors.length) ? init.highlighterColors : DEFAULT_HIGHLIGHTER_COLORS;
+let highlighterUseCssClasses = !!init.highlighterUseCssClasses;
+
 // Hanging-indent width reserved for a list item's own marker, used by both
 // the CSS below and the ListItem/ListMark decoration logic further down.
 // Two deliberately different, tight values (not one shared constant, and not
@@ -129,6 +149,18 @@ const vsTheme = EditorView.theme({
     color: 'var(--text-highlight-fg, inherit)',
     borderRadius: '2px',
     padding: '0 1px',
+  },
+  // Highlightr-style `<mark style="background-color:...">`/`<mark class="hltr-...">`
+  // — the actual color always comes from the document's own inline style (set
+  // by applyHighlight) or, in CSS-class mode, from a `.hltr-<name>` rule this
+  // codebase doesn't generate (matching the reference plugin's own "use CSS
+  // classes" mode, which expects the *user* to supply that CSS via a snippet);
+  // this base class only carries the shape, not any color of its own.
+  '.cm-html-highlight': { borderRadius: '2px', padding: '0 1px' },
+  '.cm-table-menu-swatch': {
+    display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%',
+    marginRight: '7px', verticalAlign: 'middle',
+    border: '1px solid rgba(128,128,128,0.4)',
   },
   // Collapsed table rows (lines 2..N replaced by empty + height:0) — full
   // zeroing rule lives at the end of this stylesheet, see the comment there.
@@ -1196,6 +1228,56 @@ const vsTheme = EditorView.theme({
     paddingTop: '6px !important', paddingBottom: '6px !important',
     marginTop: '4px !important', marginBottom: '8px !important',
   },
+  // ── Callouts (Obsidian `> [!type]`) — a colored card, keyed off
+  // `--callout-color` (an "r, g, b" token triple) set per-line inline in
+  // livePreviewPlugin's callout pass, so one shared class works for every
+  // type instead of one hardcoded class per type. `!important` throughout
+  // for the same reason `.cm-blockquote-line`/`.cm-code-block` need it — a
+  // later-loading Obsidian theme's own generic line/blockquote CSS can
+  // otherwise win the cascade regardless of specificity.
+  '.cm-callout-line': {
+    background: 'rgba(var(--callout-color, 158, 158, 158), 0.1) !important',
+    borderLeft: '4px solid rgb(var(--callout-color, 158, 158, 158)) !important',
+    paddingLeft: '14px !important',
+    paddingRight: '10px !important',
+    boxShadow: 'var(--callout-nest-shadow, none) !important',
+  },
+  '.cm-callout-line-first': { borderRadius: '6px 6px 0 0 !important', paddingTop: '8px !important', marginTop: '4px !important' },
+  '.cm-callout-line-last': { borderRadius: '0 0 6px 6px !important', paddingBottom: '8px !important', marginBottom: '8px !important' },
+  '.cm-callout-line-solo': {
+    borderRadius: '6px !important',
+    paddingTop: '8px !important', paddingBottom: '8px !important',
+    marginTop: '4px !important', marginBottom: '8px !important',
+  },
+  // This span is the widget's own root DOM, sitting inline in the text flow
+  // (before the real title text, when there's a custom title — see
+  // CalloutHeaderWidget). With no vertical-align set, an inline-flex box
+  // defaults to baseline alignment — and since neither it nor its icon child
+  // has a real text baseline, the browser synthesizes one from the box's own
+  // bottom edge, which plants the icon's bottom at the surrounding text's
+  // baseline and lets the rest of its ~18px height stick up well above the
+  // ~14px text's cap-height. Reported directly against a screenshot showing
+  // the icon floating noticeably above the title text. `middle` aligns the
+  // box's own vertical center with a point ~half an x-height above the
+  // baseline instead — the standard fix for an inline icon next to text.
+  '.cm-callout-header-inline': {
+    display: 'inline-flex', alignItems: 'center', fontWeight: '600', verticalAlign: 'middle',
+  },
+  // margin-right (not a flex `gap` on the parent) so the spacing is correct
+  // whether the title renders *inside* this same widget (no custom title —
+  // gap would work there) or as separate real document text *after* the
+  // widget (a custom title — gap can't reach across that boundary at all,
+  // since gap only spaces a flex container's own children).
+  '.cm-callout-icon': { display: 'inline-flex', width: '18px', height: '18px', flex: '0 0 auto', marginRight: '6px' },
+  '.cm-callout-icon-svg': { width: '100%', height: '100%' },
+  '.cm-callout-title': { fontWeight: '600' },
+  '.cm-callout-fold': {
+    display: 'inline-flex', width: '15px', height: '15px', marginLeft: '6px',
+    verticalAlign: 'middle', cursor: 'pointer',
+    transition: 'transform 0.1s ease', transform: 'rotate(90deg)',
+  },
+  '.cm-callout-fold.is-collapsed': { transform: 'rotate(0deg)' },
+  '.cm-callout-fold svg': { width: '100%', height: '100%' },
   '.cm-md-table-wrap': { overflowX: 'auto', margin: '4px 0 8px' },
   '.cm-md-table': { borderCollapse: 'collapse', width: '100%', fontSize: 'inherit', fontFamily: 'inherit' },
   '.cm-md-table th, .cm-md-table td': {
@@ -1411,6 +1493,16 @@ function renderCell(raw, basePath) {
   // an actual <br> element) rather than showing as literal, escaped "&lt;br&gt;" text. Only this
   // one specific tag shape is let through; every other "<...>" in the raw text stays escaped/inert.
   s = s.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+  // Highlightr-style `<mark>` highlights (see htmlHighlightPlugin's own comment
+  // for the full picture) — same "restore after escaping" trick as <br> above,
+  // so a highlight typed into a task's description/table cell/transcluded
+  // paragraph renders as a real highlighted span here too, not literal escaped
+  // tag text. `&quot;` in the pattern matches the escaped `"` from the initial
+  // HTML-escape above.
+  s = s.replace(/&lt;mark style=&quot;background-color:\s*([^;&]+);?&quot;&gt;([^\n]*?)&lt;\/mark&gt;/gi,
+    (_, color, inner) => `<mark class="cm-html-highlight" style="background-color:${color};">${inner}</mark>`);
+  s = s.replace(/&lt;mark class=&quot;(hltr-[\w-]+)&quot;&gt;([^\n]*?)&lt;\/mark&gt;/gi,
+    (_, cls, inner) => `<mark class="cm-html-highlight ${cls}">${inner}</mark>`);
   // Protect inline code from further processing
   const codes = [];
   s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return `\x00C${codes.length - 1}\x00`; });
@@ -3497,6 +3589,199 @@ function plainBracketFontSizeStyle() {
   return '';
 }
 
+// ── Callouts (Obsidian-style `> [!type]` blockquotes) ────────────────────────
+// https://obsidian.md/help/callouts — a callout is an ordinary blockquote
+// whose own first line (after its own "> " marker) is "[!type]", optionally
+// followed by "+"/"-" (foldable, default expanded/collapsed) and a custom
+// title. Detection is a separate, whole-document pass (collectCallouts,
+// below) — same reasoning as collectHeadings/foldPlugin: the actual
+// rendering hook lives inside livePreviewPlugin's existing (viewport-scoped)
+// Blockquote handling, but fold state/atomicRanges/moveVerticalByLine all
+// need the full picture regardless of what's currently scrolled into view.
+const CALLOUT_RE = /^\[!([A-Za-z][\w-]*)\]([+-])?[ \t]*(.*)$/;
+
+// Canonical type -> { color: "r, g, b", icon }. Colors/icons mirror
+// Obsidian's own built-in callout defaults; aliases per the spec page. An
+// unrecognized type still renders as a callout (per spec) using the "note"
+// appearance, with its own literal typed name (title-cased) as the default
+// title instead of "Note".
+const CALLOUT_DEFS = {
+  note:     { color: '68, 138, 255',  icon: 'pencil' },
+  abstract: { color: '0, 191, 188',   icon: 'clipboard-list', aliases: ['summary', 'tldr'] },
+  info:     { color: '8, 109, 221',   icon: 'info' },
+  todo:     { color: '0, 122, 255',   icon: 'circle-check' },
+  tip:      { color: '0, 191, 188',   icon: 'flame', aliases: ['hint', 'important'] },
+  success:  { color: '8, 185, 78',    icon: 'check', aliases: ['check', 'done'] },
+  question: { color: '236, 117, 0',   icon: 'help-circle', aliases: ['help', 'faq'] },
+  warning:  { color: '236, 117, 0',   icon: 'alert-triangle', aliases: ['caution', 'attention'] },
+  failure:  { color: '233, 49, 71',   icon: 'x', aliases: ['fail', 'missing'] },
+  danger:   { color: '233, 49, 71',   icon: 'zap', aliases: ['error'] },
+  bug:      { color: '233, 49, 71',   icon: 'bug' },
+  example:  { color: '120, 82, 238',  icon: 'list' },
+  quote:    { color: '158, 158, 158', icon: 'quote', aliases: ['cite'] },
+};
+const CALLOUT_ALIASES = {};
+for (const key of Object.keys(CALLOUT_DEFS)) {
+  CALLOUT_ALIASES[key] = key;
+  for (const a of CALLOUT_DEFS[key].aliases || []) CALLOUT_ALIASES[a] = key;
+}
+function resolveCalloutType(rawType) {
+  const canonical = CALLOUT_ALIASES[rawType.toLowerCase()];
+  return canonical ? { canonical, ...CALLOUT_DEFS[canonical] } : { canonical: null, ...CALLOUT_DEFS.note };
+}
+function defaultCalloutTitle(rawType, canonical) {
+  const t = canonical || rawType;
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+// Small hand-drawn 24x24 stroke icon set — this bundle has no icon-library
+// dependency (stays fully offline/self-contained), so these are simplified
+// approximations rather than a pixel-perfect Lucide reproduction; good
+// enough to be recognizable per type.
+const CALLOUT_ICON_PATHS = {
+  pencil:           '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  'clipboard-list': '<rect x="4" y="4" width="16" height="18" rx="2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 12h6M9 16h6M9 8h2"/>',
+  info:             '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  'circle-check':   '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+  flame:            '<path d="M8.5 14.5a2.5 2.5 0 0 0 2.5-2.5c0-1.38-.5-2-1-3-1.07-2.14-.22-4.05 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.15.43-2.29 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+  check:            '<path d="M20 6 9 17l-5-5"/>',
+  'help-circle':    '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
+  'alert-triangle': '<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  x:                '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  zap:              '<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
+  bug:              '<ellipse cx="12" cy="14" rx="6" ry="7"/><path d="M9 3.5 12 7l3-3.5"/><path d="M12 7v13"/><path d="M4 12H2M22 12h-2M4.5 18 3 20M19.5 18l1.5 2M4.5 8 3 6M19.5 8l1.5-2"/>',
+  list:             '<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/>',
+  quote:            '<path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/><path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/>',
+};
+function calloutIconSvgMarkup(iconName) {
+  const inner = CALLOUT_ICON_PATHS[iconName] || CALLOUT_ICON_PATHS.pencil;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ` +
+    `stroke-linecap="round" stroke-linejoin="round" class="cm-callout-icon-svg">${inner}</svg>`;
+}
+
+// Rendered in place of the "[!type]+/-" marker (and the default title, when
+// no custom one is given — there's no text run in the document to attach a
+// mark decoration to in that case, so the widget renders it itself).
+class CalloutHeaderWidget extends WidgetType {
+  constructor(icon, color, titleText) { super(); this.icon = icon; this.color = color; this.titleText = titleText; }
+  eq(o) { return this.icon === o.icon && this.color === o.color && this.titleText === o.titleText; }
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = 'cm-callout-header-inline';
+    span.contentEditable = 'false';
+    span.style.color = `rgb(${this.color})`;
+    const icon = document.createElement('span');
+    icon.className = 'cm-callout-icon';
+    icon.innerHTML = calloutIconSvgMarkup(this.icon);
+    span.appendChild(icon);
+    if (this.titleText) {
+      const title = document.createElement('span');
+      title.className = 'cm-callout-title';
+      title.textContent = this.titleText;
+      span.appendChild(title);
+    }
+    return span;
+  }
+  ignoreEvent() { return false; }
+}
+
+// ── Callout folding ("+"/"-" indicator, click-to-toggle) ─────────────────────
+// Mirrors the heading-fold machinery (foldedSet/foldEffect, further down)
+// but a callout's *default* folded state comes from its own "+"/"-" marker
+// rather than always starting expanded, so only explicit user overrides are
+// stored here (Blockquote node.from -> folded boolean) — a callout with no
+// entry just uses its own marker's default on every rebuild.
+const calloutFoldEffect = StateEffect.define();
+const calloutFoldOverride = new Map();
+function calloutFoldedState(pos, foldChar) {
+  return calloutFoldOverride.has(pos) ? calloutFoldOverride.get(pos) : foldChar === '-';
+}
+
+class CalloutFoldToggle extends WidgetType {
+  constructor(pos, folded, color) { super(); this.pos = pos; this.folded = folded; this.color = color; }
+  eq(o) { return this.pos === o.pos && this.folded === o.folded && this.color === o.color; }
+  toDOM() {
+    const outer = document.createElement('span');
+    outer.className = 'cm-callout-fold' + (this.folded ? ' is-collapsed' : '');
+    outer.style.color = `rgb(${this.color})`;
+    outer.contentEditable = 'false';
+    outer.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+      'stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+    const pos = this.pos, folded = this.folded;
+    outer.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    outer.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      calloutFoldOverride.set(pos, !folded);
+      if (currentView) currentView.dispatch({ effects: calloutFoldEffect.of(pos) });
+    });
+    return outer;
+  }
+  ignoreEvent() { return false; }
+}
+
+// One entry per Blockquote node whose own first line is "[!type]..." —
+// mirrors collectHeadings' role for foldPlugin, but as its own function
+// since a callout is blockquote-scoped, not a distinct node type lezer
+// itself ever emits.
+function collectCallouts(state) {
+  const out = [];
+  syntaxTree(state).iterate({
+    enter(node) {
+      if (node.name !== 'Blockquote') return;
+      let child = node.node.firstChild;
+      while (child && child.name !== 'QuoteMark') child = child.nextSibling;
+      if (!child) return;
+      const fromLine = state.doc.lineAt(node.from);
+      let bodyStart = child.to;
+      if (state.doc.sliceString(bodyStart, bodyStart + 1) === ' ') bodyStart++;
+      if (bodyStart > fromLine.to) return;
+      const headerText = state.doc.sliceString(bodyStart, fromLine.to);
+      const m = CALLOUT_RE.exec(headerText);
+      if (!m) return;
+      let toLine = state.doc.lineAt(node.to);
+      if (toLine.from === node.to && toLine.number > fromLine.number) {
+        toLine = state.doc.line(toLine.number - 1);
+      }
+      const rawType = m[1];
+      const foldChar = m[2] || null;
+      const rawTitle = (m[3] || '').trim();
+      const resolved = resolveCalloutType(rawType);
+      const titleFrom = bodyStart + (m[0].length - m[3].length);
+      out.push({
+        pos: node.from,
+        fromLineNum: fromLine.number,
+        toLineNum: toLine.number,
+        fromLineTo: fromLine.to,
+        markerFrom: bodyStart,
+        markerTo: rawTitle ? titleFrom : fromLine.to,
+        titleFrom: rawTitle ? titleFrom : -1,
+        titleTo: rawTitle ? fromLine.to : -1,
+        canonical: resolved.canonical, color: resolved.color, icon: resolved.icon,
+        foldChar,
+        foldable: foldChar === '+' || foldChar === '-',
+        title: rawTitle || defaultCalloutTitle(rawType, resolved.canonical),
+        hasCustomTitle: !!rawTitle,
+      });
+    },
+  });
+  out.forEach(c => { c.folded = c.foldable && calloutFoldedState(c.pos, c.foldChar); });
+  return out;
+}
+
+// Character-position spans of every currently-folded callout's own body
+// (everything after its header line through its own extent) — same role as
+// computeFoldedSpans (below) for headings, feeding the same three
+// consumers: rendering collapse, atomicRanges, moveVerticalByLine.
+function computeFoldedCalloutSpans(state, callouts) {
+  callouts = callouts || collectCallouts(state);
+  const spans = [];
+  for (const c of callouts) {
+    if (!c.folded || c.toLineNum <= c.fromLineNum) continue;
+    spans.push({ from: state.doc.line(c.fromLineNum + 1).from, to: state.doc.line(c.toLineNum).to });
+  }
+  return spans;
+}
+
 // Decoration.line() spec that makes a line take zero visual space — used
 // everywhere a whole line needs to disappear: folded heading content,
 // collapsed table rows/```tasks```/frontmatter lines, collapsed ``` fence
@@ -3534,9 +3819,21 @@ function hiddenLineDeco(cls) {
 const livePreviewPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
   update(u) {
+    if (u.docChanged && calloutFoldOverride.size) {
+      // Remap explicit callout-fold overrides through the edit, same
+      // reasoning/mechanism as foldPlugin's own foldedSet remap below.
+      const remapped = new Map();
+      for (const [pos, val] of calloutFoldOverride) {
+        const mp = u.changes.mapPos(pos, 1);
+        if (mp != null) remapped.set(mp, val);
+      }
+      calloutFoldOverride.clear();
+      remapped.forEach((v, k) => calloutFoldOverride.set(k, v));
+    }
     if (u.docChanged || u.selectionSet || u.viewportChanged ||
         syntaxTree(u.startState) !== syntaxTree(u.state) ||
-        u.transactions.some(t => t.effects.some(e => e.is(tasksRebuildEffect) || e.is(dataviewRebuildEffect)))) {
+        u.transactions.some(t => t.effects.some(e =>
+          e.is(tasksRebuildEffect) || e.is(dataviewRebuildEffect) || e.is(calloutFoldEffect)))) {
       this.decorations = this._build(u.view);
     }
   }
@@ -3565,6 +3862,85 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
       // lines and skipping on the (later-visited, nested) duplicate avoids
       // relying on that being safe at all.
       const blockquoteHandledLines = new Set();
+
+      // ── Callouts — precomputed once per rebuild (whole-document, same
+      // reasoning as collectHeadings/foldPlugin) so the tree walk below can
+      // just consult calloutLineStack instead of re-detecting callouts
+      // per-node, and so nested callouts combine into a single Decoration.line
+      // per physical line instead of racing each other for one of CM6's "only
+      // one decoration survives at an identical point" collisions. Order is
+      // outer-first (collectCallouts' own tree walk visits parents before
+      // children), so calloutLineStack's arrays are outer→inner.
+      const calloutList = collectCallouts(state);
+      // A callout's own "[!type]" marker parses as a shortcut-reference Link
+      // node to lezer-markdown — the exact same "any [...] shape looks like a
+      // link" quirk documented on the bare-`[text]`/`.cm-plain-brackets` check
+      // further down this walk — so without this exclusion that check fires on
+      // every callout header too, racing our own marker-replace decoration for
+      // the same span and (when there's a custom title, so the two ranges
+      // aren't identical-length) silently winning the "only one decoration
+      // survives" collision documented throughout this file, leaving the
+      // marker visibly raw. `node.from` for that Link node is exactly the "["
+      // position, i.e. this callout's own `markerFrom`.
+      const calloutMarkerFroms = new Set(calloutList.map(c => c.markerFrom));
+      const calloutLineStack = new Map(); // line number -> descriptor[] (outer -> inner)
+      for (const c of calloutList) {
+        const effTo = c.folded ? c.fromLineNum : c.toLineNum;
+        for (let cln = c.fromLineNum; cln <= effTo; cln++) {
+          if (!calloutLineStack.has(cln)) calloutLineStack.set(cln, []);
+          calloutLineStack.get(cln).push(c);
+        }
+      }
+      for (const c of calloutList) {
+        const headerActive = active.has(c.fromLineNum);
+        // Fold chevron — deliberately not gated by headerActive: togglable
+        // even while the title line is being edited, unlike the icon/title
+        // below (which only render once editing moves off that line).
+        if (c.foldable) {
+          decs.push({ from: c.fromLineTo, to: c.fromLineTo,
+            dec: Decoration.widget({ widget: new CalloutFoldToggle(c.pos, c.folded, c.color), side: 1 }) });
+        }
+        if (!headerActive) {
+          decs.push({ from: c.markerFrom, to: c.markerTo,
+            dec: Decoration.replace({ widget: new CalloutHeaderWidget(c.icon, c.color, c.hasCustomTitle ? '' : c.title) }) });
+          if (c.hasCustomTitle) {
+            decs.push({ from: c.titleFrom, to: c.titleTo,
+              dec: Decoration.mark({ class: 'cm-callout-title', attributes: { style: `color:rgb(${c.color})` } }) });
+          }
+        }
+      }
+      for (const [cln, stack] of calloutLineStack) {
+        const inner = stack[stack.length - 1];
+        const effTo = inner.folded ? inner.fromLineNum : inner.toLineNum;
+        let cls = 'cm-callout-line';
+        if (inner.fromLineNum === effTo) cls += ' cm-callout-line-solo';
+        else if (cln === inner.fromLineNum) cls += ' cm-callout-line-first';
+        else if (cln === effTo) cls += ' cm-callout-line-last';
+        const styleParts = [`--callout-color:${inner.color}`];
+        if (stack.length > 1) {
+          cls += ' cm-callout-nested';
+          const shadows = [];
+          for (let i = 0; i < stack.length - 1; i++) {
+            shadows.push(`inset ${(i + 1) * 5}px 0 0 0 rgba(${stack[i].color}, 0.85)`);
+          }
+          styleParts.push(`--callout-nest-shadow:${shadows.join(',')}`);
+        }
+        const line = state.doc.line(cln);
+        lineDecs.push({ from: line.from,
+          dec: Decoration.line({ class: cls, attributes: { style: styleParts.join(';') } }) });
+      }
+      // Collapse every line within each currently-folded callout's body —
+      // same blank-line-guarded technique as foldPlugin's own heading-fold
+      // collapse (see hiddenLineDeco's own comment for why the guard matters).
+      for (const { from, to } of computeFoldedCalloutSpans(state, calloutList)) {
+        const startLn = state.doc.lineAt(from).number;
+        const endLn = state.doc.lineAt(to).number;
+        for (let cln = startLn; cln <= endLn; cln++) {
+          const line = state.doc.line(cln);
+          if (line.to > line.from) decs.push({ from: line.from, to: line.to, dec: Decoration.replace({}) });
+          lineDecs.push({ from: line.from, dec: hiddenLineDeco('cm-fold-hidden') });
+        }
+      }
 
       // ── YAML frontmatter → "Propiedades" panel ─────────────────────────────
       // Computed unconditionally (not viewport-gated like the tree-walk below)
@@ -4021,6 +4397,10 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               for (let bln = fromLine.number; bln <= toLine.number; bln++) {
                 if (blockquoteHandledLines.has(bln)) continue;
                 blockquoteHandledLines.add(bln);
+                // A callout (or a plain quote nested inside one) gets its own
+                // box styling from the dedicated callout pass above instead —
+                // see collectCallouts/calloutLineStack, just above this walk.
+                if (calloutLineStack.has(bln)) continue;
                 const line = state.doc.line(bln);
                 let cls = 'cm-blockquote-line';
                 if (fromLine.number === toLine.number) cls += ' cm-blockquote-line-solo';
@@ -4100,7 +4480,8 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               !(state.doc.sliceString(node.from - 1, node.from) === '[' &&
                 state.doc.sliceString(node.to, node.to + 1) === ']') &&
               state.doc.sliceString(node.to - 1, node.to) !== ')' &&
-              !(!activeLinkClosed && activeLinkFrom === node.from - 1)) {
+              !(!activeLinkClosed && activeLinkFrom === node.from - 1) &&
+              !calloutMarkerFroms.has(node.from)) {
             decs.push({ from: node.from, to: node.to, dec: Decoration.mark({
               class: 'cm-plain-brackets',
               attributes: { style: plainBracketFontSizeStyle(node) },
@@ -4347,6 +4728,163 @@ const highlightMarkPlugin = ViewPlugin.fromClass(class {
     return builder.finish();
   }
 }, { decorations: v => v.decorations });
+
+// ── Highlightr-style `<mark>` rendering + apply/remove ────────────────────────
+function highlighterSlug(name) {
+  // Strip combining diacritical marks (U+0300-U+036F) by character code
+  // rather than a regex Unicode-range literal — this file has a documented
+  // history of literal Unicode bytes silently corrupting in source under
+  // concurrent edits (see the dataviewCacheKey NUL-byte gotcha elsewhere in
+  // this file), so an explicit charCodeAt check avoids relying on any such
+  // literal surviving intact at all.
+  const decomposed = String(name).toLowerCase().normalize('NFD');
+  let stripped = '';
+  for (const ch of decomposed) {
+    const code = ch.codePointAt(0);
+    if (code < 0x0300 || code > 0x036f) stripped += ch;
+  }
+  return stripped.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'color';
+}
+// Matches exactly what applyHighlight (below) writes: either a style-based mark
+// (this codebase's own default) or a class-based one (obsidianLike.highlighterUseCssClasses —
+// the Highlightr-plugin-compatible alternative). Single-line only, same scope as ==highlight==.
+const HTML_HIGHLIGHT_RE_SRC = '<mark(?: style="background-color:\\s*([^;"]+);?"| class="(hltr-[\\w-]+)")[^>]*>([^\\n]*?)<\\/mark>';
+
+const htmlHighlightPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this._build(view); }
+  update(u) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged) { this.decorations = this._build(u.view); }
+  }
+  _build(view) {
+    const { state } = view;
+    const active = getActiveLines(state);
+    const { from: vf, to: vt } = view.viewport;
+    const str = state.doc.sliceString(vf, vt);
+    const re = new RegExp(HTML_HIGHLIGHT_RE_SRC, 'gi');
+    const all = [];
+    let m;
+    while ((m = re.exec(str)) !== null) {
+      const mFrom = vf + m.index;
+      const mTo   = mFrom + m[0].length;
+      const openLen = m[0].indexOf('>') + 1;
+      const innerFrom = mFrom + openLen;
+      const innerTo   = mTo - '</mark>'.length;
+      if (innerTo <= innerFrom) continue;
+      const ln = state.doc.lineAt(mFrom).number;
+      const spec = { class: 'cm-html-highlight' + (m[2] ? ' ' + m[2] : '') };
+      if (m[1]) spec.attributes = { style: `background-color:${m[1]};` };
+      all.push({ from: innerFrom, to: innerTo, dec: Decoration.mark(spec) });
+      if (!active.has(ln)) {
+        all.push({ from: mFrom,     to: innerFrom, dec: Decoration.replace({}) });
+        all.push({ from: innerTo,   to: mTo,       dec: Decoration.replace({}) });
+      }
+    }
+    all.sort((a, b) => a.from - b.from || a.to - b.to);
+    const builder = new RangeSetBuilder();
+    let lastTo = -1;
+    for (const { from, to, dec } of all) {
+      if (from !== to && from < lastTo) continue;
+      try { builder.add(from, to, dec); } catch (_) {}
+      if (to > lastTo) lastTo = to;
+    }
+    return builder.finish();
+  }
+}, { decorations: v => v.decorations });
+
+// Finds a `<mark>...</mark>` whose *inner* content exactly matches [from, to) —
+// i.e. the current selection sits precisely on an existing highlight's text —
+// used so re-applying the same color toggles it off instead of double-wrapping,
+// and so a right-click / toolbar can offer "Quitar resaltado" only when relevant.
+function findEnclosingMark(state, from, to) {
+  const line = state.doc.lineAt(from);
+  if (state.doc.lineAt(to).number !== line.number) return null; // marks are single-line only here
+  const re = new RegExp(HTML_HIGHLIGHT_RE_SRC, 'gi');
+  let m;
+  while ((m = re.exec(line.text)) !== null) {
+    const mFrom = line.from + m.index;
+    const mTo   = mFrom + m[0].length;
+    const openLen = m[0].indexOf('>') + 1;
+    const innerFrom = mFrom + openLen;
+    const innerTo   = mTo - '</mark>'.length;
+    if (innerFrom === from && innerTo === to) {
+      return { mFrom, mTo, innerFrom, innerTo, color: m[1] || null, cls: m[2] || null };
+    }
+  }
+  return null;
+}
+
+function highlightOpenTag(color, name) {
+  return highlighterUseCssClasses
+    ? `<mark class="hltr-${highlighterSlug(name)}">`
+    : `<mark style="background-color:${color};">`;
+}
+
+// Applies `color`/`name` to the current selection: wraps it in a fresh
+// <mark>, rewrites an already-wrapped selection's color in place, or — if
+// the selection is already wrapped in *this same* color — unwraps it
+// (toggle off), matching the reference plugin's own "click again to remove"
+// behavior described in its README.
+function applyHighlight(view, color, name) {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (sel.empty) return;
+  const existing = findEnclosingMark(state, sel.from, sel.to);
+  const cls = 'hltr-' + highlighterSlug(name);
+  const isSameColor = existing && (highlighterUseCssClasses
+    ? existing.cls === cls
+    : !!existing.color && existing.color.trim().toLowerCase() === color.toLowerCase());
+  let changes, newSel;
+  if (existing && isSameColor) {
+    const inner = state.sliceDoc(existing.innerFrom, existing.innerTo);
+    changes = { from: existing.mFrom, to: existing.mTo, insert: inner };
+    newSel = EditorSelection.range(existing.mFrom, existing.mFrom + inner.length);
+  } else if (existing) {
+    const openTag = highlightOpenTag(color, name);
+    changes = { from: existing.mFrom, to: existing.innerFrom, insert: openTag };
+    const delta = openTag.length - (existing.innerFrom - existing.mFrom);
+    newSel = EditorSelection.range(existing.innerFrom + delta, existing.innerTo + delta);
+  } else {
+    const openTag = highlightOpenTag(color, name);
+    const text = state.sliceDoc(sel.from, sel.to);
+    changes = { from: sel.from, to: sel.to, insert: openTag + text + '</mark>' };
+    newSel = EditorSelection.range(sel.from + openTag.length, sel.from + openTag.length + text.length);
+  }
+  view.dispatch({ changes, selection: newSel, userEvent: 'input.highlight' });
+  view.focus();
+}
+
+function removeHighlight(view) {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (sel.empty) return;
+  const existing = findEnclosingMark(state, sel.from, sel.to);
+  if (!existing) return;
+  const inner = state.sliceDoc(existing.innerFrom, existing.innerTo);
+  view.dispatch({
+    changes: { from: existing.mFrom, to: existing.mTo, insert: inner },
+    selection: EditorSelection.range(existing.mFrom, existing.mFrom + inner.length),
+    userEvent: 'input.highlight',
+  });
+  view.focus();
+}
+
+// Items for the mouseup-triggered floating toolbar (see linkClickHandler's own
+// mouseup handler) — one swatch per configured color, plus "Quitar resaltado"
+// when the selection already sits on an existing highlight. The right-click
+// context menu (tableContextMenuHandler) builds the same shape inline for its
+// own keyboard-selection-reachable case, rather than sharing this — its list
+// already carries Cortar/Copiar/Pegar/table items ahead of these.
+function buildHighlighterMenuItems(view) {
+  const sel = view.state.selection.main;
+  const items = highlighterColors.map(c => ({
+    label: c.name, swatch: c.color, action: () => applyHighlight(view, c.color, c.name),
+  }));
+  if (!sel.empty && findEnclosingMark(view.state, sel.from, sel.to)) {
+    items.push({ separator: true });
+    items.push({ label: 'Quitar resaltado', action: () => removeHighlight(view) });
+  }
+  return items;
+}
 
 // ── Wiki-link plugin ──────────────────────────────────────────────────────────
 // Dispatched by the `note-index` message handler so wikiLinkPlugin re-checks
@@ -5411,7 +5949,18 @@ class TableMenuView {
       }
       const row = document.createElement('div');
       row.className = 'cm-table-menu-item' + (it.disabled ? ' is-disabled' : '');
-      row.textContent = it.label;
+      // `it.swatch` (a CSS color) renders a small color dot before the label —
+      // used by the Highlightr-style "resaltar" entries so each color is
+      // recognizable at a glance, not just by its name.
+      if (it.swatch) {
+        const dot = document.createElement('span');
+        dot.className = 'cm-table-menu-swatch';
+        dot.style.background = it.swatch;
+        row.appendChild(dot);
+        row.appendChild(document.createTextNode(it.label));
+      } else {
+        row.textContent = it.label;
+      }
       if (it.disabled) { menu.appendChild(row); continue; }
       row.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
       row.addEventListener('click', e => {
@@ -5537,16 +6086,31 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
     // Falling back to end-of-document instead means a right-click anywhere in
     // the editor's own content area reliably gets *some* menu from here.
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY }) ?? view.state.doc.length;
-    const hasSelection = !view.state.selection.main.empty;
-    e.preventDefault();
-    menu.show(e.clientX, e.clientY, [
+    const sel = view.state.selection.main;
+    const hasSelection = !sel.empty;
+    const items = [
       { label: 'Cortar', action: () => cutSelection(view), disabled: !hasSelection },
       { label: 'Copiar', action: () => copySelection(view), disabled: !hasSelection },
       { label: 'Pegar',  action: () => pasteAtCursor(view) },
       { separator: true },
       { label: 'Crear tabla', action: () => insertTableTemplate(view, pos) },
       { label: 'Pegar como tabla', action: () => pasteAsTable(view, pos) },
-    ]);
+    ];
+    // Highlightr-style "resaltar" entries — reachable from the right-click
+    // menu (unlike the mouseup-driven floating toolbar below, this also
+    // covers a keyboard-made selection, e.g. Shift+Arrow, which never fires
+    // a mouseup at all). Always shown, like Cortar/Copiar just above —
+    // disabled (not hidden) when there's no selection to act on, so the
+    // feature stays discoverable from this menu even before selecting
+    // anything, rather than silently not appearing at all.
+    items.push({ separator: true });
+    const existingMark = hasSelection && findEnclosingMark(view.state, sel.from, sel.to);
+    for (const c of highlighterColors) {
+      items.push({ label: c.name, swatch: c.color, disabled: !hasSelection, action: () => applyHighlight(view, c.color, c.name) });
+    }
+    items.push({ label: 'Quitar resaltado', disabled: !existingMark, action: () => removeHighlight(view) });
+    e.preventDefault();
+    menu.show(e.clientX, e.clientY, items);
     return true;
   },
 });
@@ -6259,7 +6823,10 @@ function moveVerticalByLine(view, dir, extend) {
     // the whole reason it exists — see above), so it doesn't inherit that
     // protection for free and needs the same check done here directly,
     // against the same computeFoldedSpans single source of truth.
-    for (const span of computeFoldedSpans(state)) {
+    // Also skip over a folded callout's collapsed body — same reasoning,
+    // same computeFoldedSpans-shaped single source of truth (see
+    // computeFoldedCalloutSpans's own comment).
+    for (const span of [...computeFoldedSpans(state), ...computeFoldedCalloutSpans(state)]) {
       const spanFromLine = state.doc.lineAt(span.from).number;
       const spanToLine = state.doc.lineAt(span.to).number;
       if (targetLineNum >= spanFromLine && targetLineNum <= spanToLine) {
@@ -6562,6 +7129,25 @@ const linkClickHandler = EditorView.domEventHandlers({
     view.plugin(hoverPreviewPlugin)?.leaveLink();
     return false;
   },
+  // Highlightr-style floating toolbar: pops up automatically after a mouse
+  // drag leaves a non-empty selection, mirroring the plugin's own bubble-menu
+  // UX (the right-click menu above covers the keyboard-selection case, e.g.
+  // Shift+Arrow, which never fires a mouseup at all). Deferred a tick so the
+  // browser/CM6 have fully settled the selection this same mouseup produced
+  // before reading it — reading synchronously here saw a stale (sometimes
+  // still-empty) selection in testing. Never claims the event.
+  mouseup(e, view) {
+    if (view.state.selection.main.empty) return false;
+    const clientX = e.clientX, clientY = e.clientY;
+    setTimeout(() => {
+      const sel = view.state.selection.main;
+      if (sel.empty) return;
+      const menu = view.plugin(tableMenuPlugin);
+      if (!menu) return;
+      menu.show(clientX, clientY, buildHighlighterMenuItems(view));
+    }, 0);
+    return false;
+  },
 });
 
 // ── Heading fold ──────────────────────────────────────────────────────────────
@@ -6760,7 +7346,13 @@ const foldPlugin = ViewPlugin.fromClass(class {
 // this same computeFoldedSpans.
 const foldAtomicRanges = EditorView.atomicRanges.of(view => {
   const builder = new RangeSetBuilder();
-  for (const { from, to } of computeFoldedSpans(view.state)) {
+  // Folded headings and folded callouts share the same atomic-range
+  // treatment (see computeFoldedCalloutSpans' own comment) — merged and
+  // sorted into one facet rather than two, since RangeSetBuilder requires
+  // strictly ordered inserts.
+  const spans = [...computeFoldedSpans(view.state), ...computeFoldedCalloutSpans(view.state)]
+    .sort((a, b) => a.from - b.from || a.to - b.to);
+  for (const { from, to } of spans) {
     if (to > from) { try { builder.add(from, to, Decoration.replace({})); } catch (_) {} }
   }
   return builder.finish();
@@ -7328,7 +7920,7 @@ function createEditor(parent, content) {
       // rebuild for this same transaction already sees the fresh activation
       // state — see the comment above wikiLinkActivationTracker's definition.
       wikiLinkActivationTracker,
-      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]),
+      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]),
       foldPlugin,
       foldAtomicRanges,
       orderedListRenumberPlugin,
@@ -7519,7 +8111,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]
+      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);
@@ -7650,6 +8242,14 @@ window.addEventListener('message', ev => {
       // requestMeasure() call above. Re-measure so drawSelection() (and cursor
       // placement) don't stay pinned to the old, now-stale metrics.
       view.requestMeasure();
+      break;
+    case 'highlighter-settings':
+      // Live update on a `obsidianLike.highlighterColors`/`...UseCssClasses`
+      // config change — no reload needed, since these are only ever read at
+      // toolbar/menu-build time (buildHighlighterMenuItems) or at write time
+      // (applyHighlight), not baked into any already-built decoration.
+      if (msg.colors && msg.colors.length) highlighterColors = msg.colors;
+      if (msg.useCssClasses !== undefined) highlighterUseCssClasses = !!msg.useCssClasses;
       break;
     case 'theme-css': {
       let st = document.getElementById('__obsidian-theme');
