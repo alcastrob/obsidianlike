@@ -6943,6 +6943,21 @@ function findUrlAtPos(view, pos) {
   return url && /^https?:\/\//.test(url) ? url : null;
 }
 
+// findUrlAtPos is driven purely by a resolved document position, not by hit-testing
+// a real DOM element the way the .cm-wiki-link/.cm-md-link/etc. checks below are —
+// so it can't tell "the click landed on this character" apart from "posAtCoords
+// clamped an out-of-bounds click onto the nearest character." The clearest case:
+// clicking in the blank area below the document's last line, when that line is a
+// bare URL — posAtCoords clamps the click onto that line (commonly right at its
+// end), so findUrlAtPos happily reports a URL even though the pointer was visibly
+// below the text, not on it. Guards that check by requiring the click's own Y
+// coordinate to actually fall inside the resolved position's rendered row.
+function clickResolvesOnRow(view, pos, clientY) {
+  const coords = view.coordsAtPos(pos);
+  if (!coords) return true;
+  return clientY >= coords.top && clientY <= coords.bottom;
+}
+
 function isWikiLinkEl(target, editorDom) {
   let el = target;
   while (el && el !== editorDom) {
@@ -7007,7 +7022,7 @@ const linkClickHandler = EditorView.domEventHandlers({
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
-    if (findUrlAtPos(view, pos)) { e.preventDefault(); return true; }
+    if (clickResolvesOnRow(view, pos, e.clientY) && findUrlAtPos(view, pos)) { e.preventDefault(); return true; }
     return false;
   },
   // click: fire the action
@@ -7104,7 +7119,7 @@ const linkClickHandler = EditorView.domEventHandlers({
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
-    const url = findUrlAtPos(view, pos);
+    const url = clickResolvesOnRow(view, pos, e.clientY) ? findUrlAtPos(view, pos) : null;
     if (url) {
       e.preventDefault();
       vscode.postMessage({ type: 'open-url', url });
