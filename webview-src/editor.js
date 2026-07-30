@@ -988,6 +988,23 @@ const vsTheme = EditorView.theme({
     margin: '4px 0',
     background: 'var(--vscode-editorWidget-border, rgba(128,128,128,0.25))',
   },
+  // A menu item that opens a nested flyout (e.g. "Highlights") instead of
+  // running an action directly — the caret sits at the row's own right edge.
+  '.cm-table-menu-item.has-submenu': {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  '.cm-table-menu-caret': {
+    marginLeft: '14px',
+    opacity: '0.6',
+    fontSize: '0.85em',
+  },
+  // The nested flyout itself is just another `.cm-table-menu`, positioned by
+  // `TableMenuView._openSubmenu` relative to the row that opened it.
+  '.cm-table-menu-submenu': {
+    zIndex: '71',
+  },
   // Multi-cell range selection (drag or Shift-click across table cells) — see
   // applyTableSelectionHighlight/wireCell's own mousedown handling in TableWidget.
   '.cm-table-cell-selected': {
@@ -4868,24 +4885,6 @@ function removeHighlight(view) {
   view.focus();
 }
 
-// Items for the mouseup-triggered floating toolbar (see linkClickHandler's own
-// mouseup handler) — one swatch per configured color, plus "Quitar resaltado"
-// when the selection already sits on an existing highlight. The right-click
-// context menu (tableContextMenuHandler) builds the same shape inline for its
-// own keyboard-selection-reachable case, rather than sharing this — its list
-// already carries Cortar/Copiar/Pegar/table items ahead of these.
-function buildHighlighterMenuItems(view) {
-  const sel = view.state.selection.main;
-  const items = highlighterColors.map(c => ({
-    label: c.name, swatch: c.color, action: () => applyHighlight(view, c.color, c.name),
-  }));
-  if (!sel.empty && findEnclosingMark(view.state, sel.from, sel.to)) {
-    items.push({ separator: true });
-    items.push({ label: 'Quitar resaltado', action: () => removeHighlight(view) });
-  }
-  return items;
-}
-
 // ── Wiki-link plugin ──────────────────────────────────────────────────────────
 // Dispatched by the `note-index` message handler so wikiLinkPlugin re-checks
 // which links resolve — unlike docChanged/selectionSet/viewportChanged, a
@@ -5922,22 +5921,34 @@ class TableMenuView {
   constructor(view) {
     this.view = view;
     this.dom = null;
-    this._onDocMouseDown = e => { if (this.dom && !this.dom.contains(e.target)) this.hide(); };
+    this.submenuDom = null;
+    this._onDocMouseDown = e => {
+      if (this.dom && !this.dom.contains(e.target) && !(this.submenuDom && this.submenuDom.contains(e.target))) this.hide();
+    };
     this._onDocKeyDown = e => { if (e.key === 'Escape') this.hide(); };
   }
   destroy() { this.hide(); }
   hide() {
+    this._closeSubmenu();
     if (!this.dom) return;
     this.dom.remove();
     this.dom = null;
     document.removeEventListener('mousedown', this._onDocMouseDown, true);
     document.removeEventListener('keydown', this._onDocKeyDown, true);
   }
-  // `items`: Array<{ label, action, disabled? } | { separator: true }>.
-  // `clientX`/`clientY` are viewport coordinates from the triggering
-  // contextmenu event.
-  show(clientX, clientY, items) {
-    this.hide();
+  _closeSubmenu() {
+    if (this.submenuDom) { this.submenuDom.remove(); this.submenuDom = null; }
+  }
+  // Builds one menu level's DOM — shared by the top-level menu and a nested
+  // submenu flyout (see `_openSubmenu`) — from `items`:
+  // Array<{ label, action, disabled? } | { label, items } | { separator: true }>.
+  // A `{ label, items }` entry (no `action` of its own) opens a nested flyout
+  // on hover instead of running anything directly — used for the "Highlights"
+  // submenu grouping the color entries + "Quitar resaltado" (see
+  // tableContextMenuHandler's generic branch). `onAccept` runs whenever any
+  // leaf item's own action fires, at any nesting depth — it's always the same
+  // callback (closing the *entire* menu tree), passed down unchanged.
+  _buildMenu(items, onAccept) {
     const menu = document.createElement('div');
     menu.className = 'cm-table-menu';
     for (const it of items) {
@@ -5948,7 +5959,7 @@ class TableMenuView {
         continue;
       }
       const row = document.createElement('div');
-      row.className = 'cm-table-menu-item' + (it.disabled ? ' is-disabled' : '');
+      row.className = 'cm-table-menu-item' + (it.disabled ? ' is-disabled' : '') + (it.items ? ' has-submenu' : '');
       // `it.swatch` (a CSS color) renders a small color dot before the label —
       // used by the Highlightr-style "resaltar" entries so each color is
       // recognizable at a glance, not just by its name.
@@ -5959,17 +5970,50 @@ class TableMenuView {
         row.appendChild(dot);
         row.appendChild(document.createTextNode(it.label));
       } else {
-        row.textContent = it.label;
+        row.appendChild(document.createTextNode(it.label));
+      }
+      if (it.items) {
+        const caret = document.createElement('span');
+        caret.className = 'cm-table-menu-caret';
+        caret.textContent = '▸';
+        row.appendChild(caret);
       }
       if (it.disabled) { menu.appendChild(row); continue; }
       row.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
-      row.addEventListener('click', e => {
-        e.preventDefault(); e.stopPropagation();
-        this.hide();
-        it.action();
-      });
+      if (it.items) {
+        row.addEventListener('mouseenter', () => this._openSubmenu(row, it.items, onAccept));
+      } else {
+        row.addEventListener('mouseenter', () => this._closeSubmenu());
+        row.addEventListener('click', e => {
+          e.preventDefault(); e.stopPropagation();
+          onAccept();
+          it.action();
+        });
+      }
       menu.appendChild(row);
     }
+    return menu;
+  }
+  _openSubmenu(parentRow, subItems, onAccept) {
+    this._closeSubmenu();
+    const sub = this._buildMenu(subItems, onAccept);
+    sub.classList.add('cm-table-menu-submenu');
+    this.view.dom.appendChild(sub);
+    const editorRect = this.view.dom.getBoundingClientRect();
+    const parentRect = parentRow.getBoundingClientRect();
+    const subRect = sub.getBoundingClientRect();
+    let left = parentRect.right - editorRect.left - 2;
+    if (left + subRect.width > editorRect.width) left = Math.max(0, parentRect.left - editorRect.left - subRect.width + 2);
+    let top = parentRect.top - editorRect.top;
+    if (top + subRect.height > editorRect.height) top = Math.max(0, editorRect.height - subRect.height);
+    sub.style.left = left + 'px';
+    sub.style.top  = top + 'px';
+    this.submenuDom = sub;
+  }
+  // `clientX`/`clientY` are viewport coordinates from the triggering contextmenu event.
+  show(clientX, clientY, items) {
+    this.hide();
+    const menu = this._buildMenu(items, () => this.hide());
     this.view.dom.appendChild(menu);
 
     // Called from a domEventHandlers callback (contextmenu), not from CM6's own
@@ -6096,19 +6140,25 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       { label: 'Crear tabla', action: () => insertTableTemplate(view, pos) },
       { label: 'Pegar como tabla', action: () => pasteAsTable(view, pos) },
     ];
-    // Highlightr-style "resaltar" entries — reachable from the right-click
-    // menu (unlike the mouseup-driven floating toolbar below, this also
-    // covers a keyboard-made selection, e.g. Shift+Arrow, which never fires
-    // a mouseup at all). Always shown, like Cortar/Copiar just above —
-    // disabled (not hidden) when there's no selection to act on, so the
-    // feature stays discoverable from this menu even before selecting
-    // anything, rather than silently not appearing at all.
-    items.push({ separator: true });
-    const existingMark = hasSelection && findEnclosingMark(view.state, sel.from, sel.to);
-    for (const c of highlighterColors) {
-      items.push({ label: c.name, swatch: c.color, disabled: !hasSelection, action: () => applyHighlight(view, c.color, c.name) });
+    // Highlightr-style "resaltar" entries — reachable only from this
+    // right-click menu (there is no automatic mouseup-triggered popup on
+    // selection; that was reported as intrusive and removed) — grouped into
+    // their own "Highlights" submenu rather than listed flat alongside
+    // Cortar/Copiar/Pegar/Crear tabla, so the top level menu stays short
+    // regardless of how many colors are configured. Only added when the menu
+    // already has something else in it — requested directly, so a right-click
+    // never surfaces a menu whose only content is this submenu. Disabled (not
+    // hidden) when there's no selection to act on, so the feature stays
+    // discoverable even before selecting anything.
+    if (items.length > 0) {
+      const existingMark = hasSelection && findEnclosingMark(view.state, sel.from, sel.to);
+      const highlightItems = highlighterColors.map(c => ({
+        label: c.name, swatch: c.color, disabled: !hasSelection, action: () => applyHighlight(view, c.color, c.name),
+      }));
+      highlightItems.push({ label: 'Quitar resaltado', disabled: !existingMark, action: () => removeHighlight(view) });
+      items.push({ separator: true });
+      items.push({ label: 'Highlights', items: highlightItems });
     }
-    items.push({ label: 'Quitar resaltado', disabled: !existingMark, action: () => removeHighlight(view) });
     e.preventDefault();
     menu.show(e.clientX, e.clientY, items);
     return true;
@@ -7142,25 +7192,6 @@ const linkClickHandler = EditorView.domEventHandlers({
   },
   mouseleave(e, view) {
     view.plugin(hoverPreviewPlugin)?.leaveLink();
-    return false;
-  },
-  // Highlightr-style floating toolbar: pops up automatically after a mouse
-  // drag leaves a non-empty selection, mirroring the plugin's own bubble-menu
-  // UX (the right-click menu above covers the keyboard-selection case, e.g.
-  // Shift+Arrow, which never fires a mouseup at all). Deferred a tick so the
-  // browser/CM6 have fully settled the selection this same mouseup produced
-  // before reading it — reading synchronously here saw a stale (sometimes
-  // still-empty) selection in testing. Never claims the event.
-  mouseup(e, view) {
-    if (view.state.selection.main.empty) return false;
-    const clientX = e.clientX, clientY = e.clientY;
-    setTimeout(() => {
-      const sel = view.state.selection.main;
-      if (sel.empty) return;
-      const menu = view.plugin(tableMenuPlugin);
-      if (!menu) return;
-      menu.show(clientX, clientY, buildHighlighterMenuItems(view));
-    }, 0);
     return false;
   },
 });

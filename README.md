@@ -277,6 +277,16 @@ defecto, o el color que defina el tema de Obsidian vía `--text-highlight-bg`),
 igual que en Obsidian. Los signos `==` se ocultan salvo en la línea activa o en
 modo fuente, igual que los marcadores de negrita/cursiva/tachado.
 
+## Resaltado con color (estilo Highlightr)
+
+Con una selección de texto, el menú contextual (clic derecho) ofrece un submenú
+"Highlights" con la paleta de colores configurada
+(`obsidianLike.highlighterColors`) más "Quitar resaltado". Elegir un color envuelve
+la selección en `<mark style="background-color:...">` (o `<mark class="hltr-...">`
+si `obsidianLike.highlighterUseCssClasses` está activado); volver a pulsar el mismo
+color lo quita, y pulsar uno distinto lo cambia. Solo aparece al pulsar con el botón
+derecho — no hay ningún menú/toolbar que se abra solo al seleccionar texto con el ratón.
+
 ## Listas numeradas — renumerado automático, sangría con `Tab`
 
 Al borrar (o añadir) un elemento en medio de una lista numerada, el resto de la
