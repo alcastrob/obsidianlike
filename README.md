@@ -126,16 +126,16 @@ correctamente como directorio en Windows.
   editor), todos los `[[wikilinks]]` que apuntaban a ella en el resto de la bóveda se
   actualizan automáticamente — añadiendo o quitando la carpeta de desambiguación según
   corresponda a la nueva ubicación.
-- Modo fuente vs. vista previa: un `[[wikilink]]` solo cambia a texto plano (corchetes
-  visibles, sin subrayado ni color de enlace, no clicable) cuando se **edita** con el
-  cursor dentro de sus corchetes (al escribir o borrar una letra) — moverse hasta ahí
-  con el cursor (flechas, incluidas subir/bajar) sin editar nada no lo activa, para que
-  navegar por el documento no cambie el renderizado ni haga aparecer el desplegable de
-  sugerencias de enlaces. Una vez activado por una edición, permanece en modo fuente
-  (incluso si luego solo mueves el cursor dentro del mismo enlace) hasta que el cursor
-  sale de sus corchetes externos, momento en el que vuelve a la vista normal. Si hay
-  varios `[[enlaces]]` en la misma línea, el resto se sigue mostrando renderizado
-  normalmente aunque uno esté activado.
+- Modo fuente vs. vista previa: un `[[wikilink]]` cambia a texto plano (corchetes
+  visibles, sin subrayado ni color de enlace) en cuanto el cursor entra en sus
+  corchetes de forma deliberada — al escribir o borrar una letra, con las flechas
+  izquierda/derecha, `Inicio`/`Fin`, o con un clic. La única excepción es mover el
+  cursor arriba/abajo: si ese movimiento simplemente *atraviesa* un enlace de paso
+  (camino a otra línea), no lo activa — solo desactiva uno que ya estuviera activo al
+  salir de él. Una vez activado, permanece en modo fuente (incluso si luego solo mueves
+  el cursor dentro del mismo enlace) hasta que el cursor sale de sus corchetes externos,
+  momento en el que vuelve a la vista normal. Si hay varios `[[enlaces]]` en la misma
+  línea, el resto se sigue mostrando renderizado normalmente aunque uno esté activado.
 
 ## Enlaces a una cabecera del mismo documento (`[[#Encabezado]]`)
 
@@ -265,10 +265,15 @@ La barra de color vertical junto a cada cabecera reproduce el estilo del tema
 de Obsidian configurado (color, ancho, alto igual al del texto). El pequeño
 indicador de nivel ("H1", "H2"...) permanece oculto y solo aparece al pasar el
 ratón sobre la cabecera (la barra o el propio texto), igual que en Obsidian —
-también sirve para plegar/desplegar la sección. Un `[texto entre corchetes]`
-dentro de una cabecera se ve exactamente igual que el resto de la línea
-(mismo tamaño, grosor, tipografía y color) en vez de destacar con un estilo
-distinto. Detalle técnico completo en `CLAUDE.md`.
+también sirve para plegar/desplegar la sección; el plegado (y el atajo de
+teclado arriba/abajo que salta por encima de una sección plegada) solo
+funciona en vista previa, no en modo fuente, donde no tiene sentido ocultar
+nada. Un `[texto entre corchetes]` dentro de una cabecera se ve exactamente
+igual que el resto de la línea (mismo tamaño, grosor, tipografía y color) en
+vez de destacar con un estilo distinto — lo mismo aplica a los corchetes
+internos de un `[[wikilink]]` en modo fuente dentro de un párrafo normal:
+tanto los corchetes dobles exteriores como los interiores se ven al mismo
+tamaño que el texto. Detalle técnico completo en `CLAUDE.md`.
 
 ## Texto resaltado (`==texto==`)
 
@@ -365,15 +370,19 @@ escapado como `\|` se trata como un carácter literal de la celda, nunca como se
 — y se muestra como un `|` normal, sin el carácter de escape, tanto al editar como en la vista
 renderizada.
 
-Clic derecho sobre una celda abre un menú para añadir/eliminar la fila o columna bajo el cursor, y
-para copiar la tabla entera en un formato que Excel/Outlook reconocen como tabla real (ver más
-abajo); clic derecho en cualquier otro punto del editor ofrece crear una tabla nueva, o pegar el
-contenido del portapapeles como una tabla nueva. Este menú propio sustituye al menú contextual
-nativo de VS Code dentro del editor (no hay forma de añadir un ítem al menú nativo desde un
-webview), así que también incluye Cortar/Copiar/Pegar para no perder esas opciones — los atajos de
-teclado (`Ctrl+C`/`X`/`V`) siguen funcionando igual que siempre, esto es solo para cuando se usa el
-botón derecho. No hay barra de herramientas para esto — es, igual que en Obsidian, el único punto
-de entrada para gestionar filas y columnas.
+Clic derecho sobre una celda abre un menú para añadir/eliminar la fila o columna bajo el cursor,
+eliminar la tabla entera ("Eliminar tabla"), y copiar la tabla entera en un formato que
+Excel/Outlook reconocen como tabla real (ver más abajo); clic derecho en cualquier otro punto del
+editor ofrece crear una tabla nueva, o pegar el contenido del portapapeles como una tabla nueva.
+Este menú propio sustituye al menú contextual nativo de VS Code dentro del editor (no hay forma de
+añadir un ítem al menú nativo desde un webview), así que también incluye Cortar/Copiar/Pegar para
+no perder esas opciones — los atajos de teclado (`Ctrl+C`/`X`/`V`) siguen funcionando igual que
+siempre, esto es solo para cuando se usa el botón derecho. **El menú "Editar" nativo de la barra
+superior de VS Code no funciona aquí** (ni para tablas ni para nada más dentro de este editor): sus
+ítems invocan siempre comandos fijos pensados para un editor de texto normal, sin nada sobre lo que
+actuar en este editor basado en webview — usa los atajos de teclado o el menú contextual propio
+(clic derecho) en su lugar. No hay barra de herramientas para esto — es, igual que en Obsidian, el
+único punto de entrada para gestionar filas y columnas.
 
 Con el cursor dentro de una celda, copiar/cortar/pegar y cualquier atajo de teclado (incluido
 `Ctrl+S` para pasar a modo fuente, o cualquier otro atajo de VS Code) funcionan con normalidad —
@@ -384,9 +393,12 @@ antes se bloqueaban silenciosamente mientras se estaba editando el contenido de 
 Arrastrando el ratón desde una celda hasta otra (o hacienda Mayús+clic) se selecciona un rango
 rectangular de celdas, igual que en una hoja de cálculo. Con el rango seleccionado, `Ctrl+C` copia
 todas esas celdas de una vez (como texto separado por tabulaciones y como una tabla HTML real, para
-pegar en Excel/Outlook/Sheets tal cual), y `Ctrl+V` pega el contenido del portapapeles empezando en
-la esquina superior izquierda del rango, ampliando la tabla con filas/columnas nuevas si el
-contenido pegado no cabe.
+pegar en Excel/Outlook/Sheets tal cual), `Ctrl+X` las corta (copia y además borra su contenido — o,
+si la selección abarca la tabla entera, elimina la tabla entera, igual que "Eliminar tabla"), y
+`Ctrl+V` pega el contenido del portapapeles empezando en la esquina superior izquierda del rango,
+ampliando la tabla con filas/columnas nuevas si el contenido pegado no cabe. El menú contextual
+propio (clic derecho) ofrece los mismos Cortar/Copiar para este rango, ya que el menú nativo de VS
+Code no tiene forma de saber qué celdas están seleccionadas.
 
 Con una selección así activa, el clic derecho sobre cualquier celda de ese rango cambia "Eliminar
 fila"/"Eliminar columna" del menú contextual por "Eliminar filas"/"Eliminar columnas" — borra de una

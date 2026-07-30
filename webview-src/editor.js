@@ -127,15 +127,49 @@ const vsTheme = EditorView.theme({
   // even though it links nowhere. See the .cm-plain-brackets detection in
   // livePreviewPlugin below for how "not a real link, not a wiki-link" is told
   // apart from an actual `[text](url)` (left untouched, still blue/clickable).
-  // font-size deliberately isn't reset here — it's set per-instance as an
-  // inline style instead (plainBracketFontSizeStyle, in livePreviewPlugin),
-  // since the "just inherit" this rule used to apply here also flattened a
-  // heading's font-size back down to the paragraph default whenever the
-  // bracket happened to sit inside one. See that function's comment.
+  // font-size deliberately isn't reset here (nor via any per-instance inline
+  // style — an earlier `plainBracketFontSizeStyle` attempt at exactly that,
+  // applied to this *outer* span, was removed after it made a bracket's
+  // em-relative font-size compound with its own already-correctly-sized
+  // *inner* span — see `.cm-md-mark` below for the actual, surgical fix).
   '.cm-wiki-link-raw, .cm-wiki-link-raw *, .cm-plain-brackets, .cm-plain-brackets *': {
     color: 'inherit !important',
     textDecoration: 'none !important',
     cursor: 'text !important',
+  },
+  // tags.processingInstruction's own class (mdHighlight) — markdown syntax
+  // markers in general (a real [text](url) link's own brackets/parens, etc.),
+  // meant to look small/faint while editing. Correct for that case.
+  '.cm-md-mark': {
+    color: 'var(--text-faint, var(--vscode-editorLineNumber-foreground, rgba(128,128,128,0.5)))',
+    fontSize: '0.82em',
+  },
+  // Reported directly, with a screen recording: a [[wiki-link]]'s own inner
+  // brackets (or a bare [text]'s, via .cm-plain-brackets) rendered visibly
+  // smaller than the outer literal "[[" / "]]" and the link text itself,
+  // while being edited. Root cause: lezer-markdown tags a wiki-link's inner
+  // "[Foo]" as an ordinary shortcut-reference Link (see the long comment
+  // above), so its LinkMark bracket characters get the exact same
+  // tags.processingInstruction/`.cm-md-mark` treatment a *real* markdown
+  // link's own syntax markers get — correct there, but wrong here: this
+  // isn't a syntax marker being hidden/shown, it's the visible bracket text
+  // of a wiki-link, which should read as plain text at the surrounding
+  // text's own size, matching the *outer* "[[" / "]]" (untagged by anything,
+  // and therefore already at the correct 1em).
+  //
+  // Can't just reset `.cm-md-mark`'s font-size to `inherit` unconditionally
+  // the way `color`/`textDecoration`/`cursor` are reset above — a bracket
+  // inside a heading needs to *keep* the heading's own (larger) font-size,
+  // which lives on this exact same element (mdHighlight merges every
+  // matching tag's classes onto one span, so a heading-wrapped bracket
+  // carries both `cm-header cm-header-N` *and* `cm-md-mark` together, not
+  // nested). `:not(.cm-header)` sidesteps the specificity fight entirely
+  // instead of trying to win it: every heading spec above shares that one
+  // common class, so this selector simply doesn't match a heading-wrapped
+  // bracket at all, leaving `.cm-header-N`'s own font-size rule as the only
+  // one in effect there — untouched, no ordering/specificity trick needed.
+  '.cm-wiki-link-raw .cm-md-mark:not(.cm-header), .cm-plain-brackets .cm-md-mark:not(.cm-header)': {
+    fontSize: 'inherit',
   },
   '.cm-md-link': {
     color: 'var(--link-color, var(--text-accent, var(--vscode-textLink-foreground, #4ec9b0)))',
@@ -1399,9 +1433,10 @@ const mdHighlight = HighlightStyle.define([
   // left-border fragments instead of one cohesive box).
   { tag: tags.quote,
     color: 'var(--blockquote-color, var(--text-muted, inherit))' },
-  { tag: tags.processingInstruction,
-    color: 'var(--text-faint, var(--vscode-editorLineNumber-foreground, rgba(128,128,128,0.5)))',
-    fontSize: '0.82em' },
+  // class-only (see the heading entries above for why): needs a stable name so
+  // vsTheme's own `.cm-md-mark` rule can be selectively overridden for the
+  // [[wiki-link]]/bare-bracket case below — see that rule's own comment.
+  { tag: tags.processingInstruction, class: 'cm-md-mark' },
   { tag: tags.meta,
     color: 'var(--text-faint, var(--vscode-editorLineNumber-foreground, rgba(128,128,128,0.5)))' },
 ]);
@@ -2049,6 +2084,52 @@ class TableWidget extends WidgetType {
       e.clipboardData.setData('text/html', buildClipboardHtmlTable(rows));
       e.preventDefault();
     });
+    // Same range-detection/early-return as the copy listener just above, plus
+    // the actual removal a cut implies (copy alone never deleted anything).
+    // Reported: cutting a multi-cell selection did nothing at all — no
+    // handler for `cut` existed here before, only copy/paste, so
+    // TableWidget.ignoreEvent's old unconditional "ignore" left the browser's
+    // native cut to fire against the focused <table> element itself (not
+    // contentEditable, nothing native to cut), silently doing nothing and
+    // writing nothing to the clipboard either.
+    table.addEventListener('cut', e => {
+      const sel = tableCellSelection;
+      if (!sel || sel.tableFrom !== this.from) return;
+      const rMin = Math.min(sel.anchorRow, sel.focusRow), rMax = Math.max(sel.anchorRow, sel.focusRow);
+      const cMin = Math.min(sel.anchorCol, sel.focusCol), cMax = Math.max(sel.anchorCol, sel.focusCol);
+      if (rMin === rMax && cMin === cMax) return; // exactly one cell — plain native cut is fine
+      const rows = [];
+      for (let r = rMin; r <= rMax; r++) {
+        const rowVals = [];
+        for (let c = cMin; c <= cMax; c++) {
+          rowVals.push(r === -1 ? (t.header[c] || '') : ((t.rows[r] && t.rows[r][c]) || ''));
+        }
+        rows.push(rowVals);
+      }
+      e.clipboardData.setData('text/plain', buildClipboardTsv(rows));
+      e.clipboardData.setData('text/html', buildClipboardHtmlTable(rows));
+      e.preventDefault();
+      // Cutting the *whole* table (every row and every column selected) removes
+      // the table's own document range entirely — matches "Eliminar tabla" and
+      // is what a selected-and-cut empty table needs to actually disappear,
+      // rather than leaving an unchanged (already blank) table skeleton behind.
+      const isWholeTable = rMin === -1 && rMax === t.rows.length - 1 && cMin === 0 && cMax === t.header.length - 1;
+      tableCellSelection = null;
+      if (isWholeTable) {
+        deleteWholeTable(this.view, this.from + 1);
+        return;
+      }
+      // A partial range: spreadsheet-style cut clears just the selected
+      // cells' own text, leaving the rest of the table untouched.
+      mutateTableAt(this.view, this.from + 1, tt => {
+        for (let r = rMin; r <= rMax; r++) {
+          for (let c = cMin; c <= cMax; c++) {
+            if (r === -1) { tt.header[c] = ''; }
+            else if (tt.rows[r]) { tt.rows[r][c] = ''; }
+          }
+        }
+      });
+    });
     table.addEventListener('paste', e => {
       const sel = tableCellSelection;
       if (!sel || sel.tableFrom !== this.from) return;
@@ -2118,8 +2199,43 @@ class TableWidget extends WidgetType {
   // still need to see for the row/column context menu and cursor-placement
   // suppression to keep working.
   ignoreEvent(event) {
-    return event.type === 'keydown' || event.type === 'paste' ||
-           event.type === 'copy' || event.type === 'cut';
+    if (event.type === 'keydown') return true;
+    if (event.type === 'paste' || event.type === 'copy' || event.type === 'cut') {
+      // A genuine multi-cell range (tableCellSelection, set by dragging
+      // across cells — see the "Multi-cell selection" section) has its own
+      // dedicated copy/paste/cut listeners wired directly on the <table>
+      // element (below, in toDOM()). Defer to those entirely rather than
+      // letting CM6 also try to act on its own, unrelated document selection
+      // for the very same event — reported: selecting several cells and
+      // cutting via Ctrl+X did nothing at all, and clipboard content after
+      // that "cut" was empty (a following paste pasted nothing), because
+      // there was previously no `cut` handler at all for this selection mode
+      // (only copy/paste existed) — CM6 ignored the event (old unconditional
+      // return true below) with nothing else to act on it, so the browser's
+      // default cut action ran against the focused <table> itself (not
+      // contentEditable, nothing to cut) and silently did nothing.
+      if (tableCellSelection && tableCellSelection.tableFrom === this.from) return true;
+      // Otherwise: an empty table selected as part of a real CM6 selection
+      // (e.g. Shift+arrow from just before it to just after it) and then cut
+      // did nothing — "la tabla sigue ahí". Root cause: this used to ignore
+      // these three events unconditionally whenever their target sat
+      // anywhere inside the widget's own DOM (any cell), which is right for
+      // genuine in-cell editing (see above) but wrong here — the actual
+      // document selection extended beyond this one table, so treating the
+      // event as "purely in-cell" let CM6 skip it entirely, silently
+      // dropping a cut/copy/paste that should have acted on that wider
+      // selection like anywhere else in the editor. Only ignore when the
+      // current selection sits entirely inside this table's own range —
+      // i.e. this really is in-cell interaction, not a cut/copy/paste of a
+      // selection that happens to include (or start/end inside) the table.
+      const sel = this.view.state.selection.main;
+      const range = findTableRangeAt(this.view.state, this.from + 1);
+      if (range && (sel.from < range.fromLine.from || sel.to > range.toLine.to)) {
+        return false;
+      }
+      return true;
+    }
+    return false;
   }
 }
 
@@ -3790,6 +3906,12 @@ function collectCallouts(state) {
 // computeFoldedSpans (below) for headings, feeding the same three
 // consumers: rendering collapse, atomicRanges, moveVerticalByLine.
 function computeFoldedCalloutSpans(state, callouts) {
+  // Folding is a Live Preview affordance — Source Mode shows raw markdown
+  // with nothing collapsed, so a fold toggled before switching modes must not
+  // keep hiding/blocking content (or skipping over it on Up/Down) once there.
+  // sourceMode itself lives further down this file (declared later, but this
+  // is only ever called at runtime, well after that declaration has run).
+  if (sourceMode) return [];
   callouts = callouts || collectCallouts(state);
   const spans = [];
   for (const c of callouts) {
@@ -4957,16 +5079,16 @@ const WIKI_TRIGGER_RE = /\[\[([^\]\n]*)$/;
 
 // ── [[wiki-link]] "activation" — when a link should reveal its raw markdown ───
 // Obsidian-style live preview reveals a link's raw [[...]] the instant the
-// cursor sits anywhere inside it, including just passing through on cursor
-// navigation — which reads as flicker/noise rather than "I'm editing this
-// link" (worse for Up/Down specifically, since moveVerticalByLine's
-// column-preserving landing spot inside a link is essentially arbitrary, not
-// something the user aimed for). Instead, a link only reveals its raw form
-// once the user actually *edits* text (insert or delete) while the cursor is
-// inside it — landing there via pure navigation alone leaves it rendered.
-// Once activated by an edit, it *stays* raw — including through further pure
-// navigation within the same link — until the cursor moves outside its outer
-// brackets, at which point it reverts to normal rendering.
+// cursor deliberately lands inside it — typing/deleting, Left/Right, Home/End,
+// or a mouse click. The one deliberate exception is Up/Down: moveVerticalByLine's
+// column-preserving landing spot inside a link on the way to a different line
+// is essentially arbitrary, not something the user aimed for, so a vertical
+// move that merely *passes through* a link must never newly activate it —
+// only clear an already-active one once the cursor ends up outside it (see
+// `dispatchingVerticalMove` below). Once activated, a link *stays* raw —
+// including through further navigation of any kind within the same link —
+// until the cursor moves outside its outer brackets, at which point it
+// reverts to normal rendering.
 //
 // `activeLinkFrom`/`activeLinkTo` is the currently-activated link's outer
 // span: position of the first "[" through one past the last "]" for an
@@ -5022,15 +5144,21 @@ const wikiLinkActivationTracker = ViewPlugin.fromClass(class {
 
     const userEdited = u.docChanged &&
       u.transactions.some(t => t.isUserEvent('input') || t.isUserEvent('delete'));
-    if (userEdited) {
+    // Any deliberate cursor move (edit, Left/Right, Home/End, a mouse click)
+    // can *newly* activate a link the cursor lands inside. The one exception
+    // is a vertical (Up/Down) move — see dispatchingVerticalMove's own comment
+    // and the block comment above this plugin — which only ever falls through
+    // to the "clear if now outside" branch below, never activates fresh.
+    if (userEdited || (u.selectionSet && !dispatchingVerticalMove)) {
       const ctx = findLinkContextAt(u.state, u.state.selection.main.head);
       if (ctx) { activeLinkFrom = ctx.from; activeLinkTo = ctx.to; activeLinkClosed = ctx.closed; }
       else { activeLinkFrom = activeLinkTo = null; }
       return;
     }
 
-    // Pure navigation (or a non-user-input doc change): never *newly*
-    // activates — only clears an existing activation once the cursor leaves it.
+    // Vertical-move pass-through (or a non-user-input doc change with no
+    // selection change at all): never *newly* activates — only clears an
+    // existing activation once the cursor ends up outside it.
     if (!u.docChanged && !u.selectionSet) return;
     if (activeLinkFrom != null) {
       const pos = u.state.selection.main.head;
@@ -5678,15 +5806,42 @@ function mutateTableAt(view, pos, mutateFn) {
   });
 }
 
-// Inserts a starter 2-column table at `pos`, as its own block (blank line
-// before it if the line at `pos` isn't already empty).
+// Removes a table's own document range entirely — see the "Eliminar tabla"
+// menu item's own comment above for why this exists as a direct action
+// rather than relying on selecting the table and cutting it.
+function deleteWholeTable(view, pos) {
+  const range = findTableRangeAt(view.state, pos);
+  if (!range) return;
+  const { fromLine, toLine } = range;
+  tableCellSelection = null;
+  view.dispatch({
+    changes: { from: fromLine.from, to: toLine.to, insert: '' },
+    selection: EditorSelection.cursor(fromLine.from),
+  });
+  view.focus();
+}
+
+// Inserts a starter 2-column table at `pos`, as its own block (blank line(s)
+// separating it from whatever text is already there).
 function insertTableTemplate(view, pos) {
   const line = view.state.doc.lineAt(pos);
   const lineEmpty = line.text.trim() === '';
-  const insertFrom = lineEmpty ? line.from : line.to;
-  const prefix = lineEmpty ? '' : '\n\n';
+  let insertFrom, prefix, suffix;
+  if (lineEmpty) {
+    insertFrom = line.from; prefix = ''; suffix = '';
+  } else if (pos <= line.from) {
+    // pos sits at the very *start* of a non-blank line — e.g. right on the
+    // boundary between two adjacent headings, where doc.lineAt(pos) resolves
+    // to the *second* one. The table belongs before this line, not after it:
+    // reported directly as right-clicking between two headings and choosing
+    // "Crear tabla" dropping the table below the second heading instead of
+    // between the two.
+    insertFrom = line.from; prefix = ''; suffix = '\n\n';
+  } else {
+    insertFrom = line.to; prefix = '\n\n'; suffix = '';
+  }
   const body = '| Columna 1 | Columna 2 |\n| --- | --- |\n|  |  |\n';
-  const insert = prefix + body;
+  const insert = prefix + body + suffix;
   // Cursor lands right *after* the table, not inside it. This mattered a lot
   // more before TableWidget started rendering unconditionally (see its own
   // comment) — back when a table only rendered as a real <table> while the
@@ -5697,10 +5852,12 @@ function insertTableTemplate(view, pos) {
   // user clicked elsewhere first. Tables always render now regardless of
   // cursor position, so that specific failure mode is gone either way — this
   // is kept mainly because landing past the table is still the more sensible
-  // default cursor position after inserting a block.
+  // default cursor position after inserting a block. Lands right after the
+  // table's own body — before any trailing blank-line `suffix` pushing a
+  // following heading back down — not at the very end of `insert`.
   view.dispatch({
     changes: { from: insertFrom, to: insertFrom, insert },
-    selection: EditorSelection.cursor(insertFrom + insert.length),
+    selection: EditorSelection.cursor(insertFrom + prefix.length + body.length),
   });
   view.focus();
 }
@@ -5816,14 +5973,25 @@ async function pasteAsTable(view, pos) {
     return;
   }
 
-  const line = view.state.doc.lineAt(Math.min(pos, view.state.doc.length));
+  const clampedPos = Math.min(pos, view.state.doc.length);
+  const line = view.state.doc.lineAt(clampedPos);
   const lineEmpty = line.text.trim() === '';
-  const insertFrom = lineEmpty ? line.from : line.to;
-  const prefix = lineEmpty ? '' : '\n\n';
-  const insert = prefix + rowsToMarkdownTable(rows) + '\n';
+  // Same "before vs. after this line" placement rule as insertTableTemplate
+  // (see its own comment) — a pos resolving to the very start of a non-blank
+  // line (e.g. right between two adjacent headings) belongs before that line.
+  let insertFrom, prefix, suffix;
+  if (lineEmpty) {
+    insertFrom = line.from; prefix = ''; suffix = '';
+  } else if (clampedPos <= line.from) {
+    insertFrom = line.from; prefix = ''; suffix = '\n\n';
+  } else {
+    insertFrom = line.to; prefix = '\n\n'; suffix = '';
+  }
+  const body = rowsToMarkdownTable(rows) + '\n';
+  const insert = prefix + body + suffix;
   view.dispatch({
     changes: { from: insertFrom, to: insertFrom, insert },
-    selection: EditorSelection.cursor(insertFrom + insert.length),
+    selection: EditorSelection.cursor(insertFrom + prefix.length + body.length),
   });
   view.focus();
 }
@@ -5865,6 +6033,84 @@ async function copyTableAsClipboard(view, pos) {
   } catch (_) {
     new DataviewNotice('No se pudo copiar al portapapeles.');
   }
+}
+
+// Writes a multi-cell tableCellSelection's own range to the clipboard, for
+// the table's right-click "Cortar"/"Copiar" items (see copySelectionInTable/
+// cutSelectionInTable below) — same clipboard-writing shape as
+// copyTableAsClipboard just above, but scoped to `sel`'s own range rather
+// than the whole table.
+async function copyTableCellSelectionToClipboard(view, pos, sel) {
+  const range = findTableRangeAt(view.state, pos);
+  const t = range && parseTableSrc(view.state.doc.sliceString(range.fromLine.from, range.toLine.to));
+  if (!t) return null;
+  const rMin = Math.min(sel.anchorRow, sel.focusRow), rMax = Math.max(sel.anchorRow, sel.focusRow);
+  const cMin = Math.min(sel.anchorCol, sel.focusCol), cMax = Math.max(sel.anchorCol, sel.focusCol);
+  const rows = [];
+  for (let r = rMin; r <= rMax; r++) {
+    const rowVals = [];
+    for (let c = cMin; c <= cMax; c++) {
+      rowVals.push(r === -1 ? (t.header[c] || '') : ((t.rows[r] && t.rows[r][c]) || ''));
+    }
+    rows.push(rowVals);
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== 'undefined') {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/plain': new Blob([buildClipboardTsv(rows)], { type: 'text/plain' }),
+        'text/html': new Blob([buildClipboardHtmlTable(rows)], { type: 'text/html' }),
+      })]);
+    } else if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(buildClipboardTsv(rows));
+    }
+  } catch (_) { /* clipboard write denied/unavailable */ }
+  return { t, rMin, rMax, cMin, cMax };
+}
+
+// Same "clear the selected cells, or delete the whole table if every row and
+// column was selected" logic as TableWidget's own `cut` listener (see its
+// comment) — duplicated rather than shared because that one runs synchronously
+// inside a real `cut` event (writing via `e.clipboardData`), while this one
+// writes via the async Clipboard API instead (see copySelectionInTable's own
+// comment for why the menu path doesn't go through a real `cut` event at all).
+async function cutTableCellSelectionAndClearOrDelete(view, pos, sel) {
+  const result = await copyTableCellSelectionToClipboard(view, pos, sel);
+  if (!result) return;
+  const { t, rMin, rMax, cMin, cMax } = result;
+  tableCellSelection = null;
+  const isWholeTable = rMin === -1 && rMax === t.rows.length - 1 && cMin === 0 && cMax === t.header.length - 1;
+  if (isWholeTable) { deleteWholeTable(view, pos); return; }
+  mutateTableAt(view, pos, tt => {
+    for (let r = rMin; r <= rMax; r++) {
+      for (let c = cMin; c <= cMax; c++) {
+        if (r === -1) { tt.header[c] = ''; }
+        else if (tt.rows[r]) { tt.rows[r][c] = ''; }
+      }
+    }
+  });
+}
+
+// The table's own right-click "Cortar"/"Copiar" (see tableContextMenuHandler
+// below) can't just call cutSelection/copySelection when a multi-cell
+// tableCellSelection is active — those only ever act on CM6's own document
+// selection, which a mouse-dragged cell range never touches at all (see
+// wireCell's own comment on why). Deliberately does *not* try
+// document.execCommand('cut'/'copy') + relying on TableWidget's own `cut`/
+// `copy` DOM listeners picking up the resulting synthetic event first — a
+// menu click is already a real user gesture, so there's no permission
+// advantage to that indirection, and unlike a genuine Ctrl+X/Ctrl+C keypress
+// there's no guarantee a *programmatically triggered* cut/copy command
+// reliably dispatches a real event in every embedding context. Goes straight
+// to the same async Clipboard API this exact menu's own "Copiar como tabla"
+// already uses successfully, instead.
+function copySelectionInTable(view, tableEl, activeSel) {
+  if (!activeSel) { copySelection(view); return; }
+  copyTableCellSelectionToClipboard(view, view.posAtDOM(tableEl), activeSel);
+}
+function cutSelectionInTable(view, tableEl, activeSel) {
+  if (!activeSel) { cutSelection(view); return; }
+  cutTableCellSelectionAndClearOrDelete(view, view.posAtDOM(tableEl), activeSel);
+  view.focus();
 }
 
 // ── Cortar/Copiar/Pegar for the custom context menu ─────────────────────────
@@ -6063,7 +6309,6 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       const rowEl = cellEl.closest('tr');
       const rowIndex = !isHeader && rowEl && rowEl.dataset.row !== undefined ? Number(rowEl.dataset.row) : -1;
       const pos = view.posAtDOM(tableEl);
-      const hasSelection = !view.state.selection.main.empty;
 
       // If there's an active multi-cell selection (see "Multi-cell selection"
       // above tableCellSelection's own definition) *and the right-clicked cell
@@ -6076,6 +6321,17 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       // it already clears the selection elsewhere in this file.
       const activeSel = tableCellSelection && tableCellSelection.tableFrom === Number(tableEl.dataset.tableFrom)
         ? tableCellSelection : null;
+      // Reported: Cortar/Copiar showed disabled in this menu despite a
+      // clearly-highlighted multi-cell range being selected. Root cause: this
+      // only ever checked CM6's own document-level selection
+      // (view.state.selection.main) — but a mouse-dragged cell range never
+      // touches that at all (each cell's own mousedown stops propagation
+      // before CM6 sees it, see wireCell's own comment), so it's tracked
+      // entirely in tableCellSelection instead. The table's own cut/copy
+      // listeners (in TableWidget.toDOM(), below) already act on exactly this
+      // — activeSel here is that same check — so Cortar/Copiar must be
+      // enabled whenever it's set, not just when CM6's selection is non-empty.
+      const hasSelection = !view.state.selection.main.empty || !!activeSel;
       let selRowIndices = null, selColIndices = null;
       if (activeSel) {
         const rMin = Math.min(activeSel.anchorRow, activeSel.focusRow), rMax = Math.max(activeSel.anchorRow, activeSel.focusRow);
@@ -6093,8 +6349,8 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       }
 
       const items = [
-        { label: 'Cortar',  action: () => cutSelection(view), disabled: !hasSelection },
-        { label: 'Copiar',  action: () => copySelection(view), disabled: !hasSelection },
+        { label: 'Cortar',  action: () => cutSelectionInTable(view, tableEl, activeSel), disabled: !hasSelection },
+        { label: 'Copiar',  action: () => copySelectionInTable(view, tableEl, activeSel), disabled: !hasSelection },
         { label: 'Pegar',   action: () => pasteAtCursor(view) },
         { separator: true },
         { label: 'Añadir columna a la izquierda', action: () => mutateTableAt(view, pos, t => insertTableColumn(t, colIndex)) },
@@ -6115,6 +6371,14 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       }
       items.push({ separator: true });
       items.push({ label: 'Copiar como tabla', action: () => copyTableAsClipboard(view, pos) });
+      // Direct "delete this whole table" affordance — reported as: creating an
+      // empty table, selecting it with the cursor, and cutting it left it
+      // fully in place. Selecting/cutting a table as a block is fragile (each
+      // cell is its own separate contentEditable — see TableWidget's own
+      // comments), so rather than depend on that working, this removes the
+      // table's own document range directly, the same reliable way "Eliminar
+      // fila"/"Eliminar columna" above already mutate the table.
+      items.push({ label: 'Eliminar tabla', action: () => deleteWholeTable(view, pos) });
       e.preventDefault();
       menu.show(e.clientX, e.clientY, items);
       return true;
@@ -7257,6 +7521,10 @@ function collectHeadings(state) {
 // real cursor-navigation protection (not just visual height:0 hiding) turned
 // out to need three separate consumers of this one source of truth, not one.
 function computeFoldedSpans(state, headings) {
+  // See the identical guard on computeFoldedCalloutSpans (this file's callout
+  // section) — same reasoning applies to heading folds: folding is a Live
+  // Preview affordance, so it must be a no-op in Source Mode.
+  if (sourceMode) return [];
   headings = headings || collectHeadings(state);
   const spans = [];
   for (let i = 0; i < headings.length; i++) {
@@ -7966,9 +8234,7 @@ function createEditor(parent, content) {
       // rebuild for this same transaction already sees the fresh activation
       // state — see the comment above wikiLinkActivationTracker's definition.
       wikiLinkActivationTracker,
-      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]),
-      foldPlugin,
-      foldAtomicRanges,
+      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges]),
       orderedListRenumberPlugin,
       listIndentKeymap,
       // Find/replace panel (Ctrl+F — see obsidianSearchPanelPlugin's own
@@ -8157,7 +8423,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges]
+      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);
