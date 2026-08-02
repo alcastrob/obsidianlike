@@ -92,8 +92,8 @@ texto YAML subyacente en vista previa.
    `obsidianLike.attachmentsFolder`).
 2. Si no está ahí, se busca recursivamente en toda la bóveda (primer archivo con ese
    nombre encontrado, asumiendo nombres únicos).
-3. Si no se encuentra en ningún sitio, se muestra el texto del enlace tal cual, sin
-   convertirlo en imagen.
+3. Si no se encuentra en ningún sitio, se muestra un aviso ("No se encontró «archivo.png».")
+   en vez del texto del enlace en crudo o de una imagen rota.
 
 La búsqueda recursiva usa `fs.statSync` como respaldo cuando el tipo de entrada de
 directorio es ambiguo, porque las carpetas "solo en la nube" de Dropbox Smart Sync u
@@ -156,7 +156,8 @@ que corresponda. Si el fichero no aparece en la bóveda, se muestra un aviso en 
 
 Un `![[...]]` (embed) de uno de estos tres tipos se muestra como una caja pequeña con el nombre del
 fichero, clicable de la misma forma — no como texto incrustado, ya que no hay nada de markdown que
-renderizar.
+renderizar. Si el fichero no existe en la bóveda, esa caja se sustituye por el mismo aviso de
+"No se encontró" que una imagen rota.
 
 ## Buscar y reemplazar (`Ctrl+F` / `Cmd+F`)
 

@@ -910,6 +910,20 @@ const vsTheme = EditorView.theme({
     textDecoration: 'underline',
     color: 'var(--link-color, var(--vscode-textLink-foreground, #4a9eff))',
   },
+  // ![[missing-file.ext]] — a broken image or non-note attachment embed
+  // (EmbedNotFoundWidget). Deliberately plain/muted rather than error-red or
+  // italic (unlike .cm-transclusion-error) — this is the common, everyday
+  // "attachment moved or was never pasted" case, not an exceptional failure.
+  '.cm-embed-not-found': {
+    display: 'block',
+    textAlign: 'center',
+    borderRadius: '10px',
+    background: 'rgba(128,128,128,0.08)',
+    color: 'var(--text-muted, rgba(128,128,128,0.75))',
+    padding: '14px 16px',
+    margin: '4px 0 10px',
+    fontSize: '0.92em',
+  },
   // [[ ]] wiki-link suggester (see WikiSuggestView) — a plain floating DOM
   // element appended as a child of `.cm-editor` (view.dom, which CM6 already
   // gives `position: relative`) and positioned with plain absolute offsets
@@ -2583,6 +2597,26 @@ class ImageWidget extends WidgetType {
     }
     img.style.margin = '4px 0';
     return img;
+  }
+  ignoreEvent() { return false; }
+}
+
+// ── "Broken embed" widget — ![[missing-file.ext]] ────────────────────────────
+// Rendered in place of ImageWidget/ExternalFileWidget whenever the embedded
+// target — an image or a non-note attachment — can't actually be resolved.
+// Previously a missing image left the raw "![[...]]" text completely
+// untouched (see imgPlugin's own history) and a non-image attachment embed
+// never checked existence at all, both of which silently read as "nothing
+// happened" instead of a clear error. Mirrors TransclusionWidget's own
+// "No se encontró ..." message for a missing note target.
+class EmbedNotFoundWidget extends WidgetType {
+  constructor(target) { super(); this.target = target; }
+  eq(other) { return this.target === other.target; }
+  toDOM() {
+    const box = document.createElement('div');
+    box.className = 'cm-embed-not-found';
+    box.textContent = `No se encontró "${this.target}".`;
+    return box;
   }
   ignoreEvent() { return false; }
 }
@@ -5288,9 +5322,14 @@ const imgPlugin = ViewPlugin.fromClass(class {
       if (active.has(ln)) continue;
       const basename = filename.split('/').pop();
       const src = imageMap[filename] || imageMap[basename] || '';
-      if (!src) continue;
-      all.push({ from: mFrom, to: mTo,
-        dec: Decoration.replace({ widget: new ImageWidget(src, filename, width, caption) }) });
+      // A recognized image extension with no resolved src is a broken embed
+      // (moved/deleted/never-pasted file), not a "not an image, skip it" case
+      // — render a clear "not found" message instead of silently leaving the
+      // raw "![[...]]" text untouched (the previous behavior).
+      const widget = src
+        ? new ImageWidget(src, filename, width, caption)
+        : new EmbedNotFoundWidget(filename);
+      all.push({ from: mFrom, to: mTo, dec: Decoration.replace({ widget }) });
     }
     all.sort((a, b) => a.from - b.from);
     const builder = new RangeSetBuilder();
@@ -5320,6 +5359,23 @@ function requestTransclusion(target) {
   if (transclusionPending.has(target)) return;
   transclusionPending.add(target);
   vscode.postMessage({ type: 'get-transclusion', id: target, target });
+}
+
+// A ![[file.docx/.xlsx/.pdf/...]] embed (ExternalFileWidget, below) used to
+// render its compact "open" box unconditionally, with no idea whether the
+// target actually exists in the vault — unlike a note transclusion, which
+// already surfaces "No se encontró ..." via transclusionCache's own error
+// field. Same cache/pending/rebuild-effect shape as transclusionCache itself
+// (reusing transclusionRebuildEffect rather than a separate one — this is
+// still built and consumed from transclusionPlugin's own tree walk below),
+// keyed by the raw embed target string.
+const externalFileExistsCache   = new Map(); // raw target string -> boolean
+const externalFileExistsPending = new Set();
+
+function requestExternalFileCheck(target) {
+  if (externalFileExistsPending.has(target)) return;
+  externalFileExistsPending.add(target);
+  vscode.postMessage({ type: 'check-external-file', id: target, target });
 }
 
 // Minimal block-level markdown renderer for transcluded content: headings, fenced
@@ -5390,8 +5446,10 @@ function renderMarkdownTable(lines, startIdx) {
 // ImageWidget/ExternalFileWidget's own toDOM() rather than re-implementing
 // either: same imageMap lookup imgPlugin itself uses (basename fallback
 // included), same clickable open-externally box for a non-image attachment.
-// Returns null for anything this doesn't recognize (an unresolved image, or
-// a nested note transclusion) — the caller then falls back to the original
+// An unresolved image renders EmbedNotFoundWidget's own "not found" message
+// (same as imgPlugin's live-editor behavior) rather than falling through.
+// Returns null only for something this doesn't recognize at all (a nested
+// note transclusion) — the caller then falls back to the original
 // plain-text rendering, unchanged.
 function renderEmbedBlock(raw) {
   const pipeIdx = raw.indexOf('|');
@@ -5401,7 +5459,7 @@ function renderEmbedBlock(raw) {
   if (IMG_EXT.test(filename)) {
     const basename = filename.split('/').pop();
     const src = imageMap[filename] || imageMap[basename] || '';
-    if (!src) return null;
+    if (!src) return new EmbedNotFoundWidget(filename).toDOM();
     let width = null, caption = null;
     if (param) {
       if (/^\d+(?:px)?$/i.test(param)) width = parseInt(param, 10) + 'px';
@@ -5637,7 +5695,15 @@ const transclusionPlugin = ViewPlugin.fromClass(class {
       // literal ".md" suffix still falls through to the normal transclusion
       // path below rather than being misrouted here.
       if (isExternalFileTarget(filenameGuess)) {
-        all.push({ from: mFrom, to: mTo, dec: Decoration.replace({ widget: new ExternalFileWidget(raw) }) });
+        const exists = externalFileExistsCache.get(raw);
+        if (exists === undefined) requestExternalFileCheck(raw);
+        // While the check is still in flight (exists === undefined), render
+        // the normal box optimistically rather than a placeholder — the
+        // common case (file present) resolves near-instantly and shouldn't
+        // flash "checking..." first; only a confirmed miss (exists === false)
+        // switches to the "not found" message.
+        const widget = exists === false ? new EmbedNotFoundWidget(raw) : new ExternalFileWidget(raw);
+        all.push({ from: mFrom, to: mTo, dec: Decoration.replace({ widget }) });
         continue;
       }
       const cached = transclusionCache.get(raw);
@@ -8620,6 +8686,11 @@ window.addEventListener('message', ev => {
       transclusionPending.delete(msg.id);
       view.dispatch({ effects: transclusionRebuildEffect.of(null) });
       view.plugin(hoverPreviewPlugin)?.refresh();
+      break;
+    case 'external-file-status':
+      externalFileExistsCache.set(msg.id, !!msg.exists);
+      externalFileExistsPending.delete(msg.id);
+      view.dispatch({ effects: transclusionRebuildEffect.of(null) });
       break;
     case 'headings-result': {
       const resolve = pendingHeadingRequests.get(msg.id);

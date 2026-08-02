@@ -1541,6 +1541,26 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
             openFileWithOsDefaultApp(targetUri.fsPath);
           })();
 
+        } else if (msg.type === 'check-external-file') {
+          // Sent by transclusionPlugin's ExternalFileWidget (editor.js) to find out
+          // whether a ![[file.ext]] embed's target actually exists — unlike a note
+          // transclusion (get-transclusion below), the embed box previously rendered
+          // unconditionally with no existence check at all, so a moved/deleted
+          // attachment silently looked identical to a valid one. Resolution mirrors
+          // open-external-file's own (unstripped) raw-name lookup exactly, so "exists"
+          // here always agrees with whether clicking the box would actually open it.
+          (async () => {
+            const id = msg.id as string;
+            const raw = (msg.target as string || '').trim();
+            const currentDir = path.dirname(document.uri.fsPath);
+            try {
+              const targetUri = await resolveExternalFileUri(raw, currentDir);
+              webviewPanel.webview.postMessage({ type: 'external-file-status', id, exists: !!targetUri });
+            } catch {
+              webviewPanel.webview.postMessage({ type: 'external-file-status', id, exists: false });
+            }
+          })();
+
         } else if (msg.type === 'open-transclusion') {
           // Same navigation as open-note, except a transclusion pointing at a note
           // that doesn't exist should report "not found" rather than create a blank one.
