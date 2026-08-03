@@ -53,6 +53,12 @@ ECHO CODE 9
 call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidianlike-links
 call code --profile "Obsidian like" --install-extension obsidianlike-links-0.0.1.vsix
 
+cd ..\obsidianlike_preview
+call npm run package
+ECHO CODE 10
+call code --profile "Obsidian like" --uninstall-extension angelCastro.obsidianlike-preview
+call code --profile "Obsidian like" --install-extension obsidianlike-preview-0.0.1.vsix
+
 cd ..\obsidianlike
 ECHO Matas
 taskkill /IM code.exe /F
