@@ -192,8 +192,10 @@ una imagen (`![[foto.png]]`) se muestra como imagen real, un enlace a un `.docx`
 se muestra como una caja clicable para abrirlo con la aplicación del sistema, y las líneas de
 tarea (`- [ ] ...`) muestran su checkbox (de solo lectura, ya que editar una tarea transcluida no
 tiene sentido — para eso está la nota de origen) y el tachado de "hecho", en vez de mostrarse
-como texto markdown sin procesar. Una transclusión dentro de otra transclusión no se resuelve de
-forma recursiva.
+como texto markdown sin procesar. Cada línea del documento origen conserva su propio salto de
+línea al transcluirse — por ejemplo, varios `[[wikilinks]]` escritos uno por línea (sin línea en
+blanco entre ellos) aparecen cada uno en su propia línea, no todos seguidos formando un párrafo.
+Una transclusión dentro de otra transclusión no se resuelve de forma recursiva.
 
 ## Vista previa al pasar el ratón (`Ctrl`/`Cmd` + hover sobre un `[[wikilink]]`)
 
@@ -369,7 +371,8 @@ dentro de una celda se muestra como un salto de línea real (la sintaxis de tabl
 de línea literal dentro de una celda, así que esta es la forma estándar de conseguirlo). Un `|`
 escapado como `\|` se trata como un carácter literal de la celda, nunca como separador de columna
 — y se muestra como un `|` normal, sin el carácter de escape, tanto al editar como en la vista
-renderizada.
+renderizada. Una celda en blanco (en cualquier posición de la fila, incluida la última) se
+reconoce correctamente y no descuadra el resto de la fila.
 
 Clic derecho sobre una celda abre un menú para añadir/eliminar la fila o columna bajo el cursor,
 eliminar la tabla entera ("Eliminar tabla"), y copiar la tabla entera en un formato que

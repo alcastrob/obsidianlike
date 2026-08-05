@@ -1645,12 +1645,37 @@ function parseTableRow(line) {
   // *real* separator needs at least one whitespace character on each side, mirroring what
   // serializeTableRow itself always writes ("| " between cells, " |" at the very end) — so a
   // bare, unescaped "|" glued directly onto surrounding text (not meant as a delimiter at all)
-  // isn't mistaken for one.
+  // isn't mistaken for one. The row's own outer opening/closing pipe is always a boundary
+  // regardless of what's next to it, same as serializeTableRow's own "| ...cells... |" framing.
+  //
+  // A blank cell breaks this if computed via a naive "strip the leading pipe, strip the trailing
+  // pipe, then split the remainder on interior '\s\|\s' separators" pipeline (the previous
+  // implementation) — reported directly ("las tablas salen mal si hay celdas en blanco"). Two
+  // adjacent pipes representing an empty cell (e.g. "...| 23 | |", the last column blank) share
+  // just ONE whitespace character between them. A sequential strip-then-split pipeline either eats
+  // that shared space as part of stripping the outer pipe (leaving the inner separator pipe with
+  // nothing after it to match "\s\|\s", so it stays glued to the previous cell's text instead of
+  // splitting) or, for a blank cell in the *middle* of a row, has the same problem one level down:
+  // String.split() consumes each match's characters, so it can never award that one shared
+  // whitespace character to two separate adjacent matches at once, no matter which side of the
+  // stripping step the ambiguity is moved to.
+  //
+  // Fixed by testing every '|' character's own boundary status directly against the *original*
+  // string — never by incrementally stripping/consuming it — so two pipes that happen to share one
+  // whitespace character between them are each independently free to qualify.
   const ESCAPED_PIPE = '\x00ESCPIPE\x00';
-  let s = line.replace(/\\\|/g, ESCAPED_PIPE);
-  s = s.replace(/^\s*\|/, '');
-  s = s.replace(/\s\|\s*$/, '');
-  return s.split(/\s\|\s/).map(c => c.trim().split(ESCAPED_PIPE).join('|'));
+  const s = line.replace(/\\\|/g, ESCAPED_PIPE);
+  const pipes = [];
+  for (let i = 0; i < s.length; i++) if (s[i] === '|') pipes.push(i);
+  const boundaries = pipes.filter(i => {
+    if (!/\S/.test(s.slice(0, i))) return true; // nothing but whitespace before it: the row's own opening pipe
+    if (!/\S/.test(s.slice(i + 1))) return true; // nothing but whitespace after it: the row's own closing pipe
+    return /\s/.test(s[i - 1]) && /\s/.test(s[i + 1]); // interior: needs whitespace on both sides
+  });
+  if (boundaries.length < 2) return [s.trim().split(ESCAPED_PIPE).join('|')];
+  const cells = [];
+  for (let k = 0; k < boundaries.length - 1; k++) cells.push(s.slice(boundaries[k] + 1, boundaries[k + 1]));
+  return cells.map(c => c.trim().split(ESCAPED_PIPE).join('|'));
 }
 
 // { header: string[], delim: string[], rows: string[][] } from a table's raw
@@ -5482,7 +5507,19 @@ function renderMarkdownBlock(text) {
     if (!para.length) return;
     const p = document.createElement('p');
     p.style.margin = '0.4em 0';
-    p.innerHTML = renderCell(para.join(' '));
+    // Each source line renders on its own visual line, joined with a real
+    // <br> rather than folded into one space-joined run — matching Obsidian's
+    // own default (non-"strict line breaks") rendering, and matching what
+    // this same content already looks like in the live editor itself (every
+    // document line is inherently its own line there, CM6 being a real text
+    // editor). Reported directly: several `[[wikilink]]`s written one per
+    // source line, with no blank line between them, transcluded into a
+    // single run-on paragraph with every link mashed onto one visual line —
+    // `para.join(' ')` previously erased every line boundary between lazily-
+    // continued (non-blank-line-separated) source lines before the result
+    // ever reached renderCell, so there was no line boundary left for
+    // anything downstream to preserve.
+    p.innerHTML = para.map(l => renderCell(l)).join('<br>');
     frag.appendChild(p);
     para = [];
   };
