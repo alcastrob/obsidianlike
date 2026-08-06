@@ -524,6 +524,33 @@ async function resolveExternalFileUri(notePart: string, currentDir: string): Pro
 // passed as an array, never concatenated into a shell command string, so a
 // filename containing spaces or shell-metacharacters (quotes, `&`, `%`, ...)
 // can't corrupt the command or be (mis)interpreted by a shell at all.
+// Opens an external web URL (http/https) with the OS's default browser.
+// `vscode.env.openExternal(vscode.Uri.parse(url))` — the "correct", documented way — was reported
+// to mangle characters in a long URL once it reached the browser's address bar (a ServiceNow deep
+// link whose own query string is itself a percent-encoded, embedded URL: `...%3Fv%3D1%26sysparm_
+// initial%3Dtrue%26...%253d...`). Root cause is the same class of "openExternal reliability gap"
+// already documented above for local files, just hitting the URL case instead: `vscode.Uri.parse`
+// decomposes the string into its own internal scheme/authority/path/query/fragment representation,
+// and `env.openExternal` then re-serializes that (via Electron's `shell.openExternal`) to hand off
+// to the OS — a round trip that isn't guaranteed to reproduce an already-percent-encoded sequence
+// byte-for-byte (VS Code's Uri class has several long-standing issues about exactly this). Fixed
+// the same way as `openFileWithOsDefaultApp`: spawn the OS's own "open" mechanism directly with the
+// raw string, bypassing vscode.Uri/Electron's own serialization entirely so every character reaches
+// the browser exactly as it appeared in the note. `execFile` (array args, no shell string
+// concatenation) is the same deliberate choice as `openFileWithOsDefaultApp` for the same reason.
+function openUrlWithOsDefaultApp(url: string): void {
+  const fail = (err: Error) => vscode.window.showErrorMessage(`No se pudo abrir el enlace: ${err.message}`);
+  if (process.platform === 'win32') {
+    // Same "start" cmd.exe built-in as openFileWithOsDefaultApp, same empty-title-placeholder
+    // convention — see that function's own comment for why "" is needed there.
+    execFile('cmd.exe', ['/c', 'start', '""', url], (err) => { if (err) fail(err); });
+  } else if (process.platform === 'darwin') {
+    execFile('open', [url], (err) => { if (err) fail(err); });
+  } else {
+    execFile('xdg-open', [url], (err) => { if (err) fail(err); });
+  }
+}
+
 function openFileWithOsDefaultApp(fsPath: string): void {
   const fail = (err: Error) =>
     vscode.window.showErrorMessage(`No se pudo abrir "${path.basename(fsPath)}": ${err.message}`);
@@ -1627,7 +1654,7 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
         } else if (msg.type === 'open-url') {
           const url = (msg.url as string || '').trim();
-          if (url) { vscode.env.openExternal(vscode.Uri.parse(url)); }
+          if (url) { openUrlWithOsDefaultApp(url); }
 
         } else if (msg.type === 'reveal-path') {
           const fsPath = (msg.fsPath as string || '').trim();

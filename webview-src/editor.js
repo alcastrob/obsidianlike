@@ -1752,17 +1752,26 @@ function deleteTableColumns(t, colIndices) {
 // instead of the table ever falling back to raw `| pipe | source |` text the way it used to
 // whenever the cursor landed on one of its lines.
 //
-// A table cell shows *rendered* inline formatting (bold/italic/strikethrough/inline-code) while
-// not focused, and swaps to the raw markdown text for editing on focus (see wireCell's own
-// focus/blur listeners below) — same "raw while active, rendered otherwise" convention used
-// everywhere else in this file (headings, wiki-links, ...), just applied per-cell instead of
-// per-line. Deliberately a separate, narrower function from renderCell rather than reusing it
-// outright: renderCell also renders wiki-links/#tags/bare-URLs as blue, clickable-*looking* spans,
-// but a cell's own `mousedown` listener (wireCell, below) calls `e.stopPropagation()` so a click
-// never bubbles up to `linkClickHandler`'s own `[data-wiki]`/`.cm-md-link` handling — rendering
-// those here would look interactive while doing nothing at all on click, which is worse than
-// plain text. Bold/italic/strikethrough/code have no such click affordance to fake, so they're
-// safe to render unconditionally.
+// A table cell shows *rendered* inline formatting (bold/italic/strikethrough/inline-code/wiki-
+// links/standard links) while not focused, and swaps to the raw markdown text for editing on
+// focus (see wireCell's own focus/blur listeners below) — same "raw while active, rendered
+// otherwise" convention used everywhere else in this file (headings, wiki-links, ...), just
+// applied per-cell instead of per-line. Deliberately a separate, narrower function from renderCell
+// rather than reusing it outright: renderCell also renders `#tags` as pills, which this
+// deliberately leaves out (see below) — but wiki-links and standard/bare-URL links, which
+// renderCell *does* render, are included here too now.
+//
+// **This used to render wiki-links/links as plain, unstyled text on purpose** — reported directly
+// ("en una tabla puedo poner un wikilink en una celda y debería visualizarse como un enlace
+// pulsable"). The reason they were left out originally no longer holds: a cell's own `mousedown`
+// listener (wireCell, below) used to call `e.stopPropagation()` unconditionally, which stopped a
+// click from ever bubbling up to `linkClickHandler`'s own `[data-wiki]`/`.cm-md-link` handling —
+// rendering a link here would have looked interactive while doing nothing at all on click, worse
+// than plain text. `wireCell`'s mousedown now special-cases exactly these two selectors (see its
+// own comment) so the click reaches `linkClickHandler` correctly instead, which is what makes
+// rendering them here safe/worthwhile now. `#tags` are left out deliberately, not because of any
+// remaining click-swallowing concern (a tag pill isn't clickable at all, in a cell or anywhere
+// else) but simply because nothing asked for it and it wasn't part of the reported gap.
 function renderTableCellDisplay(raw) {
   let s = (raw || '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -1778,6 +1787,23 @@ function renderTableCellDisplay(raw) {
   s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
   s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
   s = s.replace(/==(.+?)==/g, '<mark class="cm-highlight">$1</mark>');
+  // Standard markdown links [text](url) and bare https://... URLs — same combined regex/rendering
+  // as renderCell's own identical step (see its comment there for why it's one regex, not two
+  // sequential passes), reusing the `.cm-md-link`/`data-url` convention `linkClickHandler` and
+  // `mdLinkPlugin` already understand.
+  s = s.replace(
+    /\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s)"'\]>]+)/g,
+    (_, text, url, bareUrl) => bareUrl
+      ? `<span class="cm-md-link" data-url="${bareUrl}">${bareUrl}</span>`
+      : `<span class="cm-md-link" data-url="${url}">${text}</span>`
+  );
+  // Wiki-links [[target]] / [[target|alias]] — same rendering renderCell uses (data-wiki attribute
+  // + inline link styling), no `basePath`/`data-wiki-base` here since a real table's own cells
+  // always belong to the currently-open document, unlike a tasks-query row's description.
+  s = s.replace(new RegExp(WIKI_LINK_RE_SRC, 'g'), (_, tgt, alias) =>
+    `<span data-wiki="${tgt}" style="color:var(--link-color,var(--vscode-textLink-foreground,#4a9eff));` +
+    `text-decoration:underline;cursor:pointer;">${alias || tgt}</span>`
+  );
   s = s.replace(/\x00C(\d+)\x00/g, (_, i) =>
     `<code style="font-family:monospace;background:rgba(128,128,128,0.18);padding:1px 4px;border-radius:3px;">${codes[+i]}</code>`
   );
@@ -1927,6 +1953,24 @@ class TableWidget extends WidgetType {
       cell.dataset.col = String(colIndex);
       const row = isHeader ? -1 : rowIndex;
       cell.addEventListener('mousedown', e => {
+        // A click on a rendered `[[wikilink]]` (or `[text](url)`/bare-URL — see
+        // renderTableCellDisplay's own comment) inside the cell needs to reach
+        // linkClickHandler's generic `[data-wiki]`/`.cm-md-link` click handling, exactly like it
+        // already does for a tasks-query row's description elsewhere in this file. But this cell
+        // is `contentEditable`, and its own `focus` listener (below) immediately swaps the cell's
+        // rendered HTML back to raw markdown text the instant it gains focus — which would
+        // destroy the very link span `e.target` points at before the follow-up `click` event ever
+        // gets a chance to identify it (the same "renders as a link but does nothing" trap
+        // renderTableCellDisplay's own comment used to avoid by never rendering these at all).
+        // `e.preventDefault()` here stops the browser's default mousedown-focuses-contentEditable
+        // behavior, so `focus`/the raw-text swap never fires for this click — and returning
+        // *before* the `e.stopPropagation()` below lets this mousedown, and the `click` that
+        // follows it, keep bubbling up to CM6's own contentDOM-level handling exactly as they do
+        // anywhere else in the document, instead of being swallowed as ordinary cell-editing.
+        if (e.target.closest('[data-wiki]') || e.target.closest('.cm-md-link')) {
+          e.preventDefault();
+          return;
+        }
         e.stopPropagation();
         // A right-click (button 2) mousedown fires right before its own `contextmenu`
         // event — without this guard it fell through to the plain-click branch below,
@@ -2254,6 +2298,26 @@ class TableWidget extends WidgetType {
       // default cut action ran against the focused <table> itself (not
       // contentEditable, nothing to cut) and silently did nothing.
       if (tableCellSelection && tableCellSelection.tableFrom === this.from) return true;
+      // A cell of *this* table currently has real (browser-native) focus — the user is doing
+      // plain, single-cell text selection/copy inside a contentEditable cell, entirely
+      // independent of CM6's own document-model selection. This has to be checked before the
+      // `view.state.selection` fallback below: `wireCell`'s own mousedown handler
+      // `e.stopPropagation()`s unconditionally (see its own comment), which stops CM6 from ever
+      // seeing the click and updating `view.state.selection` at all — so that selection just sits
+      // wherever it happened to be *before* the user clicked into the cell, almost never actually
+      // inside this table's own line range. Reported directly ("no puedo copiar texto de una
+      // celda de una tabla"): with no multi-cell `tableCellSelection` active, execution fell
+      // through to the `view.state.selection` check below, whose stale value virtually always
+      // reads as "outside the table" — the exact condition that check treats as "let CM6 handle
+      // it," which then let CM6's own built-in copy handler `preventDefault()` the browser's real,
+      // correct selection inside the focused cell. Checking focus first fixes plain in-cell
+      // copy/cut/paste without weakening the wider-CM6-selection case below at all: that case only
+      // matters when nothing in this table is actually focused to begin with.
+      const active = document.activeElement;
+      if (active && active.isContentEditable) {
+        const ownTable = active.closest('table.cm-table');
+        if (ownTable && Number(ownTable.dataset.tableFrom) === this.from) return true;
+      }
       // Otherwise: an empty table selected as part of a real CM6 selection
       // (e.g. Shift+arrow from just before it to just after it) and then cut
       // did nothing — "la tabla sigue ahí". Root cause: this used to ignore

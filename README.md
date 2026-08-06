@@ -11,13 +11,20 @@ y los temas empaquetados, buscando `fetch`/`XMLHttpRequest`/`http`/`https`/
 `WebSocket`/`EventSource`/telemetría/analítica. **No se encontró ninguna llamada
 de red automática ni ningún SDK de telemetría o diagnóstico.**
 
-- El único punto que toca una URL es `vscode.env.openExternal(...)`
-  (`src/extension.ts`), y solo se dispara desde el handler del mensaje
-  `open-url` — que a su vez solo se envía al hacer **clic** en un enlace
-  markdown estándar (texto entre corchetes seguido de la URL entre
-  paréntesis) o una URL suelta dentro de una nota. Es decir: abre el
-  navegador del sistema únicamente cuando el usuario clica un enlace, igual
-  que cualquier visor de Markdown.
+- El único punto que toca una URL es el handler del mensaje `open-url`
+  (`src/extension.ts`) — que a su vez solo se envía al hacer **clic** en un
+  enlace markdown estándar (texto entre corchetes seguido de la URL entre
+  paréntesis), una URL suelta dentro de una nota, o (desde esta versión) un
+  `[[wikilink]]` dentro de una celda de tabla. Es decir: abre el navegador del
+  sistema únicamente cuando el usuario clica un enlace, igual que cualquier
+  visor de Markdown. La apertura en sí ya no pasa por `vscode.env.openExternal`
+  — se detectó que esa API podía alterar caracteres de una URL muy larga con
+  parámetros ya codificados (`%3F`/`%3D`/`%26`/...) al llegar a la barra de
+  direcciones del navegador, así que ahora se lanza directamente el mecanismo
+  "abrir" del propio sistema operativo (`cmd.exe /c start`/`open`/`xdg-open`,
+  vía `execFile` con argumentos en array, sin intérprete de shell de por
+  medio) con la URL intacta. Sigue siendo un proceso local del sistema, no una
+  llamada de red hecha por la extensión.
 - El CSP del webview (`default-src 'none'; img-src ${cspSource} data: blob:;
   script-src ${cspSource} 'unsafe-inline' 'unsafe-eval'; style-src
   'unsafe-inline';`) no incluye `connect-src`, así que hereda `default-src
@@ -373,6 +380,10 @@ escapado como `\|` se trata como un carácter literal de la celda, nunca como se
 — y se muestra como un `|` normal, sin el carácter de escape, tanto al editar como en la vista
 renderizada. Una celda en blanco (en cualquier posición de la fila, incluida la última) se
 reconoce correctamente y no descuadra el resto de la fila.
+
+Un `[[wikilink]]` (o un enlace `[texto](url)`/una URL suelta) dentro de una celda se muestra
+subrayado y en el color de enlace, y hacer clic sobre él navega/abre la URL igual que en cualquier
+otro punto de la nota — antes se mostraba como texto plano sin formato dentro de las tablas.
 
 Clic derecho sobre una celda abre un menú para añadir/eliminar la fila o columna bajo el cursor,
 eliminar la tabla entera ("Eliminar tabla"), y copiar la tabla entera en un formato que
