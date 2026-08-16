@@ -381,7 +381,7 @@ escapado como `\|` se trata como un carácter literal de la celda, nunca como se
 renderizada. Una celda en blanco (en cualquier posición de la fila, incluida la última) se
 reconoce correctamente y no descuadra el resto de la fila.
 
-Un `[[wikilink]]` (o un enlace `[texto](url)`/una URL suelta) dentro de una celda se muestra
+Un `[[wikilink]]` (o un enlace de tipo texto-más-URL entre corchetes y paréntesis, o una URL suelta) dentro de una celda se muestra
 subrayado y en el color de enlace, y hacer clic sobre él navega/abre la URL igual que en cualquier
 otro punto de la nota — antes se mostraba como texto plano sin formato dentro de las tablas.
 
