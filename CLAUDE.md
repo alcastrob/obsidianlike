@@ -428,11 +428,10 @@ raw YAML) — and once cells can be edited directly, there's no reason left to e
     - `renderTableCellDisplay` now also renders `[[wikilink]]`s (`data-wiki` attribute, same inline link styling `renderCell` uses — no `basePath`/`data-wiki-base`, since a real table's own cells always belong to the currently-open document) and standard `[text](url)`/bare-URL links (`.cm-md-link`, same combined regex as `renderCell`'s own). `#tags` are still deliberately left out — not because of any remaining click-swallowing concern (a tag pill isn't clickable at all, in a cell or anywhere else), just because nothing asked for it.
 - **Tab / Shift+Tab / Enter navigation**, all on `keydown` (`e.preventDefault()`, then commit the
   current cell if its text actually changed, then move): Tab goes to the next cell in reading order
-  (header → row 0 → row 1 → ...), Shift+Tab to the previous one, Enter moves down within the *same*
-  column. Tabbing past the last cell of the last row (or pressing Enter on the last row) inserts a
-  new empty row first and lands in its first cell (or same column, for Enter) — matches ordinary
-  spreadsheet UX for "just keep typing to grow the table," which is the main way a freshly-created
-  empty table actually gets filled in. **Committing and navigating can't be two separate steps** the
+  (header → row 0 → row 1 → ...), Shift+Tab to the previous one. Tabbing past the last cell of the
+  last row inserts a new empty row first and lands in its first cell — matches ordinary spreadsheet
+  UX for "just keep typing to grow the table," which is the main way a freshly-created empty table
+  actually gets filled in. **Committing and navigating can't be two separate steps** the
   naive way (commit via `blur`, then call `.focus()` on the next cell found in the *current* DOM):
   `mutateTableAt` dispatches a document change, which `livePreviewPlugin` reacts to synchronously by
   rebuilding decorations — by the time `view.dispatch(...)` returns, `TableWidget.toDOM()` has already
@@ -440,6 +439,42 @@ raw YAML) — and once cells can be edited directly, there's no reason left to e
   are already detached from the document. `focusTableCell(view, tableFrom, isHeader, rowIndex,
   colIndex)` re-queries the freshly-rebuilt DOM by `data-table-from`/`data-row`/`data-col` *after* the
   commit dispatch returns, rather than holding a stale element reference across it.
+- **Follow-up, requested directly: multi-line cell editing (Ctrl+Enter for a line break, plain
+  Enter/ArrowRight-at-the-end redefined as "move right," and a line-aware Backspace), replacing
+  Enter's old down-the-column navigation.** Before this, a cell's raw stored value could already
+  contain a literal `<br>` marker (the standard way to force a line break inside a table cell's
+  single-line markdown source — see `renderTableCellDisplay`'s own restore step), but there was no
+  way to *see* it while editing (`wireCell`'s `focus` listener did a plain `cell.textContent = raw`,
+  so `<br>` rendered as literal characters, not an actual break) or to create one with a keystroke.
+  - `setCellEditableContent(cell, raw)` / `getCellRawTextFromDom(cell)` (just above the
+    "Multi-cell selection" section) replace every `cell.textContent` get/set in `wireCell`
+    (`focus`, `blur`, `commitAndGo`, `Escape`) with a pair that round-trips a real `<br>` DOM
+    element in place of each literal `"<br>"`/`"<br/>"`/`"<br />"` marker — a cell with existing
+    line breaks now renders as real, separate visual lines while being edited, not literal text.
+  - **Ctrl+Enter** (`insertLineBreakInCell`) inserts a real `<br>` at the caret (deleting any
+    active selection first, same as typing a character would) and leaves the caret on the fresh,
+    empty line right after it (a trailing empty text node, so the new line has somewhere
+    well-defined to land — a bare trailing `<br>` with nothing after it is an awkward caret target
+    in a contentEditable region). Needed its own chord because plain Enter was already taken.
+  - **Backspace at the start of a line** (`findLineStartBr` — the caret sits immediately after a
+    `<br>`, with nothing else between it and that `<br>`) removes that line break and leaves the
+    caret exactly where it already was — which, once the `<br>` is gone, reads as sitting right
+    after the previous line's own content, matching the request ("el cursor pasará a la derecha de
+    la línea anterior") with no extra cursor repositioning needed. Implemented explicitly rather
+    than trusted to whatever a bare `<br>`/text-node contentEditable structure does natively by
+    default — this codebase's own history of contentEditable gotchas (elsewhere in this file) is
+    reason enough not to assume that's safe. Ordinary mid-line Backspace (the common case) is left
+    completely untouched, falling through to native character deletion as before.
+  - **Enter now means "commit and move one cell to the right,"** the exact same `moveRight()`
+    (factored out of what used to be Tab's own inline right-branch) that Tab-without-Shift and a
+    plain **ArrowRight pressed at the end of the cell's own content** (`isCaretAtCellEnd`) also
+    call — wrapping to the next row's first cell (growing the table if this was the last cell of
+    the last row), same wrap-around rule Tab already had. Enter used to instead move straight down
+    the same column, spreadsheet-style; requested directly to match Tab/ArrowRight's left-to-right
+    flow instead, which Ctrl+Enter taking over "add a line" duty freed it up to do. ArrowRight
+    anywhere else in the cell (caret not yet at the end) is left completely alone, so ordinary
+    in-text caret movement keeps working — confirmed with the user rather than assumed, since an
+    unconditional "ArrowRight always exits the cell" would have broken normal text navigation.
 - **Unparseable table text** (`parseTableSrc` returns `null` — shouldn't normally happen, since it
   only needs a header + delimiter line pair, but nothing guarantees a hand-edited table always stays
   valid) still renders as `contentEditable` plain text instead of the old fully-static fallback: on

@@ -1841,6 +1841,119 @@ function focusTableCell(view, tableFrom, isHeader, rowIndex, colIndex) {
   }
 }
 
+// ── Multi-line cell editing: real <br> line breaks + line-aware Backspace ────
+// A table cell's raw stored value is always a single line of markdown source (a pipe-table row
+// can't contain a literal newline) — the existing convention for forcing a visual line break
+// within a cell is literal "<br>" text (see renderTableCellDisplay's own restore step). Before
+// this, a focused cell showed that "<br>" as plain characters (`cell.textContent = raw`), not an
+// actual line break — there was no way to *see* an existing break while editing, let alone add
+// one with a keystroke. `setCellEditableContent`/`getCellRawTextFromDom` replace every
+// `cell.textContent` get/set in `wireCell` with a pair that round-trips a real <br> DOM element
+// in place of each literal "<br>" marker, so a cell with existing line breaks renders as real,
+// separate lines while being edited too, and Ctrl+Enter (below) can add a fresh one the same way.
+function setCellEditableContent(cell, raw) {
+  cell.innerHTML = '';
+  const parts = String(raw == null ? '' : raw).split(/(<br\s*\/?>)/gi);
+  parts.forEach(part => {
+    if (/^<br\s*\/?>$/i.test(part)) { cell.appendChild(document.createElement('br')); }
+    else if (part) { cell.appendChild(document.createTextNode(part)); }
+  });
+}
+
+function getCellRawTextFromDom(cell) {
+  let out = '';
+  cell.childNodes.forEach(n => {
+    if (n.nodeType === Node.TEXT_NODE) out += n.nodeValue;
+    else if (n.nodeName === 'BR') out += '<br>';
+    else out += n.textContent || '';
+  });
+  return out;
+}
+
+// Ctrl+Enter — plain Enter is already taken for cell-to-cell navigation (see wireCell's own
+// `moveRight`), so a line break needs its own chord. Inserts a real <br> at the caret (deleting
+// any active selection first, same as typing a character would) and leaves the caret on the
+// fresh, empty line right after it — a trailing empty text node gives it somewhere well-defined
+// to land, since a bare trailing <br> with nothing after it is an awkward caret target in a
+// contentEditable region.
+function insertLineBreakInCell(cell) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  if (!cell.contains(range.commonAncestorContainer)) return;
+  range.deleteContents();
+  const br = document.createElement('br');
+  range.insertNode(br);
+  const after = document.createTextNode('');
+  br.parentNode.insertBefore(after, br.nextSibling);
+  const newRange = document.createRange();
+  newRange.setStart(after, 0);
+  newRange.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(newRange);
+}
+
+// Backspace at the very start of a line (the caret sits immediately after a <br>, with nothing
+// else between it and that <br>) should delete the line break itself and land the caret right
+// after the previous line's own content — rather than leaving that to whatever a bare
+// contentEditable <br>/text-node structure happens to do natively, which this codebase's own
+// history (see the many contentEditable gotchas throughout this file) has repeatedly found isn't
+// safe to assume. Returns the <br> element to remove, or null when the caret isn't at such a
+// boundary — ordinary mid-line Backspace then falls through untouched to native character
+// deletion.
+function findLineStartBr(cell) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
+  const { startContainer, startOffset } = sel.getRangeAt(0);
+  if (!cell.contains(startContainer)) return null;
+  if (startContainer.nodeType === Node.TEXT_NODE) {
+    if (startOffset !== 0) return null;
+    const prev = startContainer.previousSibling;
+    return prev && prev.nodeName === 'BR' ? prev : null;
+  }
+  if (startContainer === cell) {
+    const prev = cell.childNodes[startOffset - 1];
+    return prev && prev.nodeName === 'BR' ? prev : null;
+  }
+  return null;
+}
+
+// Caret collapsed at the exact end of the cell's own content — used to let a plain ArrowRight
+// fall through to normal in-text caret movement everywhere else, and only take over cell-to-cell
+// navigation once there's nowhere further right left to move the caret to.
+//
+// **Follow-up bug, reported directly: ArrowRight silently did nothing at the true end of a cell
+// (typed text, cursor right after the last character) — only worked right after landing in the
+// cell via Tab/Enter without typing anything first.** The first version compared the caret's own
+// range against a synthetic "end of cell" range via `compareBoundaryPoints` — but a caret placed
+// by actually typing sits *inside* the last text node (e.g. `(textNode, textNode.length)`), while
+// `endRange.selectNodeContents(cell); endRange.collapse(false)` resolves to the *parent-level*
+// boundary (`(cell, cell.childNodes.length)`) instead. These two are the same logical position in
+// the DOM tree, but confirmed via a real `Range`/`Selection` (jsdom, throwaway script, not checked
+// in) that comparing them this way reports them as *not equal* — so the very first character
+// typed into a cell (the moment the caret moves from the parent-level boundary `focusTableCell`
+// itself sets, into the text node the browser just inserted) broke the check for good until the
+// cell was refocused without editing.
+// Fixed by measuring content instead of comparing boundary-point representations: build a range
+// from the caret to just after the cell's last child and check whether anything is actually left
+// in it — `Range.toString()` reads the same regardless of which container/offset shape either
+// endpoint uses, so it isn't sensitive to this representation mismatch at all. A `<br>` contributes
+// no characters to `toString()` (it isn't text), so a further, still-unread line past the caret
+// would otherwise read as "nothing left" too — the explicit `querySelector('br')` check on the
+// trailing range's own contents catches that case.
+function isCaretAtCellEnd(cell) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false;
+  const { startContainer, startOffset } = sel.getRangeAt(0);
+  if (!cell.contains(startContainer)) return false;
+  if (!cell.lastChild) return true; // empty cell — caret has nowhere else to be but "the end"
+  const trailing = document.createRange();
+  trailing.setStart(startContainer, startOffset);
+  trailing.setEndAfter(cell.lastChild);
+  if (trailing.toString().length > 0) return false;
+  return !trailing.cloneContents().querySelector('br');
+}
+
 // ── Multi-cell selection (spreadsheet-style range select/copy/paste) ─────────
 // Each cell is its own independent `contentEditable` element (see the comment at the top of
 // this section), which is great for single-cell editing but gives no built-in way to select a
@@ -2013,7 +2126,7 @@ class TableWidget extends WidgetType {
       });
 
       const commitAndGo = (nextIsHeader, nextRow, nextCol, insertRowFirst) => {
-        const value = cell.textContent;
+        const value = getCellRawTextFromDom(cell);
         if (insertRowFirst) {
           mutateTableAt(this.view, this.from + 1, tt => {
             if (isHeader) { tt.header[colIndex] = value; } else { tt.rows[rowIndex][colIndex] = value; }
@@ -2025,15 +2138,36 @@ class TableWidget extends WidgetType {
         focusTableCell(this.view, this.from, nextIsHeader, nextRow, nextCol);
       };
 
+      // Shared by Tab (no Shift), plain Enter, and ArrowRight-at-the-end-of-the-cell (see
+      // keydown below) — all three now mean the same thing: commit and move one cell to the
+      // right, wrapping to the next row's first cell (growing the table if this was the last
+      // cell of the last row). Enter used to instead move straight down the same column,
+      // spreadsheet-style, but Ctrl+Enter (see insertLineBreakInCell) took over "add a line"
+      // duty, freeing plain Enter to match the requested left-to-right flow instead.
+      const moveRight = () => {
+        if (colIndex < colCount - 1) {
+          commitAndGo(isHeader ? true : false, isHeader ? -1 : rowIndex, colIndex + 1, false);
+          return;
+        }
+        if (isHeader) {
+          if (t.rows.length > 0) { commitAndGo(false, 0, 0, false); } else { commitAndGo(false, 0, 0, true); }
+          return;
+        }
+        if (rowIndex < lastRowIndex) { commitAndGo(false, rowIndex + 1, 0, false); return; }
+        commitAndGo(false, rowIndex + 1, 0, true); // past the last cell of the last row: grow the table
+      };
+
       // Rendered (bold/italic/strikethrough/code) while not focused, raw markdown while
       // being edited — see renderTableCellDisplay's own comment for why this is a
-      // dedicated function rather than reusing renderCell wholesale.
+      // dedicated function rather than reusing renderCell wholesale. setCellEditableContent
+      // (rather than a plain `cell.textContent =`) is what turns any literal "<br>" already in
+      // the stored value into a real line break while editing — see its own comment above.
       cell.addEventListener('focus', () => {
-        cell.textContent = isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex];
+        setCellEditableContent(cell, isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex]);
       });
 
       cell.addEventListener('blur', () => {
-        const value = cell.textContent;
+        const value = getCellRawTextFromDom(cell);
         if (value !== (isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex])) {
           commitTableCell(this.view, this.from, isHeader, rowIndex, colIndex, value);
         }
@@ -2047,12 +2181,11 @@ class TableWidget extends WidgetType {
         // at all now, so there's nothing left for a blanket
         // e.stopPropagation() here to defend against, and — importantly —
         // not calling it means a key we don't otherwise act on (Ctrl+S,
-        // plain typing, Backspace, Ctrl+C/V/X, ...) keeps bubbling normally
-        // to the browser's native contentEditable handling and to whatever
-        // sits above CM6 (VS Code's own keybinding forwarding). Only
-        // Tab/Enter/Escape are ours to fully consume — cell-to-cell
-        // navigation, not document editing — so only those three still call
-        // stopPropagation, each right alongside their own preventDefault.
+        // plain typing, Backspace (outside a line-start boundary), Ctrl+C/V/X, ...) keeps
+        // bubbling normally to the browser's native contentEditable handling and to whatever
+        // sits above CM6 (VS Code's own keybinding forwarding). Only Tab / Ctrl+Enter / Enter /
+        // ArrowRight-at-the-cell's-end / Backspace-at-a-line-start / Escape are ours to fully
+        // consume, each calling stopPropagation right alongside its own preventDefault.
         if (e.key === 'Tab') {
           e.preventDefault();
           e.stopPropagation();
@@ -2063,28 +2196,36 @@ class TableWidget extends WidgetType {
             commitAndGo(true, -1, colCount - 1, false);
             return;
           }
-          if (colIndex < colCount - 1) {
-            commitAndGo(isHeader ? true : false, isHeader ? -1 : rowIndex, colIndex + 1, false);
-            return;
-          }
-          if (isHeader) {
-            if (t.rows.length > 0) { commitAndGo(false, 0, 0, false); } else { commitAndGo(false, 0, 0, true); }
-            return;
-          }
-          if (rowIndex < lastRowIndex) { commitAndGo(false, rowIndex + 1, 0, false); return; }
-          commitAndGo(false, rowIndex + 1, 0, true); // past the last cell of the last row: grow the table
+          moveRight();
+        } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          // A line break within the same cell, not cell-to-cell navigation — see
+          // insertLineBreakInCell's own comment for why this needed its own chord.
+          e.preventDefault();
+          e.stopPropagation();
+          insertLineBreakInCell(cell);
         } else if (e.key === 'Enter') {
           e.preventDefault();
           e.stopPropagation();
-          if (isHeader) {
-            if (t.rows.length > 0) { commitAndGo(false, 0, colIndex, false); } else { commitAndGo(false, 0, colIndex, true); }
-            return;
+          moveRight();
+        } else if (e.key === 'ArrowRight') {
+          // Only takes over once there's nowhere further right left to move the caret to within
+          // the cell's own text — everywhere else, ArrowRight is left completely alone so
+          // ordinary in-cell caret movement keeps working.
+          if (isCaretAtCellEnd(cell)) {
+            e.preventDefault();
+            e.stopPropagation();
+            moveRight();
           }
-          if (rowIndex < lastRowIndex) { commitAndGo(false, rowIndex + 1, colIndex, false); return; }
-          commitAndGo(false, rowIndex + 1, colIndex, true); // past the last row: grow the table
+        } else if (e.key === 'Backspace') {
+          const br = findLineStartBr(cell);
+          if (br) {
+            e.preventDefault();
+            e.stopPropagation();
+            br.remove();
+          }
         } else if (e.key === 'Escape') {
           e.stopPropagation();
-          cell.textContent = isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex];
+          setCellEditableContent(cell, isHeader ? t.header[colIndex] : t.rows[rowIndex][colIndex]);
           cell.blur();
         }
       });
