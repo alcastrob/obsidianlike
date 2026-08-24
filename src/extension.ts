@@ -1820,7 +1820,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
               // hasn't necessarily run yet the instant `executeCommand` resolves.
               const targetPanel = panelsByPath.get(targetUri.fsPath);
               if (targetPanel) {
-                setTimeout(() => { try { targetPanel.webview.postMessage({ type: 'scroll-to-line', line }); } catch {} }, 350);
+                // `selectLine: true` is what's specific to this call site — a task's own line is
+                // what the user is jumping to inspect/edit, so its whole text is selected, not
+                // just a bare cursor placement (the other `scroll-to-line` senders above, aimed at
+                // a heading's line, deliberately keep the plain cursor-only behavior).
+                setTimeout(() => { try { targetPanel.webview.postMessage({ type: 'scroll-to-line', line, selectLine: true }); } catch {} }, 350);
               }
             } catch (err) {
               vscode.window.showErrorMessage(`No se pudo abrir la tarea: ${err}`);

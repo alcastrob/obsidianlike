@@ -461,6 +461,16 @@ una sola línea del script original. Incluye también un polyfill de las extensi
 añade a `HTMLElement.prototype` y esos scripts dan por hechas (`createDiv`, `createEl`,
 `createSpan`, `appendText`, `empty`, `addClass`/`removeClass`/`toggleClass`...).
 
+`app.workspace.getLeaf().openFile(file, {eState:{line}})` (la forma con la que un script como
+`tasks-timeline.js` abre la nota de una tarea desde su propia tarjeta) abre esa nota en una
+pestaña nueva y, además de hacer scroll hasta esa línea, selecciona todo su texto — igual que al
+hacer clic en el backlink de una fila de una consulta ` ```tasks ` — para que la tarea concreta
+quede inmediatamente visible y lista para editarse o copiarse. `view` sigue devuelto como
+`undefined` en el leaf que entrega `getLeaf()` (el editor real de VS Code no expone una instancia
+CM6 al proceso de la extensión), así que cualquier manipulación que el script intente sobre
+`view.editor` tras abrir el fichero no hace nada, silenciosamente — el posicionamiento/selección
+ya ha ocurrido igualmente a través de este mecanismo.
+
 Solo se detecta este caso cuando el bloque contiene literalmente `dv.view(` — cualquier otro
 bloque `dataviewjs` (uno que solo use `dv.table()`/`dv.list()` para un informe simple) sigue
 yendo por la ruta de `obsidianlike-dataview` de arriba, sin cambios. Detalle técnico completo en

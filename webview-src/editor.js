@@ -3119,7 +3119,25 @@ function buildDataviewApp() {
         // instance to the extension host the way Obsidian exposes `view.editor`, so a script's
         // `if (view && view.editor) view.editor.setCursor(...)`-style cursor positioning after
         // opening a file harmlessly no-ops instead of throwing.
-        return { view: undefined, async openFile(file) { vscode.postMessage({ type: 'dataview-open-note', path: file.path }); } };
+        return {
+          view: undefined,
+          async openFile(file, options) {
+            // A script that wants to land on a specific line (e.g. a task's own kanban card
+            // opening the note it was parsed from) passes Obsidian's real `openFile(file,
+            // {eState})` shape. Obsidian's `eState.line` is the one field worth honouring here —
+            // route it through the exact same (path, line) pipeline already proven for a
+            // ```tasks``` query row's backlink (`open-task-location`/`scroll-to-line`, see the
+            // comment by `cm-tasks-query-backlink-link` above) instead of `dataview-open-note`,
+            // which carries no line at all and therefore can never scroll anywhere. Falls back to
+            // the plain open when no eState/line is given, unchanged from before.
+            const line = options?.eState?.line;
+            if (typeof line === 'number') {
+              vscode.postMessage({ type: 'open-task-location', path: file.path, line });
+            } else {
+              vscode.postMessage({ type: 'dataview-open-note', path: file.path });
+            }
+          },
+        };
       },
     },
     metadataCache: {
@@ -8950,8 +8968,13 @@ window.addEventListener('message', ev => {
     case 'scroll-to-line': {
       const ln = Math.min(Math.max(1, (msg.line || 0) + 1), view.state.doc.lines);
       const line = view.state.doc.line(ln);
+      // `selectLine` (set by `open-task-location`'s host-side handler, not by the heading-scroll
+      // senders elsewhere) selects the line's whole text instead of just placing the cursor at
+      // its start — the user is jumping straight to a task to inspect/edit it, so highlighting
+      // the whole task line makes it immediately visible and ready to be typed over/copied.
+      const selection = msg.selectLine ? { anchor: line.from, head: line.to } : { anchor: line.from };
       view.dispatch({
-        selection: { anchor: line.from },
+        selection,
         effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
       });
       view.focus();
