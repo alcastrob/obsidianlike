@@ -205,17 +205,16 @@ const vsTheme = EditorView.theme({
   '.cm-list-depth-3': { paddingLeft: '4.5em' },
   '.cm-list-depth-4': { paddingLeft: '6em' },
   '.cm-list-first': { marginTop: '0.5em' },
-  // Marker color: real Obsidian themes drive this via --list-marker-color
-  // (falling back to the theme's own accent color, then a plain muted gray)
-  // — reported against a reference Obsidian screenshot showing ordered-list
-  // numbers in a distinct, non-body-text color, which neither .cm-list-bullet
-  // nor .cm-list-marker-raw (below) ever set before this: an inactive bullet
-  // (BulletWidget) got a flat --text-muted, and an ordered marker / active
-  // bullet (.cm-list-marker-raw) got no color rule at all, silently
-  // inheriting plain body text color instead of reading as a marker.
+  // Marker color: same as body text. An earlier version fell back through
+  // var(--text-accent, ...) when a theme didn't define --list-marker-color —
+  // but many Obsidian themes set --text-accent to a blue, which made plain
+  // bullets/numbers render blue (reported: "las viñetas aparecen en color
+  // azul cuando deberían ser del mismo color que el texto"). A theme that
+  // *explicitly* sets --list-marker-color is still honored; the fallback is
+  // just `inherit` (body text color) now, never the accent color.
   '.cm-list-bullet': {
     display: 'inline-block', width: `${LIST_BULLET_MARKER_WIDTH_EM}em`,
-    color: 'var(--list-marker-color, var(--text-accent, var(--text-muted, inherit)))',
+    color: 'var(--list-marker-color, inherit)',
   },
   // Raw (unrendered) list marker text — an active-line bullet ("- "/"* "/"+ ")
   // or any ordered marker ("1. ", "10. ", ...), neither of which ever becomes
@@ -225,7 +224,7 @@ const vsTheme = EditorView.theme({
   // different widths, so this class-level width is just a fallback.
   '.cm-list-marker-raw': {
     display: 'inline-block', width: `${LIST_BULLET_MARKER_WIDTH_EM}em`,
-    color: 'var(--list-marker-color, var(--text-accent, var(--text-muted, inherit)))',
+    color: 'var(--list-marker-color, inherit)',
   },
   '.cm-hr': {
     border: 'none',
@@ -5511,7 +5510,15 @@ const wikiLinkPlugin = ViewPlugin.fromClass(class {
 }, { decorations: v => v.decorations });
 
 // ── Image plugin (![[filename.ext]] → <img>) ──────────────────────────────────
-const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
+// `.drawio` is included so `![[diagram.drawio]]` renders as an image exactly
+// like a `.png`/`.svg` does. The host (getImageMap) only puts a `.drawio` file
+// in `imageMap` when its content is actually SVG (draw.io "Editable SVG" /
+// diagrams.net-style export), served as a `data:image/svg+xml` URI — a native
+// mxfile-XML `.drawio` can't be rendered without a full draw.io engine, so it
+// falls through to EmbedNotFoundWidget instead. `.drawio.svg`/`.drawio.png`
+// exports already match via their trailing `.svg`/`.png`, no drawio entry
+// needed for those.
+const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp|bmp|drawio)$/i;
 
 // A wiki-link/transclusion target ending in *any* extension other than a
 // recognized image one (IMG_EXT, handled separately by imgPlugin) or `.md`
@@ -5532,9 +5539,17 @@ const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp|bmp)$/i;
 // enumerated list, so this covers whatever attachment type shows up next
 // without needing another list update.
 const EXTERNAL_FILE_EXT = /\.[a-z0-9]+$/i;
+// `.drawio` is deliberately an exception to the `!IMG_EXT` exclusion: an
+// `![[x.drawio]]` *embed* is rendered as an image by imgPlugin (which tests
+// IMG_EXT first, and transclusionPlugin skips anything matching IMG_EXT), but a
+// plain `[[x.drawio]]` *link* should still open the file in the OS's draw.io
+// editor rather than resolve as a note — so it must still count as an external
+// file target here. The embed-rendering paths all check IMG_EXT before this
+// function, so this exception never misroutes an embed.
 function isExternalFileTarget(raw) {
   const filename = (raw || '').split('#')[0].split('|')[0].trim();
-  return EXTERNAL_FILE_EXT.test(filename) && !IMG_EXT.test(filename) && !/\.md$/i.test(filename);
+  if (!EXTERNAL_FILE_EXT.test(filename) || /\.md$/i.test(filename)) { return false; }
+  return !IMG_EXT.test(filename) || /\.drawio$/i.test(filename);
 }
 const imgPlugin = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this._build(view); }
@@ -5573,10 +5588,15 @@ const imgPlugin = ViewPlugin.fromClass(class {
       // A recognized image extension with no resolved src is a broken embed
       // (moved/deleted/never-pasted file), not a "not an image, skip it" case
       // — render a clear "not found" message instead of silently leaving the
-      // raw "![[...]]" text untouched (the previous behavior).
+      // raw "![[...]]" text untouched (the previous behavior). A `.drawio` with
+      // no src is the one benign case: the file likely exists but is native
+      // mxfile XML (not SVG), which the host can't turn into an image — offer a
+      // clickable "open in draw.io" box instead of a misleading "not found".
       const widget = src
         ? new ImageWidget(src, filename, width, caption)
-        : new EmbedNotFoundWidget(filename);
+        : (/\.drawio$/i.test(filename)
+            ? new ExternalFileWidget(raw)
+            : new EmbedNotFoundWidget(filename));
       all.push({ from: mFrom, to: mTo, dec: Decoration.replace({ widget }) });
     }
     all.sort((a, b) => a.from - b.from);

@@ -107,6 +107,33 @@ directorio es ambiguo, porque las carpetas "solo en la nube" de Dropbox Smart Sy
 OneDrive Files On-Demand usan reparse points de NTFS que Node puede no reportar
 correctamente como directorio en Windows.
 
+### Formatos admitidos
+
+Extensiones tratadas como imagen: `png`, `jpg`/`jpeg`, `gif`, `svg`, `webp`, `bmp`.
+Un `![[diagrama.svg]]` se renderiza igual que un `.png`.
+
+**`![[diagrama.drawio]]`** también se renderiza como imagen: un conversor propio
+(en `src/drawio.ts`, del lado del host) transforma el mxGraphModel a SVG en línea
+—soporta tanto el XML sin comprimir como el `<diagram>` comprimido (base64 +
+deflate), y también archivos `.drawio` cuyo contenido ya es un SVG ("Editable
+SVG" de draw.io)—. Cubre el subconjunto habitual de un diagrama hecho a mano:
+rectángulos (con o sin esquinas redondeadas), elipses, rombos, triángulos,
+paralelogramos, hexágonos y cilindros; aristas (recta o con puntos intermedios,
+recortadas al borde de la forma) con puntas de flecha; y etiquetas con sus
+colores de relleno/borde/fuente y su alineación. **No reproduce**: degradados,
+formas personalizadas (`shape=mxgraph.*`), swimlanes, imágenes incrustadas,
+grupos con geometría relativa ni el enrutado de aristas curvas — para diagramas
+complejos, exporta desde draw.io como `.drawio.svg`/`.drawio.png` (que ya se
+renderizan por su extensión) o abre el archivo en el editor de draw.io. Si el
+archivo no se puede interpretar como diagrama, el embed muestra una caja para
+abrirlo con draw.io en vez de una imagen rota.
+
+`![[diagrama.drawio]]` como **embed** se ve como imagen; `[[diagrama.drawio]]`
+como **enlace** normal sigue abriendo el archivo en el editor de draw.io del
+sistema. El mapa de imágenes se calcula al abrir la nota, así que editar un
+`.drawio` mientras su nota está abierta requiere recargar la nota para que se
+vuelva a renderizar.
+
 ## Resolución y creación de wikilinks (`[[Nota]]`)
 
 - La búsqueda es siempre **por toda la bóveda primero**, nunca limitada al directorio

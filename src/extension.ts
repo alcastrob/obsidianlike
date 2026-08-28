@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFile } from 'child_process';
+import { drawioFileToDataUri } from './drawio';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -39,6 +40,47 @@ function findImageFiles(dir: string, fileList: string[] = []): string[] {
     else if (isFile && IMAGE_EXT_RE.test(entry.name)) { fileList.push(fullPath); }
   }
   return fileList;
+}
+
+// Bare `.drawio` files (`![[diagram.drawio]]`). Rendered to an inline SVG by
+// the small host-side converter in ./drawio.ts (mxGraphModel → SVG, covering the
+// common shape/edge/label subset — see that file's own header for the exact
+// scope), or passed straight through when the file's content is already an SVG
+// document (draw.io "Editable SVG" export). This walker just collects the
+// candidates; getImageMap runs each through the converter.
+// (`.drawio.svg`/`.drawio.png` exports already match IMAGE_EXT_RE via their
+// trailing `.svg`/`.png` and go through findImageFiles unchanged.)
+const DRAWIO_EXT_RE = /\.drawio$/i;
+const DRAWIO_MAX_BYTES = 4 * 1024 * 1024;
+
+function findDrawioFiles(dir: string, fileList: string[] = []): string[] {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return fileList; }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') { continue; }
+    const fullPath = path.join(dir, entry.name);
+    let isDir = entry.isDirectory();
+    let isFile = entry.isFile();
+    if (!isDir && !isFile) {
+      try { const st = fs.statSync(fullPath); isDir = st.isDirectory(); isFile = st.isFile(); }
+      catch { continue; }
+    }
+    if (isDir) { findDrawioFiles(fullPath, fileList); }
+    else if (isFile && DRAWIO_EXT_RE.test(entry.name)) { fileList.push(fullPath); }
+  }
+  return fileList;
+}
+
+// Returns a `data:image/svg+xml;base64,...` URI for a `.drawio` file (rendered
+// from its mxGraphModel, or passed through if already SVG), or null if it can't
+// be turned into an image. A data URI rather than a webview resource URI because
+// VS Code picks the response Content-Type from the file extension, and `.drawio`
+// isn't `image/svg+xml`.
+function drawioSvgDataUri(fsPath: string): string | null {
+  try {
+    if (fs.statSync(fsPath).size > DRAWIO_MAX_BYTES) { return null; }
+    return drawioFileToDataUri(fs.readFileSync(fsPath, 'utf8'));
+  } catch { return null; }
 }
 
 function getSaveDir(docFsPath: string): string {
@@ -98,6 +140,18 @@ function getImageMap(webview: vscode.Webview, docUri: vscode.Uri): Record<string
   // 2) Fall back to a recursive search of the whole vault for anything not found above.
   const vaultRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? path.dirname(docUri.fsPath);
   for (const fullPath of findImageFiles(vaultRoot)) { addFile(fullPath); }
+
+  // 3) Bare `.drawio` files whose content is an SVG document — mapped by
+  //    basename to an inline data URI so `![[diagram.drawio]]` renders as an
+  //    image just like a `.png`/`.svg` (configured dir first, then vault-wide).
+  const addDrawio = (fullPath: string) => {
+    const name = path.basename(fullPath);
+    if (name in map) { return; }
+    const uri = drawioSvgDataUri(fullPath);
+    if (uri) { map[name] = uri; }
+  };
+  for (const fullPath of findDrawioFiles(configuredDir)) { addDrawio(fullPath); }
+  for (const fullPath of findDrawioFiles(vaultRoot))     { addDrawio(fullPath); }
 
   return map;
 }
