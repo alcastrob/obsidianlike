@@ -1,7 +1,7 @@
 // webview-src/editor.js — CodeMirror 6 editor for the VS Code vault extension.
 // Bundled by esbuild into out/editor.bundle.js.
 
-import { EditorState, EditorSelection, RangeSetBuilder, Compartment, StateEffect, Prec } from "@codemirror/state";
+import { EditorState, EditorSelection, RangeSetBuilder, Compartment, StateEffect, Prec, Transaction } from "@codemirror/state";
 import {
   EditorView, ViewPlugin, Decoration, WidgetType, keymap, drawSelection, runScopeHandlers
 } from "@codemirror/view";
@@ -759,20 +759,58 @@ const vsTheme = EditorView.theme({
   // Folded heading content — full zeroing rule lives at the end of this
   // stylesheet, see the comment there.
   // Heading fold indicator — mirrors Obsidian's .cm-fold-indicator structure.
-  // Obsidian only reveals this (and the Border theme's H1/H2/H3 icon reskin
-  // for it) while the pointer is over the heading line; otherwise it's fully
-  // hidden, leaving just the colored ::before bar. Hidden by default here too.
+  // For an *expanded* heading, Obsidian only reveals this (and the Border
+  // theme's H1/H2/H3 icon reskin for it) while the pointer is over the
+  // heading line — hidden by default here too, unchanged. But for a
+  // *collapsed* heading it's a real state indicator (which level is this
+  // folded section?), not a hover affordance, and Obsidian keeps it visible
+  // at all times — confirmed directly against a side-by-side screenshot, "el
+  // indicador H1, H2... [tiene] que verse todo el tiempo, no cuando pasar el
+  // ratón". The `.is-collapsed` override below (same class FoldToggle
+  // already adds when folded, used elsewhere in this file for the rotated
+  // chevron) forces it on regardless of hover.
   '.cm-fold-indicator': {
     display: 'inline-block', cursor: 'pointer', userSelect: 'none',
     opacity: '0', transition: 'opacity 0.15s', verticalAlign: 'middle',
   },
   '.cm-line:hover .cm-fold-indicator, .cm-fold-indicator:hover': { opacity: '0.85' },
+  '.cm-fold-indicator.is-collapsed': { opacity: '1 !important' },
   '.cm-fold-indicator .svg-icon.right-triangle': {
-    width: '14px', height: '14px', verticalAlign: 'middle',
+    verticalAlign: 'middle',
     transition: 'transform 0.15s',
   },
   '.cm-fold-indicator.is-collapsed .svg-icon.right-triangle': {
     transform: 'rotate(-90deg)',
+  },
+  // Badge size, scaled per heading level rather than one fixed px value —
+  // measured directly against a real Obsidian screenshot (same technique as
+  // the heading margin fix above), clearly smaller than a single character
+  // of the heading text itself, not the same fixed 14px this used to be for
+  // every level regardless of size. First pass (0.3×) was still visibly
+  // smaller than Obsidian's own badge once actually compared side by side —
+  // measured the two "H1" glyphs directly (pixel bounding box, red-channel
+  // isolated from the accent bar sitting right next to it) and rescaled
+  // proportionally (0.3 × 63/45 ≈ 0.42) to match.
+  '.HyperMD-header-1 .cm-fold-indicator .svg-icon.right-triangle': { width: 'calc(var(--h1-size, 1.75em) * 0.42)', height: 'calc(var(--h1-size, 1.75em) * 0.42)' },
+  '.HyperMD-header-2 .cm-fold-indicator .svg-icon.right-triangle': { width: 'calc(var(--h2-size, 1.4em) * 0.42)', height: 'calc(var(--h2-size, 1.4em) * 0.42)' },
+  '.HyperMD-header-3 .cm-fold-indicator .svg-icon.right-triangle': { width: 'calc(var(--h3-size, 1.15em) * 0.42)', height: 'calc(var(--h3-size, 1.15em) * 0.42)' },
+  '.HyperMD-header-4 .cm-fold-indicator .svg-icon.right-triangle': { width: 'calc(var(--h4-size, 1.1em) * 0.42)', height: 'calc(var(--h4-size, 1.1em) * 0.42)' },
+  '.HyperMD-header-5 .cm-fold-indicator .svg-icon.right-triangle': { width: 'calc(var(--h5-size, 1em) * 0.42)', height: 'calc(var(--h5-size, 1em) * 0.42)' },
+  '.HyperMD-header-6 .cm-fold-indicator .svg-icon.right-triangle': { width: 'calc(var(--h6-size, 0.95em) * 0.42)', height: 'calc(var(--h6-size, 0.95em) * 0.42)' },
+  // "..." after a folded heading's own text (FoldEllipsisWidget) — plain
+  // muted caption text, matching Obsidian's own understated treatment (it's
+  // secondary to the heading text itself, not meant to compete with it).
+  // Deliberately *not* scaled to the heading's own (much bigger) font-size
+  // the way the bar/badge above are — Obsidian's own indicator renders at a
+  // small, fixed, body-text-ish size regardless of which heading level it
+  // follows, confirmed directly against the reference screenshot.
+  //
+  // `letterSpacing` fans the three dots out — bare "•••" with no spacing
+  // prints as a tight, almost solid blob at this size, not three separate
+  // dots the way Obsidian's own reads.
+  '.cm-fold-ellipsis': {
+    color: 'var(--text-faint, var(--text-muted, #999))',
+    fontWeight: '400', fontSize: '0.7em', letterSpacing: '1px', userSelect: 'none',
   },
   // Needs a positioning context so the fold indicator (below) and the
   // full-height color bar (further below) can both be positioned absolutely
@@ -780,6 +818,65 @@ const vsTheme = EditorView.theme({
   // move or resize the line box itself. paddingLeft makes room for the bar,
   // which no longer occupies inline flow width once it's absolutely positioned.
   '.HyperMD-header': { position: 'relative', paddingLeft: '7px' },
+  // Heading top spacing — deliberately declared here, not left to the loaded
+  // Obsidian theme. Measured directly against a real side-by-side screenshot
+  // (two folded H1s, Obsidian on the left vs. this editor on the right, at
+  // identical pixel scale): Obsidian showed a clear, comfortable gap between
+  // the two heading lines, while this editor packed them together with
+  // almost none at all — visibly confirmed by the accent bar itself reading
+  // as one unbroken stripe spanning both lines instead of two separate ones.
+  // Reported directly, twice: "el espacio... es evidente... especialmente
+  // notable en el caso de plegar" and, after the first (wrong) fix attempt,
+  // "el espacio es incorrecto" again against this same screenshot.
+  //
+  // First fix attempt assumed the opposite problem — that a theme-provided
+  // margin-top was *doubling up* when a heading directly follows another
+  // heading or folded content, and tried to cancel it out. That shipped a
+  // no-op: checked directly against the vault's own Border theme.css, it
+  // defines *no* margin-top for `.HyperMD-header-N` at all in Live Preview.
+  // Real Obsidian's own comfortable default spacing there comes from
+  // Obsidian's own built-in app stylesheet, not from any theme — themes only
+  // ever *override* it, so a theme that doesn't bother re-declaring it
+  // (this one included) still gets it for free inside Obsidian itself. This
+  // extension has no access to that base stylesheet at all (it isn't part
+  // of the vault, it's bundled inside the Obsidian application), so without
+  // our own explicit value here, a heading gets *zero* top margin from any
+  // source — exactly the cramped result measured above.
+  //
+  // Scaled to each level's own font-size (`--hN-size`) rather than one fixed
+  // px value, so a bigger heading still reads as proportionally more
+  // separated from what precedes it than a smaller one — ordinary
+  // typographic convention, and consistent with how `.cm-header-N` already
+  // scales every other heading metric off the same per-level variable.
+  // `!important` guards against a *different* theme that, unlike this one,
+  // does define its own `.HyperMD-header-N` margin-top and would otherwise
+  // fight this at equal specificity (single class either way) purely by
+  // whichever stylesheet happens to load last.
+  //
+  // Multiplier tuned twice against real pixel measurements of the same
+  // side-by-side screenshot technique: an initial 0.45 (chosen by eye against
+  // the first repro) only closed part of the gap — measured afterward at
+  // ~21px between two folded H1s here vs. Obsidian's own ~66px in the same
+  // screenshot at the same scale — so it was rescaled proportionally
+  // (0.45 × 66/21) to 1.4, matching Obsidian's actual spacing rather than an
+  // approximation of it.
+  '.HyperMD-header-1': { marginTop: 'calc(var(--h1-size, 1.75em) * 1.4) !important' },
+  '.HyperMD-header-2': { marginTop: 'calc(var(--h2-size, 1.4em) * 1.4) !important' },
+  '.HyperMD-header-3': { marginTop: 'calc(var(--h3-size, 1.15em) * 1.4) !important' },
+  '.HyperMD-header-4': { marginTop: 'calc(var(--h4-size, 1.1em) * 1.4) !important' },
+  '.HyperMD-header-5': { marginTop: 'calc(var(--h5-size, 1em) * 1.4) !important' },
+  '.HyperMD-header-6': { marginTop: 'calc(var(--h6-size, 0.95em) * 1.4) !important' },
+  // A heading that opens the document itself (the very first line inside
+  // .cm-content) shouldn't get that extra top margin on top of .cm-content's
+  // own top padding — it would just push the note's first line down for no
+  // reason, the same "don't double up on top spacing for the very first
+  // line" concern the Border theme's own `.cm-content>div:first-of-type
+  // { padding-top: 0 !important }` rule addresses for *padding*, but margin
+  // is a separate property that rule never touches. Three classes
+  // (.cm-content, .HyperMD-header, :first-child) beats any single level's
+  // own two-class rule above on specificity alone, so this reliably wins
+  // regardless of which heading level happens to open the document.
+  '.cm-content > .HyperMD-header:first-child': { marginTop: '0 !important' },
   // The heading's ::before bar starts at the line's own left edge (x:0) in
   // normal flow, so to put the fold indicator to its *left* (matching real
   // Obsidian — see the H1/H2 badge in its hover screenshot) it has to leave
@@ -812,7 +909,7 @@ const vsTheme = EditorView.theme({
     position: 'absolute !important',
     top: '0 !important', bottom: '0 !important', left: '0 !important',
     height: 'auto !important',
-    width: '4px !important',
+    width: '3px !important',
     margin: '0 !important',
     transform: 'none !important',
   },
@@ -7842,6 +7939,35 @@ class FoldToggle extends WidgetType {
   ignoreEvent() { return false; }
 }
 
+// "..." shown right after a folded heading's own text — matches Obsidian's
+// own collapsed-heading display exactly (confirmed directly against a real
+// screenshot: "Sección 1 ..."). Requested directly: "puedes poner también
+// los '...' que aparecen tras el texto de un H1, H2... de una sección
+// colapsada?" A zero-length widget at the heading line's own `.to` (pushed
+// with `side: 1` so it renders *after* any real content at that exact
+// point, same convention FoldToggle's own `side: -1` uses to render
+// *before* the line's content at `.from`), so it's purely decorative — it
+// never becomes part of the document text and needs no click handling of
+// its own, unlike the fold chevron.
+class FoldEllipsisWidget extends WidgetType {
+  eq() { return true; } // stateless — any two instances render identically
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = 'cm-fold-ellipsis';
+    // Three round bullet characters, not literal periods — a zoomed
+    // side-by-side comparison against a real Obsidian screenshot showed
+    // Obsidian's own indicator as plainly round dots, sized noticeably
+    // bigger than three "." marks ever read as (a period only occupies the
+    // bottom sliver of its own line box, so even a much bigger font-size
+    // still looks small and low; "•" sits centered and reads as a real dot
+    // at a normal size). See .cm-fold-ellipsis in vsTheme for the sizing.
+    span.textContent = ' •••';
+    span.contentEditable = 'false';
+    return span;
+  }
+  ignoreEvent() { return true; } // purely decorative, never needs to handle its own events
+}
+
 function collectHeadings(state) {
   const hs = [];
   syntaxTree(state).iterate({
@@ -7936,6 +8062,17 @@ const foldPlugin = ViewPlugin.fromClass(class {
         if (!hiddenByFold && h.lineTo >= vf && h.lineFrom <= vt) {
           all.push({ from: h.lineFrom, to: h.lineFrom,
             dec: Decoration.widget({ widget: new FoldToggle(h.lineFrom, foldedSet.has(h.lineFrom)), side: -1 }) });
+          // "..." after the heading text — only when this heading is both
+          // folded *and* actually has real content hidden behind it (a
+          // folded heading with nothing after it, e.g. immediately followed
+          // by the next heading with no blank line, has no entry in
+          // foldedSpans at all — see computeFoldedSpans' own `foldEnd >
+          // h.lineTo` guard — so showing "..." there would misleadingly
+          // imply hidden content that doesn't exist).
+          if (foldedSpans.some(sp => sp.from === h.lineTo + 1)) {
+            all.push({ from: h.lineTo, to: h.lineTo,
+              dec: Decoration.widget({ widget: new FoldEllipsisWidget(), side: 1 }) });
+          }
         }
       }
 
@@ -8017,6 +8154,122 @@ const foldAtomicRanges = EditorView.atomicRanges.of(view => {
   }
   return builder.finish();
 });
+
+// Redirects an edit made right at the end of a folded heading's own line to
+// the *end of that heading's already-hidden content* instead — matching
+// Obsidian exactly, confirmed directly against real Obsidian behavior: "si
+// pongo el cursor al final de un encabezado de una sección colapsada, en
+// obsidianlike se inserta el texto justo después de la cabecera. En Obsidian
+// se hace esa inserción en la última línea de la sección colapsada." I.e.
+// Obsidian doesn't insert new text as a brand-new *first* line of the
+// section — it continues from wherever the section's content already left
+// off, the same way clicking at the end of a long unfolded paragraph and
+// typing continues *that* line rather than starting a new one above it.
+//
+// Why this can't just be "let the edit happen, then unfold" (an earlier,
+// weaker version of this fix): foldAtomicRanges makes every position inside
+// a folded span unreachable via ordinary navigation, but the position right
+// at a folded heading's own line-end (h.lineTo) is *not* inside that span —
+// it's the ordinary, non-atomic boundary position immediately before it. An
+// edit made from there (Enter, or typing a bare character) is a perfectly
+// normal insertion at h.lineTo, which is exactly *where it lands* — as the
+// section's new first line, immediately after the heading, pushing whatever
+// content already existed there one line down. Simply revealing the fold
+// afterward doesn't fix *placement*, only *visibility* — the earlier version
+// of this fix only solved the "text silently disappears" half of the bug,
+// not the "text lands in the wrong place" half now reported directly.
+//
+// Fix: an EditorState.transactionFilter — run *before* the transaction is
+// applied, so it can rewrite where the edit actually lands rather than
+// reacting after the fact — intercepts exactly the narrow shape this
+// scenario produces (a single, zero-width insertion whose position is
+// precisely a currently-folded heading's own h.lineTo) and substitutes a new
+// transaction that applies the *same inserted text* at the end of that
+// heading's folded span instead, unfolding it in the same step so the
+// result is immediately visible. Every other edit — including editing the
+// heading's own title text anywhere *before* its very last character, which
+// must keep working normally — falls through untouched, since its change
+// position won't match h.lineTo for any folded heading at all.
+const foldEdgeRedirectFilter = EditorState.transactionFilter.of(tr => {
+  if (!tr.docChanged || sourceMode || !foldedSet.size) return tr;
+  if (!(tr.isUserEvent('input') || tr.isUserEvent('delete'))) return tr;
+  // Only handle the simple, common case: exactly one change, and it's a pure
+  // insertion (nothing deleted) — Enter or a typed character/IME commit, not
+  // e.g. a multi-cursor edit or a selection-replacing paste, which fall
+  // through to ordinary (unredirected) handling instead of risking a
+  // misplaced rewrite of something more complex.
+  let changeFrom = -1, changeToOld = -1, insertedText = null, changeCount = 0;
+  tr.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+    changeCount++;
+    changeFrom = fromA; changeToOld = toA; insertedText = inserted;
+  });
+  if (changeCount !== 1 || changeFrom !== changeToOld) return tr;
+
+  const startState = tr.startState;
+  const headings = collectHeadings(startState);
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (!foldedSet.has(h.lineFrom) || changeFrom !== h.lineTo) continue;
+    let foldEnd = startState.doc.length;
+    for (let j = i + 1; j < headings.length; j++) {
+      if (headings[j].level <= h.level) {
+        foldEnd = headings[j].lineFrom > 0 ? headings[j].lineFrom - 1 : 0;
+        break;
+      }
+    }
+    if (foldEnd <= h.lineTo) continue; // folded heading has no content to append to
+    foldedSet.delete(h.lineFrom); // reveal immediately so the result is visible
+    return {
+      changes: { from: foldEnd, to: foldEnd, insert: insertedText },
+      selection: { anchor: foldEnd + insertedText.length },
+      userEvent: tr.annotation(Transaction.userEvent),
+    };
+  }
+  return tr;
+});
+
+// Safety net for every *other* way an edit could still end up logically
+// inside a folded span despite the filter above only ever handling the one
+// narrow (single, zero-width insertion) shape it targets — a paste, a
+// multi-change transaction, or any future edit path that reaches a folded
+// position some other way. Never lets the cursor sit somewhere the user
+// can't actually see: if a genuine edit's *result* lands inside a currently-
+// folded span, unfold that heading right away, same principle
+// frontmatterAtomicRanges/foldAtomicRanges already lean on elsewhere in this
+// file.
+const foldAutoRevealPlugin = ViewPlugin.fromClass(class {
+  update(u) {
+    if (!u.docChanged) return;
+    if (!u.transactions.some(t => t.isUserEvent('input') || t.isUserEvent('delete'))) return;
+    const view = u.view;
+    // Deferred to a microtask for the same reason orderedListRenumberPlugin's
+    // own fix-up dispatch is (see its comment): CM6 disallows starting a new
+    // transaction synchronously from inside a ViewPlugin's own update() call.
+    Promise.resolve().then(() => {
+      const state = view.state;
+      if (sourceMode || !foldedSet.size) return;
+      const headings = collectHeadings(state);
+      const head = state.selection.main.head;
+      for (let i = 0; i < headings.length; i++) {
+        const h = headings[i];
+        if (!foldedSet.has(h.lineFrom)) continue;
+        let foldEnd = state.doc.length;
+        for (let j = i + 1; j < headings.length; j++) {
+          if (headings[j].level <= h.level) {
+            foldEnd = headings[j].lineFrom > 0 ? headings[j].lineFrom - 1 : 0;
+            break;
+          }
+        }
+        if (foldEnd <= h.lineTo) continue; // folded heading has no content at all
+        if (head >= h.lineTo + 1 && head <= foldEnd) {
+          foldedSet.delete(h.lineFrom);
+          view.dispatch({ effects: foldEffect.of(h.lineFrom) });
+          return; // an edit can only ever land inside one folded span at a time
+        }
+      }
+    });
+  }
+}, {});
 
 // Blocks any cursor position from line 2 through the frontmatter's own
 // closing "---" line — requested: the cursor should only ever be able to
@@ -8580,7 +8833,7 @@ function createEditor(parent, content) {
       // rebuild for this same transaction already sees the fresh activation
       // state — see the comment above wikiLinkActivationTracker's definition.
       wikiLinkActivationTracker,
-      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges]),
+      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges, foldEdgeRedirectFilter, foldAutoRevealPlugin]),
       orderedListRenumberPlugin,
       listIndentKeymap,
       // Find/replace panel (Ctrl+F — see obsidianSearchPanelPlugin's own
@@ -8769,7 +9022,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges]
+      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges, foldEdgeRedirectFilter, foldAutoRevealPlugin]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);
@@ -9048,6 +9301,18 @@ window.addEventListener('message', ev => {
       break;
   }
 });
+
+// Tells the host it's now safe to send note-index/note-history/theme-css —
+// see the matching comment on the extension-host side (resolveCustomTextEditor,
+// src/extension.ts) for why this replaced a blind fixed-delay setTimeout there.
+// Sent from here rather than right after createEditor()/view.focus() further
+// up so it genuinely reflects "the message listener above is registered and
+// can act on a reply" rather than merely "the editor object exists" — even
+// though in practice, since this whole file runs as one synchronous script,
+// the difference could never actually be observed (nothing async can
+// interleave before this point is reached regardless of where in the script
+// it's called from).
+vscode.postMessage({ type: 'webview-ready' });
 
 // ── Paste image ───────────────────────────────────────────────────────────────
 container.addEventListener('paste', e => {

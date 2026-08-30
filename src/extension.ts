@@ -1279,16 +1279,50 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       getHighlighterUseCssClasses()
     );
 
-    // Send initial data after webview is ready.
-    // Theme CSS is sent as a message (not inlined in HTML) to avoid HTML-parser
-    // issues with </style> sequences inside SVG data URLs in theme files.
-    setTimeout(() => {
+    // Send initial data once the webview itself confirms it's ready (its own
+    // 'webview-ready' message, sent right after createEditor() and its
+    // message listener are both up), not on a blind fixed delay.
+    //
+    // This used to be a flat setTimeout(..., 300) — "the webview is probably
+    // ready 300ms after we set its HTML." That's exactly the kind of guess
+    // that only fails under load: a cold VS Code start (this project's own
+    // deploy workflow force-kills and relaunches the whole app on every
+    // iteration — see make.bat) can leave the webview's own script still
+    // parsing/booting past that window on a slow run, especially right after
+    // a fresh extension (re)install. Reported directly, more than once, as
+    // "han desaparecido las barras naranjas" / "el tamaño del texto de la
+    // cabecera es mucho más grande que antes" (every one of those symptoms
+    // — no accent bar, no H1/H2 fold badge, oversized heading font —
+    // traces back to a single root cause: theme-css never arrived that run,
+    // so every `var(--h1-size, ...)`-style fallback in the webview's own CSS
+    // silently took over instead of the theme's real values). Intermittent,
+    // present on some cold starts and not others — the signature of a race,
+    // not a logic bug in any of the CSS itself.
+    //
+    // Theme CSS is sent as a message (not inlined in HTML) to avoid HTML-
+    // parser issues with </style> sequences inside SVG data URLs in theme
+    // files — unrelated to this fix, unchanged from before.
+    let initialDataSent = false;
+    const sendInitialData = () => {
+      if (initialDataSent) { return; } // the fallback timer and the ready message can both fire
+      initialDataSent = true;
       webviewPanel.webview.postMessage({ type: 'note-index', notes: noteIndex });
       webviewPanel.webview.postMessage({ type: 'note-history', notes: recentNoteEntries() });
       if (themeCss) {
         webviewPanel.webview.postMessage({ type: 'theme-css', css: themeCss });
       }
-    }, 300);
+    };
+    // Fallback only — in case 'webview-ready' is itself ever lost (e.g. an
+    // older cached bundle from before this message existed). Long enough
+    // that it should never actually be the one to fire in practice.
+    const initialDataFallback = setTimeout(sendInitialData, 3000);
+    const readyListener = webviewPanel.webview.onDidReceiveMessage(msg => {
+      if (msg.type === 'webview-ready') {
+        clearTimeout(initialDataFallback);
+        readyListener.dispose();
+        sendInitialData();
+      }
+    });
 
     let pendingSaveResolve: ((content: string) => void) | undefined;
     let pendingFlush: Promise<void> | undefined;
