@@ -853,19 +853,15 @@ const vsTheme = EditorView.theme({
   // fight this at equal specificity (single class either way) purely by
   // whichever stylesheet happens to load last.
   //
-  // Multiplier tuned twice against real pixel measurements of the same
-  // side-by-side screenshot technique: an initial 0.45 (chosen by eye against
-  // the first repro) only closed part of the gap — measured afterward at
-  // ~21px between two folded H1s here vs. Obsidian's own ~66px in the same
-  // screenshot at the same scale — so it was rescaled proportionally
-  // (0.45 × 66/21) to 1.4, matching Obsidian's actual spacing rather than an
-  // approximation of it.
-  '.HyperMD-header-1': { marginTop: 'calc(var(--h1-size, 1.75em) * 1.4) !important' },
-  '.HyperMD-header-2': { marginTop: 'calc(var(--h2-size, 1.4em) * 1.4) !important' },
-  '.HyperMD-header-3': { marginTop: 'calc(var(--h3-size, 1.15em) * 1.4) !important' },
-  '.HyperMD-header-4': { marginTop: 'calc(var(--h4-size, 1.1em) * 1.4) !important' },
-  '.HyperMD-header-5': { marginTop: 'calc(var(--h5-size, 1em) * 1.4) !important' },
-  '.HyperMD-header-6': { marginTop: 'calc(var(--h6-size, 0.95em) * 1.4) !important' },
+  // Multiplier: 0.45 by eye against the first repro, then 1.4 after
+  // measuring pixels against a real Obsidian screenshot (0.45 × 66px target
+  // / 21px measured), then set directly to 0.8 on request.
+  '.HyperMD-header-1': { marginTop: 'calc(var(--h1-size, 1.75em) * 0.8) !important' },
+  '.HyperMD-header-2': { marginTop: 'calc(var(--h2-size, 1.4em) * 0.8) !important' },
+  '.HyperMD-header-3': { marginTop: 'calc(var(--h3-size, 1.15em) * 0.8) !important' },
+  '.HyperMD-header-4': { marginTop: 'calc(var(--h4-size, 1.1em) * 0.8) !important' },
+  '.HyperMD-header-5': { marginTop: 'calc(var(--h5-size, 1em) * 0.8) !important' },
+  '.HyperMD-header-6': { marginTop: 'calc(var(--h6-size, 0.95em) * 0.8) !important' },
   // A heading that opens the document itself (the very first line inside
   // .cm-content) shouldn't get that extra top margin on top of .cm-content's
   // own top padding — it would just push the note's first line down for no
@@ -882,8 +878,14 @@ const vsTheme = EditorView.theme({
   // Obsidian — see the H1/H2 badge in its hover screenshot) it has to leave
   // flow entirely and sit in the gutter carved out by .cm-content's own left
   // padding, rather than being reordered as a sibling after the bar.
+  //
+  // `left`/`transform`: `-18px`/plain `translateY(-50%)` measured (pixel-
+  // isolated against a real Obsidian screenshot) at a 14px gap to the bar
+  // and a 2px-low vertical offset vs. Obsidian's own 8px gap/near-perfect
+  // centering — corrected to `-12px` and an extra `-1px` vertical nudge.
+  // Widened another 4px to `-16px` on direct request afterward.
   '.HyperMD-header .cm-fold-indicator': {
-    position: 'absolute', left: '-18px', top: '50%', transform: 'translateY(-50%)',
+    position: 'absolute', left: '-16px', top: '50%', transform: 'translateY(calc(-50% - 1px))',
   },
   // Cancel the Border theme's own translateX(-8px) on this icon (tuned for
   // Obsidian's own DOM/spacing, not ours) now that the outer .cm-fold-indicator
@@ -905,13 +907,30 @@ const vsTheme = EditorView.theme({
   // Theme CSS also lands later via postMessage without `!important` (see "Why
   // theme CSS is sent via postMessage" in CLAUDE.md), so this needs
   // `!important` to win regardless of load order either way.
+  //
+  // `top`/`bottom` insets (not a flat 0/0 stretch to the line's full height
+  // any more) — the same pixel-measured screenshot comparison used for the
+  // fold-indicator position above found this editor's bar rendering at 56px
+  // tall against Obsidian's own 41px for the identical heading, a ~37%
+  // overshoot from stretching the bar across this editor's own (taller —
+  // see the heading-margin comment above for why line metrics differ at
+  // all) full line box instead of a shorter, centered span within it.
+  // Solved with a proportional (%, not px) inset so it scales the same way
+  // across every heading level rather than needing six separately-measured
+  // fixed values: 41/56 ≈ 0.732 of the full height, split evenly off each
+  // end — (1 − 0.732)/2 ≈ 0.134 — giving the 13% used below.
   '.HyperMD-header-1::before, .HyperMD-header-2::before, .HyperMD-header-3::before, .HyperMD-header-4::before, .HyperMD-header-5::before, .HyperMD-header-6::before': {
     position: 'absolute !important',
-    top: '0 !important', bottom: '0 !important', left: '0 !important',
+    top: '13% !important', bottom: '13% !important', left: '0 !important',
     height: 'auto !important',
     width: '3px !important',
     margin: '0 !important',
     transform: 'none !important',
+    // The theme's own rule already sets border-radius: var(--radius-m), but
+    // that's tuned for the theme's own ~3-4px bar and can end up basically
+    // invisible depending on what --radius-m resolves to — set explicitly
+    // here instead so the rounding is guaranteed regardless of theme.
+    borderRadius: '1.5px !important',
   },
   // Heading styles — mirrors Obsidian core CSS so theme vars apply.
   // CM6 uses class-only in mdHighlight, so styles must live here.
