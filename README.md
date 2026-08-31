@@ -334,6 +334,12 @@ cabecera sigue viéndose "Título …", no `# Título …` en crudo). Desde ahí
   no (antes, con salto de línea final, el cursor se dibujaba tan alto como
   el texto de la cabecera).
 
+Las **líneas en blanco al final** de una sección colapsada no se pliegan: se
+ven como un hueco entre el `…` y la cabecera siguiente. Así, poniendo el
+cursor al principio de una cabecera cuya sección anterior está plegada y
+pulsando Intro, las líneas en blanco que insertas se ven de verdad, en vez de
+quedar ocultas bajo el pliegue (como en Obsidian).
+
 ## Texto resaltado (`==texto==`)
 
 El texto encerrado entre dos signos `=` se muestra resaltado (fondo amarillo por

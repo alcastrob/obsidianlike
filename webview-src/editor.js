@@ -7762,7 +7762,10 @@ function caretAtLastFoldedHeadingEnd(state) {
   const sel = state.selection.main;
   if (!sel.empty) return false;
   return foldedHeadingBounds(state).some(b =>
-    b.h.lineTo === sel.head && b.nextBoundary >= state.doc.length);
+    b.h.lineTo === sel.head && b.nextBoundary >= state.doc.length &&
+    // ...but if trailing blank lines left a visible gap below the ellipsis,
+    // let → move into it instead of being a no-op.
+    b.contentEnd >= b.rawFoldEnd);
 }
 const foldEdgeRightGuard = Prec.highest(keymap.of([
   { key: 'ArrowRight', run: view => caretAtLastFoldedHeadingEnd(view.state) },
@@ -8161,9 +8164,34 @@ function computeFoldedSpans(state, headings) {
         break;
       }
     }
-    if (foldEnd > h.lineTo) { spans.push({ from: h.lineTo + 1, to: foldEnd }); }
+    if (foldEnd > h.lineTo) {
+      // Don't collapse trailing blank lines — they stay visible as the gap
+      // between the "…" and the next heading (see foldContentEnd).
+      const contentEnd = foldContentEnd(state, h, foldEnd);
+      if (contentEnd > h.lineTo) { spans.push({ from: h.lineTo + 1, to: contentEnd }); }
+    }
   }
   return spans;
+}
+
+// Trailing blank lines sitting between a folded section's last real content
+// and the next heading are NOT part of the collapsed content — they render as
+// a visible gap, and the caret can rest in them. Matches Obsidian: putting the
+// cursor at the start of a heading whose previous (collapsed) sibling ends
+// this way and pressing Enter inserts blank lines you can actually *see*,
+// instead of them vanishing under the fold. Reported with a before/after video
+// ("nunca llegas a ver las lineas nuevas porque quedan ocultas bajo la sección
+// colapsada"). Given `rawFoldEnd` — the end of the line just before the next
+// same-or-shallower heading, or the doc end — walk back past any trailing
+// empty lines and return the end of the last non-empty content line, or
+// `h.lineTo` when the section is entirely blank (no collapsed content at all;
+// every caller already drops that via its own `> h.lineTo` guard).
+function foldContentEnd(state, h, rawFoldEnd) {
+  let line = state.doc.lineAt(rawFoldEnd);
+  while (line.length === 0 && line.from > h.lineTo + 1) {
+    line = state.doc.lineAt(line.from - 1);
+  }
+  return line.length === 0 ? h.lineTo : line.to;
 }
 
 // Per-folded-heading navigation bounds — the single source of truth for the
@@ -8171,10 +8199,15 @@ function computeFoldedSpans(state, headings) {
 // typed-text redirect, the auto-reveal safety net). For every folded heading
 // that actually has hidden content it returns:
 //   h             — the heading entry ({ level, lineFrom, lineTo })
-//   foldEnd       — the last character position of the hidden content: the
-//                   end of the line just before the next same-or-shallower
-//                   heading, or the document end.
-//   nextBoundary  — one past foldEnd: that next heading's own lineFrom, or
+//   contentEnd    — the last character position of the genuinely *hidden*
+//                   content: the end of the line just before the next
+//                   same-or-shallower heading (or the doc end), with any
+//                   trailing blank lines trimmed off (see foldContentEnd) —
+//                   those render as a visible gap, not collapsed.
+//   rawFoldEnd    — the same position *without* the trailing-blank-line trim,
+//                   so a caller can tell a visible gap exists (contentEnd <
+//                   rawFoldEnd).
+//   nextBoundary  — one past rawFoldEnd: that next heading's own lineFrom, or
 //                   the document end.
 //   nextMarkerEnd — the first position of the next heading's *text*, i.e.
 //                   just past its "# " (or "## ", …) marker; === nextBoundary
@@ -8197,15 +8230,16 @@ function foldedHeadingBounds(state, headings) {
     for (let j = i + 1; j < headings.length; j++) {
       if (headings[j].level <= h.level) { nextBoundary = headings[j].lineFrom; break; }
     }
-    const foldEnd = nextBoundary >= state.doc.length
+    const rawFoldEnd = nextBoundary >= state.doc.length
       ? state.doc.length
       : Math.max(h.lineTo, nextBoundary - 1);
+    const contentEnd = foldContentEnd(state, h, rawFoldEnd);
     let nextMarkerEnd = nextBoundary;
     if (nextBoundary < state.doc.length) {
       const mm = /^#{1,6}\s+/.exec(state.doc.lineAt(nextBoundary).text);
       if (mm) nextMarkerEnd = Math.min(nextBoundary + mm[0].length, state.doc.lineAt(nextBoundary).to);
     }
-    if (foldEnd > h.lineTo) out.push({ h, foldEnd, nextBoundary, nextMarkerEnd });
+    if (contentEnd > h.lineTo) out.push({ h, contentEnd, rawFoldEnd, nextBoundary, nextMarkerEnd });
   }
   return out;
 }
@@ -8354,14 +8388,21 @@ const foldAtomicRanges = EditorView.atomicRanges.of(view => {
   // treatment (see computeFoldedCalloutSpans' own comment) — merged and
   // sorted into one facet rather than two, since RangeSetBuilder requires
   // strictly ordered inserts.
-  // Heading folds use [h.lineTo, nextMarkerEnd] (see foldedHeadingBounds):
-  // the whole gap *plus* the next heading's own "# " marker, so a single
-  // ArrowRight from a folded heading lands on the first character of the next
-  // heading's text — never on the phantom foldEnd stop and never on the next
-  // heading's bare column 0 (which rendered as a stray gutter caret). Callout
-  // folds keep their existing span — not reported, left conservative.
+  // Heading folds run from h.lineTo to the first *visible* position after the
+  // hidden content (see foldedHeadingBounds):
+  //  • when the section ends in a visible trailing blank-line gap, that's the
+  //    start of that gap (contentEnd + 1) — so a single ArrowRight from the
+  //    folded heading lands in the gap the user just made, not past it.
+  //  • otherwise it's the next heading's first text char (nextMarkerEnd) —
+  //    the whole gap *plus* the "# " marker, so ArrowRight never lands on the
+  //    phantom contentEnd stop or the next heading's bare column 0 (a stray
+  //    gutter caret).
+  // Callout folds keep their existing span — not reported, left conservative.
   const spans = [
-    ...foldedHeadingBounds(view.state).map(b => ({ from: b.h.lineTo, to: b.nextMarkerEnd })),
+    ...foldedHeadingBounds(view.state).map(b => ({
+      from: b.h.lineTo,
+      to: b.contentEnd < b.rawFoldEnd ? b.contentEnd + 1 : b.nextMarkerEnd,
+    })),
     ...computeFoldedCalloutSpans(view.state),
   ].sort((a, b) => a.from - b.from || a.to - b.to);
   for (const { from, to } of spans) {
@@ -8485,8 +8526,8 @@ const foldEdgeRedirectFilter = EditorState.transactionFilter.of(tr => {
     // carácter de la sección colapsada."
     const insert = insertedText.toString();
     return {
-      changes: { from: b.foldEnd, to: b.foldEnd, insert },
-      selection: { anchor: b.foldEnd + insert.length },
+      changes: { from: b.contentEnd, to: b.contentEnd, insert },
+      selection: { anchor: b.contentEnd + insert.length },
       userEvent: tr.annotation(Transaction.userEvent),
     };
   }
@@ -8515,7 +8556,7 @@ const foldAutoRevealPlugin = ViewPlugin.fromClass(class {
       if (sourceMode || !foldedSet.size) return;
       const head = state.selection.main.head;
       for (const b of foldedHeadingBounds(state)) {
-        if (head >= b.h.lineTo + 1 && head <= b.foldEnd) {
+        if (head >= b.h.lineTo + 1 && head <= b.contentEnd) {
           foldedSet.delete(b.h.lineFrom);
           view.dispatch({ effects: foldEffect.of(b.h.lineFrom) });
           return; // an edit can only ever land inside one folded span at a time
