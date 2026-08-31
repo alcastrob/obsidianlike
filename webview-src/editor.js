@@ -808,9 +808,24 @@ const vsTheme = EditorView.theme({
   // `letterSpacing` fans the three dots out — bare "•••" with no spacing
   // prints as a tight, almost solid blob at this size, not three separate
   // dots the way Obsidian's own reads.
-  '.cm-fold-ellipsis': {
+  // Outer wrapper carries no visible glyphs; it's given the *same* font-size
+  // and line-height as this heading's own text span (per level, below) so a
+  // caret resting right after it (at h.lineTo — the "cursor a la derecha de
+  // la elipsis" position) measures to the same height as when the cursor is
+  // inside the heading text. The dots' own small, fixed size lives on the
+  // inner `.cm-fold-ellipsis-dots` span — sized off `--md-font-size`, not an
+  // `em` relative to the now-heading-sized outer, so the dots stay exactly
+  // the size (and baseline position) they had before this split.
+  '.cm-fold-ellipsis': { userSelect: 'none' },
+  '.HyperMD-header-1 .cm-fold-ellipsis': { fontSize: 'var(--h1-size, 1.75em)', lineHeight: 'var(--h1-line-height, 1.3)' },
+  '.HyperMD-header-2 .cm-fold-ellipsis': { fontSize: 'var(--h2-size, 1.4em)', lineHeight: 'var(--h2-line-height, 1.3)' },
+  '.HyperMD-header-3 .cm-fold-ellipsis': { fontSize: 'var(--h3-size, 1.15em)', lineHeight: 'var(--h3-line-height, 1.3)' },
+  '.HyperMD-header-4 .cm-fold-ellipsis': { fontSize: 'var(--h4-size, 1.1em)', lineHeight: 'var(--h4-line-height, 1.4)' },
+  '.HyperMD-header-5 .cm-fold-ellipsis': { fontSize: 'var(--h5-size, 1em)', lineHeight: 'var(--h5-line-height, 1.4)' },
+  '.HyperMD-header-6 .cm-fold-ellipsis': { fontSize: 'var(--h6-size, 0.95em)', lineHeight: 'var(--h6-line-height, 1.4)' },
+  '.cm-fold-ellipsis-dots': {
     color: 'var(--text-faint, var(--text-muted, #999))',
-    fontWeight: '400', fontSize: '0.7em', letterSpacing: '1px', userSelect: 'none',
+    fontWeight: '400', fontSize: 'calc(var(--md-font-size, 14px) * 0.7)', letterSpacing: '1px',
   },
   // Needs a positioning context so the fold indicator (below) and the
   // full-height color bar (further below) can both be positioned absolutely
@@ -856,23 +871,40 @@ const vsTheme = EditorView.theme({
   // Multiplier: 0.45 by eye against the first repro, then 1.4 after
   // measuring pixels against a real Obsidian screenshot (0.45 × 66px target
   // / 21px measured), then set directly to 0.8 on request.
-  '.HyperMD-header-1': { marginTop: 'calc(var(--h1-size, 1.75em) * 0.8) !important' },
-  '.HyperMD-header-2': { marginTop: 'calc(var(--h2-size, 1.4em) * 0.8) !important' },
-  '.HyperMD-header-3': { marginTop: 'calc(var(--h3-size, 1.15em) * 0.8) !important' },
-  '.HyperMD-header-4': { marginTop: 'calc(var(--h4-size, 1.1em) * 0.8) !important' },
-  '.HyperMD-header-5': { marginTop: 'calc(var(--h5-size, 1em) * 0.8) !important' },
-  '.HyperMD-header-6': { marginTop: 'calc(var(--h6-size, 0.95em) * 0.8) !important' },
+  //
+  // **`padding-top`, not `margin-top`** — this was reported as a real bug:
+  // "la precisión de los clicks se ha ido al garete... hago click en una
+  // línea, pero el cursor no va ahí." A `margin` on a `.cm-line` (which is
+  // what `.HyperMD-header` is — a line decoration class) is invisible to
+  // CM6's height oracle: `measureVisibleLineHeights` reads each line's
+  // `getBoundingClientRect()`, whose height *excludes* margin, so the height
+  // map ends up shorter than the real DOM by the sum of every heading
+  // margin above a given point. `posAtCoords` (every mouse click) picks the
+  // target line from that height map, so clicks landed one-to-two lines
+  // below where the pointer actually was, the drift growing with each
+  // heading scrolled past. `padding` *is* in `getBoundingClientRect()`'s
+  // height, so the oracle stays in sync and clicks land correctly — the
+  // standard CM6-safe way to add vertical space to a line. The per-level
+  // gap is published as `--hd-gap` so the `::before` accent bar (below) can
+  // offset itself past the padding instead of painting over the empty gap.
+  '.HyperMD-header-1': { '--hd-gap': 'calc(var(--h1-size, 1.75em) * 0.8)', paddingTop: 'var(--hd-gap) !important' },
+  '.HyperMD-header-2': { '--hd-gap': 'calc(var(--h2-size, 1.4em) * 0.8)', paddingTop: 'var(--hd-gap) !important' },
+  '.HyperMD-header-3': { '--hd-gap': 'calc(var(--h3-size, 1.15em) * 0.8)', paddingTop: 'var(--hd-gap) !important' },
+  '.HyperMD-header-4': { '--hd-gap': 'calc(var(--h4-size, 1.1em) * 0.8)', paddingTop: 'var(--hd-gap) !important' },
+  '.HyperMD-header-5': { '--hd-gap': 'calc(var(--h5-size, 1em) * 0.8)', paddingTop: 'var(--hd-gap) !important' },
+  '.HyperMD-header-6': { '--hd-gap': 'calc(var(--h6-size, 0.95em) * 0.8)', paddingTop: 'var(--hd-gap) !important' },
   // A heading that opens the document itself (the very first line inside
-  // .cm-content) shouldn't get that extra top margin on top of .cm-content's
+  // .cm-content) shouldn't get that extra top gap on top of .cm-content's
   // own top padding — it would just push the note's first line down for no
   // reason, the same "don't double up on top spacing for the very first
   // line" concern the Border theme's own `.cm-content>div:first-of-type
-  // { padding-top: 0 !important }` rule addresses for *padding*, but margin
-  // is a separate property that rule never touches. Three classes
+  // { padding-top: 0 !important }` rule addresses. Three classes
   // (.cm-content, .HyperMD-header, :first-child) beats any single level's
   // own two-class rule above on specificity alone, so this reliably wins
-  // regardless of which heading level happens to open the document.
-  '.cm-content > .HyperMD-header:first-child': { marginTop: '0 !important' },
+  // regardless of which heading level happens to open the document. Also
+  // zero `--hd-gap` there so the accent bar isn't offset past padding that
+  // doesn't exist.
+  '.cm-content > .HyperMD-header:first-child': { '--hd-gap': '0px', paddingTop: '0 !important' },
   // The heading's ::before bar starts at the line's own left edge (x:0) in
   // normal flow, so to put the fold indicator to its *left* (matching real
   // Obsidian — see the H1/H2 badge in its hover screenshot) it has to leave
@@ -884,8 +916,18 @@ const vsTheme = EditorView.theme({
   // and a 2px-low vertical offset vs. Obsidian's own 8px gap/near-perfect
   // centering — corrected to `-12px` and an extra `-1px` vertical nudge.
   // Widened another 4px to `-16px` on direct request afterward.
+  //
+  // `top` centres the badge on the heading's *text* (content) box, not on
+  // its full padded box: with `padding-top: var(--hd-gap)` on the line, a
+  // plain `top: 50%` floats the badge up into the empty gap above the text,
+  // so a heading with a gap and one without (e.g. the note's very first
+  // heading, whose --hd-gap is 0) showed their H1 badges at visibly
+  // different heights. Content-box centre, measured from the padded box's
+  // top, is `--hd-gap + (100% - --hd-gap) / 2`.
   '.HyperMD-header .cm-fold-indicator': {
-    position: 'absolute', left: '-16px', top: '50%', transform: 'translateY(calc(-50% - 1px))',
+    position: 'absolute', left: '-16px',
+    top: 'calc(var(--hd-gap, 0px) + (100% - var(--hd-gap, 0px)) / 2)',
+    transform: 'translateY(calc(-50% - 1px))',
   },
   // Cancel the Border theme's own translateX(-8px) on this icon (tuned for
   // Obsidian's own DOM/spacing, not ours) now that the outer .cm-fold-indicator
@@ -908,20 +950,23 @@ const vsTheme = EditorView.theme({
   // theme CSS is sent via postMessage" in CLAUDE.md), so this needs
   // `!important` to win regardless of load order either way.
   //
-  // `top`/`bottom` insets (not a flat 0/0 stretch to the line's full height
-  // any more) — the same pixel-measured screenshot comparison used for the
-  // fold-indicator position above found this editor's bar rendering at 56px
-  // tall against Obsidian's own 41px for the identical heading, a ~37%
-  // overshoot from stretching the bar across this editor's own (taller —
-  // see the heading-margin comment above for why line metrics differ at
-  // all) full line box instead of a shorter, centered span within it.
-  // Solved with a proportional (%, not px) inset so it scales the same way
-  // across every heading level rather than needing six separately-measured
-  // fixed values: 41/56 ≈ 0.732 of the full height, split evenly off each
-  // end — (1 − 0.732)/2 ≈ 0.134 — giving the 13% used below.
+  // `top`/`bottom` insets (not a flat 0/0 stretch to the line's full height)
+  // — a pixel-measured screenshot comparison found this editor's bar
+  // rendering ~37% too tall from stretching across the whole line box
+  // instead of a shorter span within it. Now that the heading's top gap is
+  // `padding-top: var(--hd-gap)` (see the heading-spacing comment above,
+  // switched from `margin` to fix click precision), the bar must start
+  // *below* that padding — otherwise it paints over the empty gap and
+  // consecutive folded headings' bars read as one unbroken stripe again,
+  // the exact thing the gap was added to prevent. `top` therefore anchors
+  // at `var(--hd-gap)` (the content box's top edge) plus a small inset;
+  // `bottom` insets the same amount off the line's bottom (no bottom
+  // padding, so that's the content box's bottom edge). `--hd-gap` is
+  // inherited from the owning `.HyperMD-header-N` and is `0px` for a
+  // document-opening heading, so the bar sits flush there with no offset.
   '.HyperMD-header-1::before, .HyperMD-header-2::before, .HyperMD-header-3::before, .HyperMD-header-4::before, .HyperMD-header-5::before, .HyperMD-header-6::before': {
     position: 'absolute !important',
-    top: '13% !important', bottom: '13% !important', left: '0 !important',
+    top: 'calc(var(--hd-gap, 0px) + 0.3em) !important', bottom: '0.3em !important', left: '0 !important',
     height: 'auto !important',
     width: '3px !important',
     margin: '0 !important',
@@ -4377,6 +4422,29 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
     try {
       const { state } = view;
       const active = getActiveLines(state);
+      // A folded heading stays rendered ("Título …", not raw "# Título …")
+      // while the caret sits at one of its two "landing" spots:
+      //   • right of its ellipsis (exactly h.lineTo), or
+      //   • at/inside its own leading "# " marker, up to the first character
+      //     of its text — where ArrowRight from the *previous* folded
+      //     heading's ellipsis now drops the caret (foldAtomicRanges'
+      //     [h.lineTo, nextMarkerEnd] span). Landing there used to reveal the
+      //     raw "# " and render a stray gutter caret; keeping the line
+      //     inactive renders it cleanly with the caret right before the text.
+      // Any caret position *past* the first text character (editing the
+      // title) still counts as active and reveals the raw markup normally.
+      if (!sourceMode && foldedSet.size && state.selection.main.empty) {
+        const caret = state.selection.main.head;
+        for (const h of collectHeadings(state)) {
+          if (!foldedSet.has(h.lineFrom)) continue;
+          const line = state.doc.lineAt(h.lineFrom);
+          const mm = /^#{1,6}\s+/.exec(line.text);
+          const markerEnd = line.from + (mm ? mm[0].length : 0);
+          if (caret === h.lineTo || (caret >= line.from && caret <= markerEnd)) {
+            active.delete(line.number);
+          }
+        }
+      }
       // Two separate arrays: span/widget decorations and line-level class decorations.
       // Line decorations must be added to the builder as (line.from, line.from, dec).
       const decs     = [];  // { from, to, dec }
@@ -7626,6 +7694,15 @@ function moveVerticalByLine(view, dir, extend) {
     targetLineNum = Math.min(Math.max(targetLineNum, 1), state.doc.lines);
     const targetLine = state.doc.line(targetLineNum);
     newHead = targetLine.from + Math.min(col, targetLine.length);
+    // Never land inside a folded heading's own hidden "# " marker (renders as
+    // a stray caret out in the gutter — see foldedHeadingBounds' nextMarkerEnd
+    // comment). Clamp forward to the first character of its text, matching
+    // where ArrowRight lands.
+    if (foldedSet.has(targetLine.from)) {
+      const mm = /^#{1,6}\s+/.exec(targetLine.text);
+      const markerEnd = targetLine.from + (mm ? mm[0].length : 0);
+      if (newHead < markerEnd) newHead = markerEnd;
+    }
     vGoalCol = col;
   }
 
@@ -7646,6 +7723,30 @@ const verticalMoveKeymap = Prec.highest(keymap.of([
   { key: 'ArrowUp', run: view => moveVerticalByLine(view, -1, false) },
   { key: 'Shift-ArrowDown', run: view => moveVerticalByLine(view, 1, true) },
   { key: 'Shift-ArrowUp', run: view => moveVerticalByLine(view, -1, true) },
+]));
+
+// → from the "cursor a la derecha de la elipsis" position (a folded heading's
+// own line end, h.lineTo):
+//  • if there IS a heading below, foldAtomicRanges' [h.lineTo, nextMarkerEnd]
+//    span makes ordinary → (defaultKeymap's moveByChar, which honours
+//    atomicRanges) jump straight to the first character of that heading's
+//    text — no keymap needed for that case.
+//  • if this is the LAST section of the document (no heading after), → is a
+//    no-op — the caret stays right of the ellipsis instead of jumping to the
+//    document end, which rendered as a stray caret hanging below the line.
+//    Reported: "si el cursor está en la última sección del documento, y está
+//    colapsada... al dar a flecha derecha... se queda el cursor en esta
+//    posición rara. ¿Podrías hacer que el cursor en ese caso no avance?"
+function caretAtLastFoldedHeadingEnd(state) {
+  if (sourceMode || !foldedSet.size) return false;
+  const sel = state.selection.main;
+  if (!sel.empty) return false;
+  return foldedHeadingBounds(state).some(b =>
+    b.h.lineTo === sel.head && b.nextBoundary >= state.doc.length);
+}
+const foldEdgeRightGuard = Prec.highest(keymap.of([
+  { key: 'ArrowRight', run: view => caretAtLastFoldedHeadingEnd(view.state) },
+  { key: 'Shift-ArrowRight', run: view => caretAtLastFoldedHeadingEnd(view.state) },
 ]));
 
 // ── Markdown shortcuts ────────────────────────────────────────────────────────
@@ -7971,17 +8072,29 @@ class FoldToggle extends WidgetType {
 class FoldEllipsisWidget extends WidgetType {
   eq() { return true; } // stateless — any two instances render identically
   toDOM() {
+    // Outer span carries no visible glyphs of its own and inherits the
+    // heading's font-size, so its inline box is full line-height — that's
+    // what a caret resting right after the ellipsis (at h.lineTo) measures
+    // against, giving it the same height as when the cursor is inside the
+    // heading text. Reported: "cambia el tamaño del cursor al estar a la
+    // derecha de la elipsis; que tenga el mismo tamaño que cuando pasa por
+    // el texto de la cabecera." The dots live in an inner span at their own
+    // small size — "y ojo, que no se cambie el tamaño o la posición
+    // relativa de la propia elipsis."
     const span = document.createElement('span');
     span.className = 'cm-fold-ellipsis';
+    span.contentEditable = 'false';
+    const dots = document.createElement('span');
+    dots.className = 'cm-fold-ellipsis-dots';
     // Three round bullet characters, not literal periods — a zoomed
     // side-by-side comparison against a real Obsidian screenshot showed
     // Obsidian's own indicator as plainly round dots, sized noticeably
     // bigger than three "." marks ever read as (a period only occupies the
     // bottom sliver of its own line box, so even a much bigger font-size
     // still looks small and low; "•" sits centered and reads as a real dot
-    // at a normal size). See .cm-fold-ellipsis in vsTheme for the sizing.
-    span.textContent = ' •••';
-    span.contentEditable = 'false';
+    // at a normal size). See .cm-fold-ellipsis-dots in vsTheme for sizing.
+    dots.textContent = ' •••';
+    span.appendChild(dots);
     return span;
   }
   ignoreEvent() { return true; } // purely decorative, never needs to handle its own events
@@ -8031,6 +8144,50 @@ function computeFoldedSpans(state, headings) {
     if (foldEnd > h.lineTo) { spans.push({ from: h.lineTo + 1, to: foldEnd }); }
   }
   return spans;
+}
+
+// Per-folded-heading navigation bounds — the single source of truth for the
+// fold-edge behaviours further below (the atomic ArrowRight skip, the
+// typed-text redirect, the auto-reveal safety net). For every folded heading
+// that actually has hidden content it returns:
+//   h             — the heading entry ({ level, lineFrom, lineTo })
+//   foldEnd       — the last character position of the hidden content: the
+//                   end of the line just before the next same-or-shallower
+//                   heading, or the document end.
+//   nextBoundary  — one past foldEnd: that next heading's own lineFrom, or
+//                   the document end.
+//   nextMarkerEnd — the first position of the next heading's *text*, i.e.
+//                   just past its "# " (or "## ", …) marker; === nextBoundary
+//                   when there is no next heading. foldAtomicRanges makes the
+//                   whole [h.lineTo, nextMarkerEnd] range one atomic unit, so
+//                   ArrowRight from a folded heading lands directly on the
+//                   first character of the next heading's text — never on its
+//                   bare column 0, which rendered as a stray caret out in the
+//                   gutter next to the fold toggle ("esa posición rara entre
+//                   las dos cabeceras"). Reported: "debería saltar al primer
+//                   caracter de la nueva cabecera."
+function foldedHeadingBounds(state, headings) {
+  if (sourceMode || !foldedSet.size) return [];
+  headings = headings || collectHeadings(state);
+  const out = [];
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (!foldedSet.has(h.lineFrom)) continue;
+    let nextBoundary = state.doc.length;
+    for (let j = i + 1; j < headings.length; j++) {
+      if (headings[j].level <= h.level) { nextBoundary = headings[j].lineFrom; break; }
+    }
+    const foldEnd = nextBoundary >= state.doc.length
+      ? state.doc.length
+      : Math.max(h.lineTo, nextBoundary - 1);
+    let nextMarkerEnd = nextBoundary;
+    if (nextBoundary < state.doc.length) {
+      const mm = /^#{1,6}\s+/.exec(state.doc.lineAt(nextBoundary).text);
+      if (mm) nextMarkerEnd = Math.min(nextBoundary + mm[0].length, state.doc.lineAt(nextBoundary).to);
+    }
+    if (foldEnd > h.lineTo) out.push({ h, foldEnd, nextBoundary, nextMarkerEnd });
+  }
+  return out;
 }
 
 const foldPlugin = ViewPlugin.fromClass(class {
@@ -8088,9 +8245,20 @@ const foldPlugin = ViewPlugin.fromClass(class {
           // foldedSpans at all — see computeFoldedSpans' own `foldEnd >
           // h.lineTo` guard — so showing "..." there would misleadingly
           // imply hidden content that doesn't exist).
+          //
+          // `side: -1` (not +1): places the widget *before* position
+          // h.lineTo, so a caret resting at h.lineTo renders to the *right*
+          // of the ellipsis — the "cursor a la derecha de la elipsis"
+          // position Obsidian lets you sit at, from where typing appends to
+          // the folded section and expands it (foldEdgeRedirectFilter's
+          // atEnd case). foldAtomicRanges' [h.lineTo, nextBoundary] range
+          // makes h.lineTo the only cursor stop between this heading and the
+          // next; livePreviewPlugin drops this line from `active` while the
+          // caret sits exactly there, so the heading stays rendered ("Título
+          // …") instead of flipping to raw "# Título …".
           if (foldedSpans.some(sp => sp.from === h.lineTo + 1)) {
             all.push({ from: h.lineTo, to: h.lineTo,
-              dec: Decoration.widget({ widget: new FoldEllipsisWidget(), side: 1 }) });
+              dec: Decoration.widget({ widget: new FoldEllipsisWidget(), side: -1 }) });
           }
         }
       }
@@ -8166,13 +8334,56 @@ const foldAtomicRanges = EditorView.atomicRanges.of(view => {
   // treatment (see computeFoldedCalloutSpans' own comment) — merged and
   // sorted into one facet rather than two, since RangeSetBuilder requires
   // strictly ordered inserts.
-  const spans = [...computeFoldedSpans(view.state), ...computeFoldedCalloutSpans(view.state)]
-    .sort((a, b) => a.from - b.from || a.to - b.to);
+  // Heading folds use [h.lineTo, nextMarkerEnd] (see foldedHeadingBounds):
+  // the whole gap *plus* the next heading's own "# " marker, so a single
+  // ArrowRight from a folded heading lands on the first character of the next
+  // heading's text — never on the phantom foldEnd stop and never on the next
+  // heading's bare column 0 (which rendered as a stray gutter caret). Callout
+  // folds keep their existing span — not reported, left conservative.
+  const spans = [
+    ...foldedHeadingBounds(view.state).map(b => ({ from: b.h.lineTo, to: b.nextMarkerEnd })),
+    ...computeFoldedCalloutSpans(view.state),
+  ].sort((a, b) => a.from - b.from || a.to - b.to);
   for (const { from, to } of spans) {
     if (to > from) { try { builder.add(from, to, Decoration.replace({})); } catch (_) {} }
   }
   return builder.finish();
 });
+
+// Disambiguation flag for foldEdgeRedirectFilter's "typed just past a folded
+// heading" case. foldAtomicRanges (above) makes one ArrowRight from a folded
+// heading land directly on nextBoundary — which is the *next* heading's own
+// lineFrom. Text typed there would insert before that heading's `#` and
+// destroy it (reported: "el texto nuevo se empieza a escribir en la línea
+// donde se encuentra la siguiente cabecera, dejando por tanto de ser una
+// cabecera"). The redirect below must catch that and send the text to the
+// end of the folded section instead — but *only* when the cursor reached
+// nextBoundary by skipping the fold, never when the user clicked on / arrowed
+// up to that heading to edit it. This tracks precisely that arrival: a
+// keyboard cursor move (userEvent "select", never "select.pointer") whose new
+// head is a folded heading's nextBoundary and whose previous head was at or
+// before that heading's own line end.
+let foldSkipLandingPos = null;
+const foldSkipLandingTracker = ViewPlugin.fromClass(class {
+  update(u) {
+    if (u.docChanged) { foldSkipLandingPos = null; return; }
+    if (!u.selectionSet) return;
+    foldSkipLandingPos = null;
+    if (sourceMode || !foldedSet.size || dispatchingVerticalMove) return;
+    const sel = u.state.selection.main;
+    if (!sel.empty) return;
+    const keyboardMove = u.transactions.some(t =>
+      t.isUserEvent('select') && !t.isUserEvent('select.pointer'));
+    if (!keyboardMove) return;
+    const oldHead = u.startState.selection.main.head;
+    for (const b of foldedHeadingBounds(u.state)) {
+      if (sel.head === b.nextBoundary && oldHead <= b.h.lineTo) {
+        foldSkipLandingPos = sel.head;
+        break;
+      }
+    }
+  }
+}, {});
 
 // Redirects an edit made right at the end of a folded heading's own line to
 // the *end of that heading's already-hidden content* instead — matching
@@ -8200,15 +8411,22 @@ const foldAtomicRanges = EditorView.atomicRanges.of(view => {
 //
 // Fix: an EditorState.transactionFilter — run *before* the transaction is
 // applied, so it can rewrite where the edit actually lands rather than
-// reacting after the fact — intercepts exactly the narrow shape this
-// scenario produces (a single, zero-width insertion whose position is
-// precisely a currently-folded heading's own h.lineTo) and substitutes a new
-// transaction that applies the *same inserted text* at the end of that
-// heading's folded span instead, unfolding it in the same step so the
-// result is immediately visible. Every other edit — including editing the
-// heading's own title text anywhere *before* its very last character, which
-// must keep working normally — falls through untouched, since its change
-// position won't match h.lineTo for any folded heading at all.
+// reacting after the fact — intercepts a single, zero-width insertion at
+// either edge of a folded section:
+//   - the folded heading's own line end (h.lineTo — typed there directly), or
+//   - the next heading's lineFrom (b.nextBoundary), *only* when
+//     foldSkipLandingTracker has confirmed the cursor got there by
+//     ArrowRight-skipping the fold rather than by a click / up-arrow onto
+//     that heading (which must still edit that heading normally).
+// In both cases it substitutes a transaction that appends the same inserted
+// text at foldEnd (the last character of the folded section's content, no
+// forced new line) and unfolds the heading in the same step so the result
+// is immediately visible. Every other edit falls through untouched.
+// Reported: "el texto nuevo se empieza a escribir en la línea donde se
+// encuentra la siguiente cabecera, dejando por tanto de ser una cabecera" —
+// then, on the blank-line version of the fix: "Mejor que lo de insertar una
+// nueva línea, casi deja el cursor en el último carácter de la sección
+// colapsada."
 const foldEdgeRedirectFilter = EditorState.transactionFilter.of(tr => {
   if (!tr.docChanged || sourceMode || !foldedSet.size) return tr;
   if (!(tr.isUserEvent('input') || tr.isUserEvent('delete'))) return tr;
@@ -8225,22 +8443,30 @@ const foldEdgeRedirectFilter = EditorState.transactionFilter.of(tr => {
   if (changeCount !== 1 || changeFrom !== changeToOld) return tr;
 
   const startState = tr.startState;
-  const headings = collectHeadings(startState);
-  for (let i = 0; i < headings.length; i++) {
-    const h = headings[i];
-    if (!foldedSet.has(h.lineFrom) || changeFrom !== h.lineTo) continue;
-    let foldEnd = startState.doc.length;
-    for (let j = i + 1; j < headings.length; j++) {
-      if (headings[j].level <= h.level) {
-        foldEnd = headings[j].lineFrom > 0 ? headings[j].lineFrom - 1 : 0;
-        break;
-      }
-    }
-    if (foldEnd <= h.lineTo) continue; // folded heading has no content to append to
+  for (const b of foldedHeadingBounds(startState)) {
+    const h = b.h;
+    // Two ways to be "editing at the folded heading's edge":
+    //  - atEnd:   cursor sat at the heading's own line end and typed
+    //             directly (never moved) — Obsidian appends to the folded
+    //             section's last line, not as a new first line.
+    //  - pastFold: cursor ArrowRight-skipped the whole fold and is now on
+    //             the *next* heading's lineFrom; typing there must not
+    //             prepend to that heading. Only trusted when
+    //             foldSkipLandingTracker confirmed a keyboard fold-skip.
+    const atEnd = changeFrom === h.lineTo;
+    const pastFold = changeFrom === b.nextBoundary && foldSkipLandingPos === changeFrom;
+    if (!atEnd && !pastFold) continue;
     foldedSet.delete(h.lineFrom); // reveal immediately so the result is visible
+    foldSkipLandingPos = null;
+    // Append the text at foldEnd as-is — i.e. continue from the last
+    // character of the folded section's content, no forced new line.
+    // Requested directly after trying the new-blank-line version: "Mejor que
+    // lo de insertar una nueva línea, casi deja el cursor en el último
+    // carácter de la sección colapsada."
+    const insert = insertedText.toString();
     return {
-      changes: { from: foldEnd, to: foldEnd, insert: insertedText },
-      selection: { anchor: foldEnd + insertedText.length },
+      changes: { from: b.foldEnd, to: b.foldEnd, insert },
+      selection: { anchor: b.foldEnd + insert.length },
       userEvent: tr.annotation(Transaction.userEvent),
     };
   }
@@ -8267,22 +8493,11 @@ const foldAutoRevealPlugin = ViewPlugin.fromClass(class {
     Promise.resolve().then(() => {
       const state = view.state;
       if (sourceMode || !foldedSet.size) return;
-      const headings = collectHeadings(state);
       const head = state.selection.main.head;
-      for (let i = 0; i < headings.length; i++) {
-        const h = headings[i];
-        if (!foldedSet.has(h.lineFrom)) continue;
-        let foldEnd = state.doc.length;
-        for (let j = i + 1; j < headings.length; j++) {
-          if (headings[j].level <= h.level) {
-            foldEnd = headings[j].lineFrom > 0 ? headings[j].lineFrom - 1 : 0;
-            break;
-          }
-        }
-        if (foldEnd <= h.lineTo) continue; // folded heading has no content at all
-        if (head >= h.lineTo + 1 && head <= foldEnd) {
-          foldedSet.delete(h.lineFrom);
-          view.dispatch({ effects: foldEffect.of(h.lineFrom) });
+      for (const b of foldedHeadingBounds(state)) {
+        if (head >= b.h.lineTo + 1 && head <= b.foldEnd) {
+          foldedSet.delete(b.h.lineFrom);
+          view.dispatch({ effects: foldEffect.of(b.h.lineFrom) });
           return; // an edit can only ever land inside one folded span at a time
         }
       }
@@ -8852,7 +9067,7 @@ function createEditor(parent, content) {
       // rebuild for this same transaction already sees the fresh activation
       // state — see the comment above wikiLinkActivationTracker's definition.
       wikiLinkActivationTracker,
-      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges, foldEdgeRedirectFilter, foldAutoRevealPlugin]),
+      previewCompartment.of([livePreviewPlugin, mdLinkPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges, foldSkipLandingTracker, foldEdgeRedirectFilter, foldAutoRevealPlugin]),
       orderedListRenumberPlugin,
       listIndentKeymap,
       // Find/replace panel (Ctrl+F — see obsidianSearchPanelPlugin's own
@@ -8873,6 +9088,7 @@ function createEditor(parent, content) {
       wikiSuggestPlugin,
       wikiSuggestKeymap,
       verticalMoveKeymap,
+      foldEdgeRightGuard,
       // CM6 doesn't set these on its contentEditable contentDOM by default, and
       // leaving them unset is what silently disables the OS-level text features
       // that key off them: macOS's own Text Replacement (System Settings ->
@@ -9041,7 +9257,7 @@ function toggleSourceMode() {
   sourceMode = !sourceMode;
   view.dispatch({
     effects: previewCompartment.reconfigure(
-      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges, foldEdgeRedirectFilter, foldAutoRevealPlugin]
+      sourceMode ? [] : [livePreviewPlugin, highlightMarkPlugin, htmlHighlightPlugin, wikiLinkPlugin, imgPlugin, transclusionPlugin, frontmatterAtomicRanges, foldPlugin, foldAtomicRanges, foldSkipLandingTracker, foldEdgeRedirectFilter, foldAutoRevealPlugin]
     ),
   });
   document.body.classList.toggle('source-mode', sourceMode);

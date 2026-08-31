@@ -305,12 +305,30 @@ ratón sobre la cabecera (la barra o el propio texto), igual que en Obsidian —
 también sirve para plegar/desplegar la sección; el plegado (y el atajo de
 teclado arriba/abajo que salta por encima de una sección plegada) solo
 funciona en vista previa, no en modo fuente, donde no tiene sentido ocultar
-nada. Un `[texto entre corchetes]` dentro de una cabecera se ve exactamente
-igual que el resto de la línea (mismo tamaño, grosor, tipografía y color) en
-vez de destacar con un estilo distinto — lo mismo aplica a los corchetes
-internos de un `[[wikilink]]` en modo fuente dentro de un párrafo normal:
-tanto los corchetes dobles exteriores como los interiores se ven al mismo
-tamaño que el texto. Detalle técnico completo en `CLAUDE.md`.
+nada. El espacio superior entre cabeceras se aplica como `padding` (no
+`margin`) de la línea: un `margin` en una línea es invisible para el modelo de
+alturas de CodeMirror y desalineaba los clics respecto al puntero. El
+indicador "H1"/"H2" y la barra de color se centran sobre el *texto* de la
+cabecera, no sobre ese hueco superior. Un `[texto entre corchetes]` dentro de
+una cabecera se ve exactamente igual que el resto de la línea (mismo tamaño,
+grosor, tipografía y color) en vez de destacar con un estilo distinto — lo
+mismo aplica a los corchetes internos de un `[[wikilink]]` en modo fuente
+dentro de un párrafo normal: tanto los corchetes dobles exteriores como los
+interiores se ven al mismo tamaño que el texto. Detalle técnico completo en
+`CLAUDE.md`.
+
+### Cursor en una sección colapsada
+
+Con una cabecera plegada ("Título …"), el cursor puede colocarse **a la
+derecha de la elipsis** (misma altura que sobre el texto de la cabecera, y la
+cabecera sigue viéndose "Título …", no `# Título …` en crudo). Desde ahí:
+
+- Escribir añade el texto al final del contenido oculto de la sección y la
+  despliega.
+- Pulsar `→` salta directamente al **primer carácter de la siguiente
+  cabecera** (sin pasar por posiciones intermedias raras en el margen).
+- Si es la **última** sección del documento, `→` no hace nada: el cursor se
+  queda a la derecha de la elipsis.
 
 ## Texto resaltado (`==texto==`)
 
