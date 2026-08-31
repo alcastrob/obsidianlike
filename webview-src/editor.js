@@ -7703,6 +7703,26 @@ function moveVerticalByLine(view, dir, extend) {
       const markerEnd = targetLine.from + (mm ? mm[0].length : 0);
       if (newHead < markerEnd) newHead = markerEnd;
     }
+    // Down from the last folded section lands on its last collapsed line. If
+    // the document ends with a trailing newline that line is *empty*, and a
+    // caret there has no text of its own to measure against — CM6 falls back
+    // to the nearest visible line (the heading), drawing the caret as tall as
+    // the heading text. Retarget to the end of the nearest preceding
+    // non-empty line inside the same folded span so the caret renders at
+    // ordinary body-text height, exactly as it already does when the last
+    // character isn't a newline. Reported with a before/after video.
+    if (targetLine.length === 0) {
+      for (const span of computeFoldedSpans(state)) {
+        const sFrom = state.doc.lineAt(span.from).number;
+        const sTo = state.doc.lineAt(span.to).number;
+        if (targetLineNum < sFrom || targetLineNum > sTo) continue;
+        for (let ln = targetLineNum - 1; ln >= sFrom; ln--) {
+          const l = state.doc.line(ln);
+          if (l.length > 0) { newHead = l.from + Math.min(col, l.length); break; }
+        }
+        break;
+      }
+    }
     vGoalCol = col;
   }
 

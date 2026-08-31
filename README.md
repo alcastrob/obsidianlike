@@ -329,6 +329,10 @@ cabecera sigue viéndose "Título …", no `# Título …` en crudo). Desde ahí
   cabecera** (sin pasar por posiciones intermedias raras en el margen).
 - Si es la **última** sección del documento, `→` no hace nada: el cursor se
   queda a la derecha de la elipsis.
+- Pulsar `↓` desde la última sección colapsada deja el cursor a la altura de
+  texto normal, tanto si el documento termina en un salto de línea como si
+  no (antes, con salto de línea final, el cursor se dibujaba tan alto como
+  el texto de la cabecera).
 
 ## Texto resaltado (`==texto==`)
 
