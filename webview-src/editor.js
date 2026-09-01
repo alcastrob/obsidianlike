@@ -7846,16 +7846,27 @@ function findUrlAtPos(view, pos) {
 // findUrlAtPos is driven purely by a resolved document position, not by hit-testing
 // a real DOM element the way the .cm-wiki-link/.cm-md-link/etc. checks below are —
 // so it can't tell "the click landed on this character" apart from "posAtCoords
-// clamped an out-of-bounds click onto the nearest character." The clearest case:
-// clicking in the blank area below the document's last line, when that line is a
-// bare URL — posAtCoords clamps the click onto that line (commonly right at its
-// end), so findUrlAtPos happily reports a URL even though the pointer was visibly
-// below the text, not on it. Guards that check by requiring the click's own Y
-// coordinate to actually fall inside the resolved position's rendered row.
-function clickResolvesOnRow(view, pos, clientY) {
+// clamped an out-of-bounds click onto the nearest character." Two ways that
+// clamping produces a false positive:
+//   - clicking in the blank area *below* the document's last line, when that line
+//     is a bare URL — posAtCoords clamps onto that line (commonly its end);
+//   - clicking in the blank area to the *right* of a line that ends in a bare URL
+//     — posAtCoords clamps to the line end, landing squarely on the URL's last
+//     character even though the pointer was visibly out in the margin (reported:
+//     "si pulso espacio en blanco más allá de un hiperenlace... me abre el link
+//     en un navegador" — expected is just the cursor at end of line).
+// Guard both by requiring the click's own X and Y to fall within (a small
+// tolerance of) the resolved position's rendered caret rect. Returning false
+// here lets CM6 handle the click normally, i.e. place the cursor at line end.
+function clickResolvesOnGlyph(view, pos, clientX, clientY) {
   const coords = view.coordsAtPos(pos);
   if (!coords) return true;
-  return clientY >= coords.top && clientY <= coords.bottom;
+  if (clientY < coords.top || clientY > coords.bottom) return false;
+  // posAtCoords snaps horizontally to the nearest character boundary, so a click
+  // genuinely on the text lands within roughly one glyph width of the resolved
+  // caret; a click out in the line's blank margin lands far past it.
+  const X_TOLERANCE = 20;
+  return clientX >= coords.left - X_TOLERANCE && clientX <= coords.right + X_TOLERANCE;
 }
 
 function isWikiLinkEl(target, editorDom) {
@@ -7922,7 +7933,7 @@ const linkClickHandler = EditorView.domEventHandlers({
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
-    if (clickResolvesOnRow(view, pos, e.clientY) && findUrlAtPos(view, pos)) { e.preventDefault(); return true; }
+    if (clickResolvesOnGlyph(view, pos, e.clientX, e.clientY) && findUrlAtPos(view, pos)) { e.preventDefault(); return true; }
     return false;
   },
   // click: fire the action
@@ -8019,7 +8030,7 @@ const linkClickHandler = EditorView.domEventHandlers({
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
-    const url = clickResolvesOnRow(view, pos, e.clientY) ? findUrlAtPos(view, pos) : null;
+    const url = clickResolvesOnGlyph(view, pos, e.clientX, e.clientY) ? findUrlAtPos(view, pos) : null;
     if (url) {
       e.preventDefault();
       vscode.postMessage({ type: 'open-url', url });
