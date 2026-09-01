@@ -7772,6 +7772,79 @@ const foldEdgeRightGuard = Prec.highest(keymap.of([
   { key: 'Shift-ArrowRight', run: view => caretAtLastFoldedHeadingEnd(view.state) },
 ]));
 
+// Backspace/Delete at a folded section's edge would otherwise be silently
+// *expanded* by CM6's own skipAtomic (see @codemirror/commands' deleteBy) to
+// swallow the entire collapsed span: whenever the key's target position lands
+// *strictly inside* foldAtomicRanges' [h.lineTo, atomTo] span, skipAtomic snaps
+// the deletion's far end back to h.lineTo and every line of the collapsed
+// section is wiped. Reported twice with screenshots — first as Backspace from
+// the start of a blank line just under the fold ("borro TODO el contenido de la
+// sección colapsada"), then as Backspace from column 0 of the *next* heading
+// when no blank line separates them ("borro todo el contenido oculto de la #
+// Sección 1. No debería poder borrarlo").
+//
+// This Prec.highest keymap catches every such position (not just the two
+// specific ones the reports happened to hit) by checking directly whether the
+// default key's target (head-1 for Backspace, head+1 for Delete) would fall
+// inside a folded atomic span:
+//  - Backspace while the caret sits in a visible trailing blank-line gap →
+//    remove exactly ONE of those blank lines, always via a newline strictly
+//    after b.contentEnd so the hidden content is never touched, then re-anchor
+//    the caret clear of any (recomputed) fold span.
+//  - Any other such position (no gap, or the target is hidden content) →
+//    consume the key as a no-op; there is nothing there that can be deleted
+//    without reaching into text the user can't see.
+// Every other delete returns false and falls through to the default keymap.
+function reanchorOutsideFold(view, pos) {
+  const s = view.state;
+  let anchor = Math.max(0, Math.min(pos, s.doc.length));
+  for (const b of foldedHeadingBounds(s)) {
+    const gap = b.contentEnd < b.rawFoldEnd;
+    const atomTo = gap ? b.contentEnd + 1 : b.nextMarkerEnd;
+    if (anchor > b.h.lineTo && anchor < atomTo) { anchor = atomTo; break; }
+  }
+  view.dispatch({ selection: { anchor }, userEvent: 'select' });
+}
+function guardFoldEdgeDelete(view, dir) {
+  if (sourceMode || !foldedSet.size) return false;
+  const sel = view.state.selection.main;
+  if (!sel.empty) return false;
+  const head = sel.head;
+  const doc = view.state.doc;
+  for (const b of foldedHeadingBounds(view.state)) {
+    const gap = b.contentEnd < b.rawFoldEnd;
+    const atomFrom = b.h.lineTo;
+    const atomTo = gap ? b.contentEnd + 1 : b.nextMarkerEnd;
+    const target = dir < 0 ? head - 1 : head + 1;
+    if (!(target > atomFrom && target < atomTo)) continue;
+
+    if (dir < 0 && gap && head >= b.contentEnd + 1) {
+      // Caret is in / at the visible blank-line gap — drop exactly one blank
+      // line, never a newline at or before b.contentEnd.
+      let from, to;
+      if (head === b.contentEnd + 1) {
+        // At the very start of the gap: removing the newline *before* it
+        // (b.contentEnd) would merge a blank line into the hidden content, so
+        // drop this line's own terminating newline (forward) instead.
+        if (head < doc.length) { from = head; to = head + 1; }
+        else { from = head - 1; to = head; } // gap line is the last doc line
+      } else {
+        from = head - 1; to = head; // target already >= b.contentEnd + 1 — safe
+      }
+      view.dispatch({ changes: { from, to, insert: '' }, userEvent: 'delete.backward', scrollIntoView: true });
+      reanchorOutsideFold(view, from);
+      return true;
+    }
+    // No gap, or the target is hidden content: nothing safely deletable here.
+    return true;
+  }
+  return false;
+}
+const foldEdgeDeleteGuard = Prec.highest(keymap.of([
+  { key: 'Backspace', run: v => guardFoldEdgeDelete(v, -1), shift: v => guardFoldEdgeDelete(v, -1) },
+  { key: 'Delete', run: v => guardFoldEdgeDelete(v, 1), shift: v => guardFoldEdgeDelete(v, 1) },
+]));
+
 // ── Markdown shortcuts ────────────────────────────────────────────────────────
 function toggleWrap(view, marker) {
   const { state, dispatch } = view;
@@ -9161,6 +9234,7 @@ function createEditor(parent, content) {
       wikiSuggestKeymap,
       verticalMoveKeymap,
       foldEdgeRightGuard,
+      foldEdgeDeleteGuard,
       // CM6 doesn't set these on its contentEditable contentDOM by default, and
       // leaving them unset is what silently disables the OS-level text features
       // that key off them: macOS's own Text Replacement (System Settings ->
