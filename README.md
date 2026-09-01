@@ -24,7 +24,11 @@ de red automática ni ningún SDK de telemetría o diagnóstico.**
   "abrir" del propio sistema operativo (`cmd.exe /c start`/`open`/`xdg-open`,
   vía `execFile` con argumentos en array, sin intérprete de shell de por
   medio) con la URL intacta. Sigue siendo un proceso local del sistema, no una
-  llamada de red hecha por la extensión.
+  llamada de red hecha por la extensión. El clic solo cuenta como "clic en el
+  enlace" si cae realmente sobre el texto de la URL: pulsar en el espacio en
+  blanco a la derecha (o debajo) de una línea que termina en una URL suelta ya
+  no abre el navegador — coloca el cursor al final de la línea, como es de
+  esperar.
 - El CSP del webview (`default-src 'none'; img-src ${cspSource} data: blob:;
   script-src ${cspSource} 'unsafe-inline' 'unsafe-eval'; style-src
   'unsafe-inline';`) no incluye `connect-src`, así que hereda `default-src
@@ -339,6 +343,16 @@ ven como un hueco entre el `…` y la cabecera siguiente. Así, poniendo el
 cursor al principio de una cabecera cuya sección anterior está plegada y
 pulsando Intro, las líneas en blanco que insertas se ven de verdad, en vez de
 quedar ocultas bajo el pliegue (como en Obsidian).
+
+`Retroceso` (o `Supr`) junto al borde de una sección colapsada **nunca borra
+su contenido oculto**. Antes, al pulsar `Retroceso` desde una línea en blanco
+justo debajo del pliegue —o desde el principio de la cabecera siguiente cuando
+no hay línea en blanco de por medio— CodeMirror expandía el borrado y se
+llevaba por delante toda la sección plegada de golpe. Ahora: si el cursor está
+en un hueco de líneas en blanco visible, `Retroceso` borra **solo una** de esas
+líneas; en cualquier otra posición de borde la tecla no hace nada (no se puede
+borrar lo que no se ve — despliega la sección primero). En modo fuente no
+aplica ninguna restricción.
 
 ## Texto resaltado (`==texto==`)
 
