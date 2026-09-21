@@ -7621,10 +7621,14 @@ function moveVerticalByLine(view, dir, extend) {
   // cursor's current x, preserving the usual "keep roughly the same column"
   // feel without ever needing to know a row's rendered width in advance.
   let newHead = null;
-  const headCoords = view.coordsAtPos(range.head);
+  // A cursor with assoc < 0 visually belongs to the row of the character
+  // *before* it — the case at a wrap boundary right after End (see
+  // moveToRowBoundary), where its offset is also the first char of the next row.
+  const atPrevSide = range.assoc < 0 && range.head > curLine.from;
+  const headCoords = view.coordsAtPos(range.head, atPrevSide ? -1 : 1);
   if (headCoords) {
     const startTop = headCoords.top;
-    let p = range.head;
+    let p = (dir > 0 && atPrevSide) ? range.head - 1 : range.head;
     let rowStart = null;
     while (true) {
       p += dir;
@@ -7693,7 +7697,30 @@ function moveVerticalByLine(view, dir, extend) {
     }
     targetLineNum = Math.min(Math.max(targetLineNum, 1), state.doc.lines);
     const targetLine = state.doc.line(targetLineNum);
-    newHead = targetLine.from + Math.min(col, targetLine.length);
+    // Moving *up* into a target line that is itself wrapped over several
+    // visual rows must land on its LAST row (the one directly above the
+    // cursor), at the cursor's own x — not on the same character column of its
+    // FIRST row, which is what a plain column jump does and reads as the cursor
+    // leaping to the start of the paragraph. Same coordsAtPos-only walk as the
+    // same-line branch above (no posAtCoords hit-testing).
+    let lastRowHead = null;
+    if (dir < 0 && headCoords && targetLine.length > 0) {
+      const endC = view.coordsAtPos(targetLine.to, -1);
+      if (endC) {
+        let best = targetLine.to;
+        let bestDist = Math.abs(endC.left - headCoords.left);
+        let wrapped = false;
+        for (let q = targetLine.to - 1; q >= targetLine.from; q--) {
+          const c = view.coordsAtPos(q, 1);
+          if (!c) continue;
+          if (Math.abs(c.top - endC.top) > 4) { wrapped = true; break; }
+          const dist = Math.abs(c.left - headCoords.left);
+          if (dist < bestDist) { bestDist = dist; best = q; }
+        }
+        if (wrapped) lastRowHead = best;
+      }
+    }
+    newHead = lastRowHead != null ? lastRowHead : targetLine.from + Math.min(col, targetLine.length);
     // Never land inside a folded heading's own hidden "# " marker (renders as
     // a stray caret out in the gutter — see foldedHeadingBounds' nextMarkerEnd
     // comment). Clamp forward to the first character of its text, matching
@@ -7738,11 +7765,67 @@ function moveVerticalByLine(view, dir, extend) {
   return true;
 }
 
+// End/Home: move to the end/start of the current *visual row* (wrapped rows
+// count), like CM6's own cursorLineBoundaryForward/Backward — but without its
+// posAtCoords({ x: editorRect.right - 1, y }) hit-test. On macOS that hit-test
+// resolved past the row to the NEXT document line, so End from mid-word on the
+// last row of a paragraph jumped to the end of the line below (reported).
+// Same fix as moveVerticalByLine: read real character positions via
+// coordsAtPos only. A cursor at a wrap boundary is placed with assoc -1 (End) /
+// 1 (Home), exactly as CM6 does, so it renders at the end of the row it was
+// asked to go to instead of the start of the next one.
+function moveToRowBoundary(view, forward, extend) {
+  const { state } = view;
+  const range = state.selection.main;
+  const line = state.doc.lineAt(range.head);
+  // Index of the character the cursor visually sits on/after: with assoc < 0
+  // it belongs to the previous character's row (see atPrevSide above).
+  const cIdx = (range.assoc < 0 && range.head > line.from) ? range.head - 1 : range.head;
+  const rowCoords = i => view.coordsAtPos(i, i < line.to ? 1 : -1);
+  const top0 = rowCoords(cIdx);
+  if (!top0) return false; // not measurable (off-screen) — let CM6 handle it
+  const sameRow = i => {
+    const c = rowCoords(i);
+    return !c || Math.abs(c.top - top0.top) <= 4; // unmeasurable (hidden) chars: same row
+  };
+
+  let newHead, assoc;
+  if (forward) {
+    let j = cIdx + 1;
+    while (j <= line.to && sameRow(j)) j++;
+    // j is the first offset on a later row (or line.to + 1 → end of line).
+    newHead = Math.min(j, line.to);
+    assoc = -1;
+  } else {
+    let s = cIdx;
+    while (s > line.from && sameRow(s - 1)) s--;
+    newHead = s;
+    assoc = 1;
+    // Smart Home, as CM6's own: at the very start of the line, a further
+    // press toggles to just after the leading whitespace and back.
+    if (s === line.from && line.length) {
+      const space = /^\s*/.exec(line.text.slice(0, 100))[0].length;
+      if (space && range.head !== line.from + space) { newHead = line.from + space; }
+    }
+  }
+
+  view.dispatch({
+    selection: extend ? EditorSelection.range(range.anchor, newHead) : EditorSelection.cursor(newHead, assoc),
+    scrollIntoView: true,
+    userEvent: 'select',
+  });
+  return true;
+}
+
 const verticalMoveKeymap = Prec.highest(keymap.of([
   { key: 'ArrowDown', run: view => moveVerticalByLine(view, 1, false) },
   { key: 'ArrowUp', run: view => moveVerticalByLine(view, -1, false) },
   { key: 'Shift-ArrowDown', run: view => moveVerticalByLine(view, 1, true) },
   { key: 'Shift-ArrowUp', run: view => moveVerticalByLine(view, -1, true) },
+  { key: 'End', run: view => moveToRowBoundary(view, true, false), shift: view => moveToRowBoundary(view, true, true), preventDefault: true },
+  { key: 'Home', run: view => moveToRowBoundary(view, false, false), shift: view => moveToRowBoundary(view, false, true), preventDefault: true },
+  { mac: 'Cmd-ArrowRight', run: view => moveToRowBoundary(view, true, false), shift: view => moveToRowBoundary(view, true, true), preventDefault: true },
+  { mac: 'Cmd-ArrowLeft', run: view => moveToRowBoundary(view, false, false), shift: view => moveToRowBoundary(view, false, true), preventDefault: true },
 ]));
 
 // → from the "cursor a la derecha de la elipsis" position (a folded heading's
