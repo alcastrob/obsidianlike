@@ -6724,7 +6724,7 @@ class TableMenuView {
   // tableContextMenuHandler's generic branch). `onAccept` runs whenever any
   // leaf item's own action fires, at any nesting depth — it's always the same
   // callback (closing the *entire* menu tree), passed down unchanged.
-  _buildMenu(items, onAccept) {
+  _buildMenu(items, onAccept, isSubmenu) {
     const menu = document.createElement('div');
     menu.className = 'cm-table-menu';
     for (const it of items) {
@@ -6759,7 +6759,13 @@ class TableMenuView {
       if (it.items) {
         row.addEventListener('mouseenter', () => this._openSubmenu(row, it.items, onAccept));
       } else {
-        row.addEventListener('mouseenter', () => this._closeSubmenu());
+        // Hovering a plain item closes any *sibling's* open submenu — but only
+        // at the top level. This same function also builds the submenu's own
+        // rows (recursively, see `_openSubmenu` below); without the
+        // `isSubmenu` guard, hovering a leaf row *inside* the submenu (e.g. a
+        // color entry) would call `_closeSubmenu()` on the very submenu that
+        // row belongs to, closing it out from under the pointer instantly.
+        if (!isSubmenu) row.addEventListener('mouseenter', () => this._closeSubmenu());
         row.addEventListener('click', e => {
           e.preventDefault(); e.stopPropagation();
           onAccept();
@@ -6772,7 +6778,7 @@ class TableMenuView {
   }
   _openSubmenu(parentRow, subItems, onAccept) {
     this._closeSubmenu();
-    const sub = this._buildMenu(subItems, onAccept);
+    const sub = this._buildMenu(subItems, onAccept, true);
     sub.classList.add('cm-table-menu-submenu');
     this.view.dom.appendChild(sub);
     const editorRect = this.view.dom.getBoundingClientRect();
