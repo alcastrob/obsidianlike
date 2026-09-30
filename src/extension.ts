@@ -2275,6 +2275,16 @@ export function activate(context: vscode.ExtensionContext) {
     panel?.webview.postMessage({ type: 'open-search-panel' });
   });
 
+  // Ctrl+B / Ctrl+I: same pattern as Ctrl+F above — a real keybinding scoped to this
+  // custom editor (otherwise VS Code's own Ctrl+B "toggle sidebar" wins), which asks
+  // the webview to toggle the markdown markers on its selection.
+  const postToggleFormat = (marker: string) => {
+    const panel = activePanels.find(p => p.active) ?? activePanels.find(p => p.visible);
+    panel?.webview.postMessage({ type: 'toggle-format', marker });
+  };
+  const toggleBoldCmd = vscode.commands.registerCommand('vaultTool.toggleBold', () => postToggleFormat('**'));
+  const toggleItalicCmd = vscode.commands.registerCommand('vaultTool.toggleItalic', () => postToggleFormat('*'));
+
   // Fallback for drag-and-drop: VS Code shows its own drag-tracking overlay above
   // every webview for the whole duration of any drag targeting the editor area, so
   // the `dragover`/`drop` listeners in editor.js never actually see an OS file
@@ -2494,7 +2504,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     listNotesCmd, openKanbanCmd, toggleSourceCmd, insertAttachmentCmd, duplicateFileCmd, editTaskAtCursorCmd,
-    openSearchPanelCmd,
+    openSearchPanelCmd, toggleBoldCmd, toggleItalicCmd,
     openNoteQuickPickCmd, openNoteQuickPickNewTabCmd, openNoteQuickPickSideCmd, openNoteAtLineCmd
   );
 }

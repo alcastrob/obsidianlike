@@ -150,6 +150,14 @@
       {
         "command": "vaultTool.openSearchPanel",
         "title": "Obsidian-like: Buscar y reemplazar"
+      },
+      {
+        "command": "vaultTool.toggleBold",
+        "title": "Obsidian-like: Alternar negrita"
+      },
+      {
+        "command": "vaultTool.toggleItalic",
+        "title": "Obsidian-like: Alternar cursiva"
       }
     ],
     "menus": {
@@ -181,6 +189,18 @@
         "key": "ctrl+f",
         "mac": "cmd+f",
         "when": "activeCustomEditorId == 'vaultTool.markdownEditor'"
+      },
+      {
+        "command": "vaultTool.toggleBold",
+        "key": "ctrl+b",
+        "mac": "cmd+b",
+        "when": "activeCustomEditorId == 'vaultTool.markdownEditor' && !sideBarFocus && !panelFocus && !auxiliaryBarFocus"
+      },
+      {
+        "command": "vaultTool.toggleItalic",
+        "key": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "activeCustomEditorId == 'vaultTool.markdownEditor' && !sideBarFocus && !panelFocus && !auxiliaryBarFocus"
       },
       {
         "command": "vaultTool._openNoteQuickPickInNewTab",

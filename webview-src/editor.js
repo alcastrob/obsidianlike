@@ -6692,6 +6692,41 @@ function pasteAtCursor(view) {
     }).catch(() => {});
   }
 }
+// "Pegar con formato": reads the clipboard's `text/html` (a ChatGPT/Claude/
+// Copilot answer, a web page...) and inserts it converted to markdown via
+// htmlToMarkdown. Plain Ctrl+V / "Pegar" stay plain-text only (CM6's default).
+// Falls back to the plain text when there's no convertible HTML.
+async function pasteWithFormat(view) {
+  let md = null, plain = '';
+  try {
+    if (navigator.clipboard && navigator.clipboard.read) {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        if (!md && item.types.includes('text/html')) {
+          md = htmlToMarkdown(await (await item.getType('text/html')).text());
+        }
+        if (!plain && item.types.includes('text/plain')) {
+          plain = await (await item.getType('text/plain')).text();
+        }
+      }
+    } else if (navigator.clipboard && navigator.clipboard.readText) {
+      plain = await navigator.clipboard.readText();
+    }
+  } catch (_) { /* clipboard read denied/unavailable */ }
+  const text = md != null ? md : plain;
+  if (!text) {
+    new DataviewNotice('El portapapeles está vacío o no se puede leer.');
+    return;
+  }
+  const sel = view.state.selection.main;
+  view.dispatch({
+    changes: { from: sel.from, to: sel.to, insert: text },
+    selection: EditorSelection.cursor(sel.from + text.length),
+    userEvent: 'input.paste',
+    scrollIntoView: true,
+  });
+  view.focus();
+}
 
 class TableMenuView {
   constructor(view) {
@@ -6936,6 +6971,7 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
       { label: 'Cortar', action: () => cutSelection(view), disabled: !hasSelection },
       { label: 'Copiar', action: () => copySelection(view), disabled: !hasSelection },
       { label: 'Pegar',  action: () => pasteAtCursor(view) },
+      { label: 'Pegar con formato', action: () => pasteWithFormat(view) },
       { separator: true },
       { label: 'Crear tabla', action: () => insertTableTemplate(view, pos) },
       { label: 'Pegar como tabla', action: () => pasteAsTable(view, pos) },
@@ -7935,32 +7971,284 @@ const foldEdgeDeleteGuard = Prec.highest(keymap.of([
 ]));
 
 // ── Markdown shortcuts ────────────────────────────────────────────────────────
+// Counts consecutive `ch` characters in `s`, from the start (dir 1) or the end (dir -1).
+function countRun(s, ch, dir) {
+  let n = 0;
+  if (dir > 0) { while (n < s.length && s[n] === ch) n++; }
+  else { while (n < s.length && s[s.length - 1 - n] === ch) n++; }
+  return n;
+}
+// Given how many emphasis chars wrap a span on *both* sides (`n`), decides whether
+// the requested style is present: bold = 2+ chars (`**x**`, `***x***`), italic =
+// an odd count (`*x*`, `***x***`) — so `**x**` is NOT treated as italic, and
+// Ctrl+I on it adds `*` instead of stripping one star off the bold markers.
+function emphasisPresent(n, bold) {
+  return bold ? n >= 2 : (n === 1 || n === 3);
+}
+// Ctrl+B / Ctrl+I: toggles bold (`**`) or italic (`*`) on the selection. Detects
+// markers both *inside* the selection (`**text**` selected) and *just outside* it
+// (only `text` selected, as happens when the markers are hidden in live preview),
+// accepting `_`/`__` as existing markers too. Leading/trailing whitespace is kept
+// out of the markers (`**word **` isn't valid emphasis).
 function toggleWrap(view, marker) {
   const { state, dispatch } = view;
+  const bold = marker.length === 2;
   const sel = state.selection.main;
-  const ml  = marker.length;
+  const doc = state.doc;
+
   if (sel.empty) {
+    // Cursor between an empty pair we just inserted (`**|**`): remove it.
+    const line = doc.lineAt(sel.from);
+    const before = doc.sliceString(line.from, sel.from);
+    const after = doc.sliceString(sel.from, line.to);
+    for (const ch of ['*', '_']) {
+      const n = Math.min(countRun(before, ch, -1), countRun(after, ch, 1));
+      if (emphasisPresent(n, bold)) {
+        const k = bold ? 2 : 1;
+        dispatch(state.update({
+          changes: [{ from: sel.from - k, to: sel.from }, { from: sel.from, to: sel.from + k }],
+          selection: { anchor: sel.from - k },
+          userEvent: 'input.format',
+        }));
+        return true;
+      }
+    }
     dispatch(state.update({
       changes: { from: sel.from, insert: marker + marker },
-      selection: { anchor: sel.from + ml },
-      userEvent: 'input',
+      selection: { anchor: sel.from + marker.length },
+      userEvent: 'input.format',
     }));
-  } else {
-    const text = state.doc.sliceString(sel.from, sel.to);
-    if (text.startsWith(marker) && text.endsWith(marker) && text.length > ml * 2) {
+    return true;
+  }
+
+  // Trim surrounding whitespace out of the range.
+  let from = sel.from, to = sel.to;
+  const raw = doc.sliceString(from, to);
+  const lead = raw.length - raw.trimStart().length;
+  const trail = raw.length - raw.trimEnd().length;
+  if (lead + trail < raw.length) { from += lead; to -= trail; }
+  const text = doc.sliceString(from, to);
+  const k = bold ? 2 : 1;
+
+  // 1) Markers inside the selection.
+  for (const ch of ['*', '_']) {
+    const n = Math.min(countRun(text, ch, 1), countRun(text, ch, -1));
+    if (emphasisPresent(n, bold) && text.length > n * 2) {
+      // Strip the innermost `k` chars on each side (keeps an enclosing style intact:
+      // `***x***` minus italic → `**x**`, minus bold → `*x*`).
+      const off = bold ? n - 2 : n - 1;
       dispatch(state.update({
-        changes: { from: sel.from, to: sel.to, insert: text.slice(ml, -ml) },
-        userEvent: 'input',
+        changes: [
+          { from: from + off, to: from + off + k },
+          { from: to - off - k, to: to - off },
+        ],
+        selection: EditorSelection.range(from, to - k * 2),
+        userEvent: 'input.format',
       }));
-    } else {
-      dispatch(state.update({
-        changes: [{ from: sel.from, insert: marker }, { from: sel.to, insert: marker }],
-        selection: EditorSelection.range(sel.from, sel.to + ml * 2),
-        userEvent: 'input',
-      }));
+      return true;
     }
   }
+
+  // 2) Markers right outside the selection.
+  const line = doc.lineAt(from);
+  const endLine = doc.lineAt(to);
+  const before = doc.sliceString(line.from, from);
+  const after = doc.sliceString(to, endLine.to);
+  for (const ch of ['*', '_']) {
+    const n = Math.min(countRun(before, ch, -1), countRun(after, ch, 1));
+    if (emphasisPresent(n, bold)) {
+      dispatch(state.update({
+        changes: [{ from: from - k, to: from }, { from: to, to: to + k }],
+        selection: EditorSelection.range(from - k, to - k),
+        userEvent: 'input.format',
+      }));
+      return true;
+    }
+  }
+
+  // 3) Not formatted: wrap.
+  dispatch(state.update({
+    changes: [{ from, insert: marker }, { from: to, insert: marker }],
+    selection: EditorSelection.range(from + k, to + k),
+    userEvent: 'input.format',
+  }));
   return true;
+}
+
+// ── Rich paste: HTML (ChatGPT / Claude / Copilot / web pages) → markdown ─────
+// Copying a chat answer puts its rendered form on the clipboard as `text/html`
+// (<strong>, <ul><li>, <h3>, <pre><code>...) next to a `text/plain` version that
+// has lost all formatting. Used only by the context menu's "Pegar con formato"
+// (pasteWithFormat) — normal Ctrl+V stays plain-text (CM6's default). Returns
+// null when the HTML carries no semantic formatting tags (e.g. VS Code's own
+// editor, which copies as <div>/<span> with inline colors only).
+const RICH_PASTE_TAG_RE = /<(strong|b|em|i|u|s|del|strike|mark|code|pre|ul|ol|li|h[1-6]|blockquote|a|table|hr|p)[\s>]/i;
+const HTML_SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'BUTTON', 'SVG', 'META', 'TITLE', 'HEAD', 'NOSCRIPT', 'TEMPLATE', 'LINK']);
+const HTML_BLOCK_TAGS = new Set(['P', 'DIV', 'SECTION', 'ARTICLE', 'MAIN', 'HEADER', 'FOOTER', 'ASIDE', 'NAV',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'PRE', 'TABLE', 'HR', 'FIGURE', 'DL', 'DT', 'DD']);
+
+// Wraps inline markdown `s` in `m` markers, keeping surrounding spaces outside
+// (`** bold**` isn't valid emphasis).
+function mdWrapInline(s, m) {
+  const t = s.trim();
+  if (!t) return s;
+  const lead = s.match(/^\s*/)[0] ? ' ' : '';
+  const trail = s.match(/\s*$/)[0] ? ' ' : '';
+  return lead + m + t + m + trail;
+}
+
+function htmlInlineToMd(node, inPre) {
+  if (node.nodeType === 3) {
+    return inPre ? node.nodeValue : node.nodeValue.replace(/[\s ]+/g, ' ');
+  }
+  if (node.nodeType !== 1 || HTML_SKIP_TAGS.has(node.tagName.toUpperCase())) return '';
+  const tag = node.tagName.toUpperCase();
+  const kids = () => Array.from(node.childNodes).map(c => htmlInlineToMd(c, inPre)).join('');
+  const style = (node.getAttribute && node.getAttribute('style')) || '';
+  switch (tag) {
+    case 'BR': return '\n';
+    case 'STRONG': return mdWrapInline(kids(), '**');
+    // Google Docs wraps everything in <b style="font-weight:normal">.
+    case 'B': return /font-weight\s*:\s*(normal|[1-5]00)\b/i.test(style) ? kids() : mdWrapInline(kids(), '**');
+    case 'EM': case 'I': return mdWrapInline(kids(), '*');
+    case 'S': case 'DEL': case 'STRIKE': return mdWrapInline(kids(), '~~');
+    case 'MARK': return mdWrapInline(kids(), '==');
+    case 'CODE': {
+      const t = node.textContent;
+      if (!t) return '';
+      const fence = t.includes('`') ? '``' : '`';
+      return fence + t + fence;
+    }
+    case 'A': {
+      const text = kids();
+      const href = node.getAttribute('href') || '';
+      if (!href || href.startsWith('#') || href.startsWith('javascript:')) return text;
+      if (text.trim() === href || !text.trim()) return href;
+      return `[${text.trim()}](${href})`;
+    }
+    case 'IMG': {
+      const src = node.getAttribute('src') || '';
+      if (!src || src.startsWith('data:')) return '';
+      return `![${node.getAttribute('alt') || ''}](${src})`;
+    }
+    default: {
+      let s = kids();
+      if (/font-weight\s*:\s*(bold|[6-9]00)\b/i.test(style)) s = mdWrapInline(s, '**');
+      if (/font-style\s*:\s*italic/i.test(style)) s = mdWrapInline(s, '*');
+      return s;
+    }
+  }
+}
+
+// Cleans up a run of inline markdown: trims each line, drops empty ones.
+function mdCleanInline(s) {
+  return s.split('\n').map(l => l.replace(/[ \t]+/g, ' ').trim()).filter(Boolean).join('\n');
+}
+
+// Converts the children of `parent` into an array of markdown blocks.
+function htmlBlocksToMd(parent) {
+  const blocks = [];
+  let inlineBuf = [];
+  const flush = () => {
+    const s = mdCleanInline(inlineBuf.map(n => htmlInlineToMd(n, false)).join(''));
+    if (s) blocks.push(s);
+    inlineBuf = [];
+  };
+  for (const node of Array.from(parent.childNodes)) {
+    if (node.nodeType === 1 && HTML_SKIP_TAGS.has(node.tagName.toUpperCase())) continue;
+    if (node.nodeType === 1 && HTML_BLOCK_TAGS.has(node.tagName.toUpperCase())) {
+      flush();
+      blocks.push(...htmlBlockToMd(node));
+    } else {
+      inlineBuf.push(node);
+    }
+  }
+  flush();
+  return blocks;
+}
+
+function htmlListToMd(list) {
+  const ordered = list.tagName.toUpperCase() === 'OL';
+  let n = parseInt(list.getAttribute('start') || '1', 10);
+  if (isNaN(n)) n = 1;
+  const lines = [];
+  for (const li of Array.from(list.children)) {
+    if (li.tagName.toUpperCase() !== 'LI') continue;
+    let marker = ordered ? `${n++}. ` : '- ';
+    const cb = li.querySelector(':scope > input[type="checkbox"], :scope > p > input[type="checkbox"]');
+    if (cb) { marker += cb.checked ? '[x] ' : '[ ] '; cb.remove(); }
+    const pad = ' '.repeat(ordered ? marker.replace(/\[.\] $/, '').length : 2);
+    const inner = htmlBlocksToMd(li);
+    // Sub-lists come back as their own block; everything else (a <p> per
+    // paragraph, as ChatGPT emits) is continuation text of this item.
+    const itemLines = [];
+    inner.forEach((b, idx) => {
+      const bl = b.split('\n');
+      bl.forEach((l, j) => {
+        if (idx === 0 && j === 0) itemLines.push(marker + l);
+        else itemLines.push(l ? pad + l : '');
+      });
+    });
+    if (!itemLines.length) itemLines.push(marker.trimEnd());
+    lines.push(...itemLines);
+  }
+  return lines.join('\n');
+}
+
+function htmlTableToMd(table) {
+  const rows = Array.from(table.querySelectorAll('tr')).map(tr =>
+    Array.from(tr.children)
+      .filter(c => /^(TD|TH)$/i.test(c.tagName))
+      .map(c => mdCleanInline(htmlInlineToMd(c, false)).replace(/\n/g, '<br>').replace(/\|/g, '\\|')));
+  const width = Math.max(0, ...rows.map(r => r.length));
+  if (!rows.length || !width) return '';
+  const norm = rows.map(r => { const c = r.slice(); while (c.length < width) c.push(''); return c; });
+  const line = cells => '| ' + cells.join(' | ') + ' |';
+  return [line(norm[0]), line(norm[0].map(() => '---')), ...norm.slice(1).map(line)].join('\n');
+}
+
+function htmlBlockToMd(el) {
+  const tag = el.tagName.toUpperCase();
+  const h = /^H([1-6])$/.exec(tag);
+  if (h) {
+    const s = mdCleanInline(htmlInlineToMd(el, false)).replace(/\n/g, ' ');
+    return s ? ['#'.repeat(Number(h[1])) + ' ' + s] : [];
+  }
+  switch (tag) {
+    case 'UL': case 'OL': {
+      const s = htmlListToMd(el);
+      return s ? [s] : [];
+    }
+    case 'PRE': {
+      const code = el.querySelector('code') || el;
+      const cls = (code.getAttribute('class') || '') + ' ' + (el.getAttribute('class') || '');
+      const lang = (/(?:language|lang)-([\w+#-]+)/.exec(cls) || [])[1] || '';
+      const text = code.textContent.replace(/\n$/, '');
+      const fence = text.includes('```') ? '~~~' : '```';
+      return [fence + lang + '\n' + text + '\n' + fence];
+    }
+    case 'BLOCKQUOTE': {
+      const inner = htmlBlocksToMd(el).join('\n\n');
+      return inner ? [inner.split('\n').map(l => (l ? '> ' + l : '>')).join('\n')] : [];
+    }
+    case 'TABLE': {
+      const s = htmlTableToMd(el);
+      return s ? [s] : [];
+    }
+    case 'HR': return ['---'];
+    default: return htmlBlocksToMd(el);
+  }
+}
+
+// Returns markdown for a clipboard HTML payload, or null when it has no
+// formatting worth converting (let the default plain-text paste run).
+function htmlToMarkdown(html) {
+  if (!html || !RICH_PASTE_TAG_RE.test(html)) return null;
+  let doc;
+  try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch (_) { return null; }
+  if (!doc || !doc.body) return null;
+  const md = htmlBlocksToMd(doc.body).join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+  return md || null;
 }
 
 // ── Click / link handler ──────────────────────────────────────────────────────
@@ -9341,8 +9629,14 @@ function createEditor(parent, content) {
       // a much deeper, framework-level limitation, not a one-line fix.
       EditorView.contentAttributes.of({ autocorrect: 'on', autocapitalize: 'sentences', spellcheck: 'true' }),
       keymap.of([
-        { key: 'Mod-b', run: v => toggleWrap(v, '**') },
-        { key: 'Mod-i', run: v => toggleWrap(v, '*')  },
+        // Ctrl+B/Ctrl+I are real contributes.keybindings (vaultTool.toggleBold/
+        // toggleItalic → 'toggle-format' message): VS Code's own Ctrl+B (toggle
+        // sidebar) otherwise wins at the webview boundary. VS Code still forwards
+        // the keydown to the host even when handled here, so toggling here too
+        // would apply twice — these only swallow the key (Mod-i is otherwise
+        // defaultKeymap's selectParentSyntax, which would change the selection).
+        { key: 'Mod-b', run: () => true },
+        { key: 'Mod-i', run: () => true },
         ...defaultKeymap,
         ...historyKeymap,
         indentWithTab,
@@ -9651,6 +9945,13 @@ window.addEventListener('message', ev => {
       break;
     case 'open-search-panel':
       openSearchPanel(view);
+      break;
+    case 'toggle-format':
+      // Only when the document itself has focus — not a table cell / property
+      // input / the title field, which are separate editable elements.
+      if (document.activeElement === view.contentDOM) {
+        toggleWrap(view, msg.marker === '**' ? '**' : '*');
+      }
       break;
     case 'tasks-query-result':
       tasksQueryCache.set(msg.query, msg.result);
