@@ -6728,6 +6728,168 @@ async function pasteWithFormat(view) {
   view.focus();
 }
 
+// "Copiar como texto con formato": the inverse of pasteWithFormat. Converts the selected
+// markdown into clean semantic HTML (h1-h6, strong/em, ul/ol, table, pre, blockquote...) with
+// every markdown artifact (#, *, [[ ]], fences, ...) stripped, and writes it as `text/html`
+// (what Word/Outlook/Docs read) plus a marker-free `text/plain` fallback.
+function mdInlineToHtml(raw) {
+  let s = raw.replace(/%%[^%]*%%/g, '').replace(/\s\^[\w-]+\s*$/, '');
+  const stash = [];
+  const keep = h => { stash.push(h); return `\x00${stash.length - 1}\x00`; };
+  s = s.replace(/`([^`]+)`/g, (_, c) => keep(`<code>${escapeHtmlText(c)}</code>`));
+  s = s.replace(/<br\s*\/?>/gi, () => keep('<br>'));
+  s = s.replace(/<mark[^>]*>([^\n]*?)<\/mark>/gi, '==$1==');
+  // ![[embed]]: images vanish, a note embed leaves just its name.
+  s = s.replace(/!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g, (_, n) => IMG_EXT.test(n.split('#')[0].trim()) ? '' : n.split('#')[0].trim());
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1');
+  s = s.replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2');
+  s = s.replace(/\[\[([^\]]+)\]\]/g, (_, t) => t.replace('#', ' > ').replace(/^ > /, ''));
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+    (_, t, u) => keep(`<a href="${u.replace(/"/g, '&quot;')}">${escapeHtmlText(t)}</a>`));
+  s = escapeHtmlText(s);
+  s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__(.+?)__/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
+  s = s.replace(/(^|[\s(])_([^_\n]+?)_(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
+  s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+  s = s.replace(/==([^=\n]+?)==/g, '<mark>$1</mark>');
+  return s.replace(/\x00(\d+)\x00/g, (_, i) => stash[+i]);
+}
+
+function mdToClipboardHtml(md) {
+  const lines = md.replace(/\r\n?/g, '\n').split('\n');
+  let i = 0;
+  if (lines[0] && lines[0].trim() === '---') {
+    for (let j = 1; j < lines.length; j++) {
+      if (lines[j].trim() === '---') { i = j + 1; break; }
+    }
+  }
+  const LIST_RE = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+  const FENCE_RE = /^\s*(```|~~~)/;
+  const HEADING_RE = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+  const HR_RE = /^\s*([-*_])(\s*\1){2,}\s*$/;
+  const isBlockStart = (l, next) =>
+    FENCE_RE.test(l) || HEADING_RE.test(l) || HR_RE.test(l) || /^\s*>/.test(l) || LIST_RE.test(l) ||
+    (l.includes('|') && next !== undefined && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(next) && next.includes('|'));
+  const out = [];
+  while (i < lines.length) {
+    const l = lines[i];
+    if (!l.trim()) { i++; continue; }
+    if (FENCE_RE.test(l)) {
+      const fence = l.trim().slice(0, 3);
+      const buf = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith(fence)) buf.push(lines[i++]);
+      i++;
+      out.push(`<pre><code>${escapeHtmlText(buf.join('\n'))}</code></pre>`);
+      continue;
+    }
+    let m = HEADING_RE.exec(l);
+    if (m) { out.push(`<h${m[1].length}>${mdInlineToHtml(m[2])}</h${m[1].length}>`); i++; continue; }
+    if (HR_RE.test(l)) { out.push('<hr>'); i++; continue; }
+    if (l.includes('|') && i + 1 < lines.length && lines[i + 1].includes('|') &&
+        /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1])) {
+      const buf = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) buf.push(lines[i++]);
+      const t = parseTableSrc(buf.join('\n'));
+      if (t) {
+        const th = t.header.map(c => `<th>${mdInlineToHtml(c)}</th>`).join('');
+        const body = t.rows.map(r => `<tr>${r.map(c => `<td>${mdInlineToHtml(c)}</td>`).join('')}</tr>`).join('');
+        out.push(`<table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse"><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`);
+      }
+      continue;
+    }
+    if (/^\s*>/.test(l)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+      let title = '';
+      const co = /^\[!([\w-]+)\][+-]?\s*(.*)$/.exec(buf[0]);
+      if (co) {
+        buf.shift();
+        const name = co[2] || (co[1][0].toUpperCase() + co[1].slice(1));
+        title = `<p><strong>${mdInlineToHtml(name)}</strong></p>`;
+      }
+      out.push(`<blockquote>${title}${mdToClipboardHtml(buf.join('\n'))}</blockquote>`);
+      continue;
+    }
+    if (LIST_RE.test(l)) {
+      const items = [];
+      while (i < lines.length) {
+        const lm = LIST_RE.exec(lines[i]);
+        if (lm) {
+          items.push({ indent: lm[1].replace(/\t/g, '    ').length, ordered: /\d/.test(lm[2]), num: parseInt(lm[2], 10), text: lm[3] });
+          i++;
+        } else if (!lines[i].trim()) {
+          // A blank line only continues the list if another item follows.
+          let j = i + 1;
+          while (j < lines.length && !lines[j].trim()) j++;
+          if (j < lines.length && LIST_RE.test(lines[j]) && items.length) { i = j; } else break;
+        } else if (/^\s+\S/.test(lines[i]) && items.length && !FENCE_RE.test(lines[i])) {
+          items[items.length - 1].text += '<br>' + lines[i].trim();
+          i++;
+        } else break;
+      }
+      const stack = [];
+      let h = '';
+      for (const it of items) {
+        while (stack.length && it.indent < stack[stack.length - 1].indent) {
+          h += `</li></${stack.pop().tag}>`;
+        }
+        if (stack.length && it.indent === stack[stack.length - 1].indent) {
+          h += '</li>';
+        } else {
+          const tag = it.ordered ? 'ol' : 'ul';
+          stack.push({ indent: it.indent, tag });
+          h += tag === 'ol' && it.num !== 1 ? `<ol start="${it.num}">` : `<${tag}>`;
+        }
+        let text = it.text;
+        let style = '';
+        const tk = /^\[(.)\]\s+/.exec(text);
+        if (tk) {
+          text = (/[xX]/.test(tk[1]) ? '☑ ' : '☐ ') + text.slice(tk[0].length);
+          style = ' style="list-style:none"';
+        }
+        h += `<li${style}>${mdInlineToHtml(text).replace(/&lt;br&gt;/g, '<br>')}`;
+      }
+      while (stack.length) h += `</li></${stack.pop().tag}>`;
+      out.push(h);
+      continue;
+    }
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && (buf.length === 0 || !isBlockStart(lines[i], lines[i + 1]))) {
+      buf.push(lines[i++].trim());
+    }
+    out.push(`<p>${buf.map(mdInlineToHtml).join('<br>')}</p>`);
+  }
+  return out.join('\n');
+}
+
+async function copyAsFormattedText(view) {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  const html = mdToClipboardHtml(view.state.sliceDoc(sel.from, sel.to));
+  const tmp = document.createElement('div');
+  tmp.style.cssText = 'position:fixed;left:-9999px;top:0;white-space:pre-wrap';
+  tmp.innerHTML = html;
+  document.body.appendChild(tmp);
+  const plain = tmp.innerText;
+  tmp.remove();
+  try {
+    await navigator.clipboard.write([new ClipboardItem({
+      'text/html': new Blob([html], { type: 'text/html' }),
+      'text/plain': new Blob([plain], { type: 'text/plain' }),
+    })]);
+  } catch (_) {
+    try {
+      await navigator.clipboard.writeText(plain);
+      new DataviewNotice('Copiado como texto plano (el formato no está disponible aquí).');
+    } catch (_) {
+      new DataviewNotice('No se pudo escribir en el portapapeles.');
+    }
+  }
+}
+
 class TableMenuView {
   constructor(view) {
     this.view = view;
@@ -6970,6 +7132,7 @@ const tableContextMenuHandler = EditorView.domEventHandlers({
     const items = [
       { label: 'Cortar', action: () => cutSelection(view), disabled: !hasSelection },
       { label: 'Copiar', action: () => copySelection(view), disabled: !hasSelection },
+      { label: 'Copiar como texto con formato', action: () => copyAsFormattedText(view), disabled: !hasSelection },
       { label: 'Pegar',  action: () => pasteAtCursor(view) },
       { label: 'Pegar con formato', action: () => pasteWithFormat(view) },
       { separator: true },
