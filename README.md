@@ -235,6 +235,10 @@ línea al transcluirse — por ejemplo, varios `[[wikilinks]]` escritos uno por 
 blanco entre ellos) aparecen cada uno en su propia línea, no todos seguidos formando un párrafo.
 Una transclusión dentro de otra transclusión no se resuelve de forma recursiva.
 
+También se pueden transcluir bloques con `![[nota#^id]]`: se incrusta el párrafo (o solo el elemento de
+lista) cuya línea termina en `^id`; el marcador no se muestra. Al escribir `[[nota#` el popup de
+sugerencias ofrece, además de las cabeceras, los `^id` de esa nota.
+
 ## Vista previa al pasar el ratón (`Ctrl`/`Cmd` + hover sobre un `[[wikilink]]`)
 
 Manteniendo pulsado `Ctrl` (o `Cmd` en macOS) mientras el cursor del ratón está

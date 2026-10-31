@@ -4697,6 +4697,9 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
               const cbM = TASK_CHECKBOX_RE.exec(line.text);
               if (cbM) {
                 const markStart = lineStart + cbM[1].length;
+                if (markStart > lineStart && /^[ \t]+$/.test(cbM[1])) {
+                  decs.push({ from: lineStart, to: markStart, dec: Decoration.mark({ attributes: { style: 'font-size:0' } }) });
+                }
                 let end = lineStart + cbM[0].length;
                 if (state.doc.sliceString(end, end + 1) === ' ') end++;
                 decs.push({ from: markStart, to: end,
@@ -5097,6 +5100,14 @@ const livePreviewPlugin = ViewPlugin.fromClass(class {
             // (added while processing the enclosing ListItem, above) — skip the plain
             // bullet replacement so the two decorations don't overlap.
             if (taskLines.has(ln)) { return false; }
+            // The source's own leading indentation ("  - nested") renders as real
+            // spaces *before* the marker on the first row only, on top of the
+            // padding-left/text-indent hanging indent — pushing that row's text
+            // right of the continuation rows. Collapse it to zero width.
+            const markLine = state.doc.lineAt(node.from);
+            if (node.from > markLine.from && /^[ \t]+$/.test(state.doc.sliceString(markLine.from, node.from))) {
+              decs.push({ from: markLine.from, to: node.from, dec: Decoration.mark({ attributes: { style: 'font-size:0' } }) });
+            }
             const markText = state.doc.sliceString(node.from, node.to);
             const isBullet = /^[-*+]$/.test(markText);
             let end = node.to;
@@ -5498,6 +5509,11 @@ function currentDocHeadings(state) {
       }
     }
   });
+  // Block ids ("texto ^id") are offered/validated like headings, as level 0.
+  for (let i = 1; i <= state.doc.lines; i++) {
+    const bm = /(?<![A-Za-z0-9^])(\^[A-Za-z0-9-]+)\s*$/.exec(state.doc.line(i).text);
+    if (bm) headings.push({ level: 0, text: bm[1] });
+  }
   return headings;
 }
 
@@ -7537,7 +7553,7 @@ class WikiSuggestView {
 
   rowTitle(it) {
     if (it.type === 'heading') {
-      return escapeHtml('#'.repeat(it.level) + ' ') + highlightMatch(it.text, this.query);
+      return escapeHtml(it.level > 0 ? '#'.repeat(it.level) + ' ' : '') + highlightMatch(it.text, this.query);
     }
     return highlightMatch(it.name, this.query);
   }

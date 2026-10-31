@@ -1705,13 +1705,45 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
                 return;
               }
 
+              const lines = fullText.split(/\r\n|\n/);
+
+              // `![[note#^blockid]]` — a block reference: the block (paragraph, or just the
+              // list item) whose last line ends with ` ^blockid`. The id marker itself is
+              // stripped from the rendered text.
+              if (section.startsWith('^')) {
+                const blockId = section.slice(1).trim().toLowerCase();
+                const idRe = /(?<![A-Za-z0-9^])\^([A-Za-z0-9-]+)\s*$/;
+                const at = lines.findIndex(l => { const m = idRe.exec(l); return !!m && m[1].toLowerCase() === blockId; });
+                if (at === -1) {
+                  webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: 'section-not-found', title });
+                  return;
+                }
+                const stripId = (l: string) => l.replace(idRe, '');
+                let start = at;
+                let end = at;
+                const isListItem = /^\s*([-*+]|\d+[.)])\s/.test(lines[at]);
+                if (!isListItem) {
+                  // id alone on its own line refers to the block just above it
+                  if (stripId(lines[at]).trim() === '') {
+                    end = at - 1;
+                    start = end;
+                    while (start > 0 && lines[start - 1].trim() !== '') { start--; }
+                    if (end >= 0 && lines[end].trim() === '') { start = end = at; }
+                  } else {
+                    while (start > 0 && lines[start - 1].trim() !== '') { start--; }
+                  }
+                }
+                const blockLines = lines.slice(start, end + 1).map(l => stripId(l));
+                webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: null, content: blockLines.join('\n'), title, line: start });
+                return;
+              }
+
               const headings = parseHeadings(fullText);
               const idx = headings.findIndex(h => h.text.toLowerCase() === section.toLowerCase());
               if (idx === -1) {
                 webviewPanel.webview.postMessage({ type: 'transclusion-result', id, error: 'section-not-found', title });
                 return;
               }
-              const lines = fullText.split(/\r\n|\n/);
               const startLine = headings[idx].line;
               let endLine = lines.length;
               for (let j = idx + 1; j < headings.length; j++) {
@@ -1734,6 +1766,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
               if (!targetUri) { webviewPanel.webview.postMessage({ type: 'headings-result', id, headings: [] }); return; }
               const text = (await vscode.workspace.openTextDocument(targetUri)).getText();
               const headings = parseHeadings(text).map(h => ({ level: h.level, text: h.text }));
+              // Block ids ("texto ^id") are offered as level-0 entries, after the headings.
+              for (const l of text.split(/\r?\n/)) {
+                const bm = /(?<![A-Za-z0-9^])(\^[A-Za-z0-9-]+)\s*$/.exec(l);
+                if (bm) { headings.push({ level: 0, text: bm[1] }); }
+              }
               webviewPanel.webview.postMessage({ type: 'headings-result', id, headings });
             } catch {
               webviewPanel.webview.postMessage({ type: 'headings-result', id, headings: [] });
