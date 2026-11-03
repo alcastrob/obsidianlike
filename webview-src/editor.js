@@ -2334,6 +2334,27 @@ class TableWidget extends WidgetType {
         cell.innerHTML = renderTableCellDisplay(value);
       });
 
+      // [[wikilink]] suggestion popup inside the cell (see CellWikiSuggest). Registered
+      // before the main keydown listener below so popup navigation keys win over it.
+      const wikiSuggest = () => cellWikiSuggestFor(this.view);
+      const refreshWikiSuggest = () => { const p = wikiSuggest(); p.cell = cell; p.recompute(); };
+      cell.addEventListener('input', refreshWikiSuggest);
+      cell.addEventListener('mouseup', () => { if (wikiSuggest().open) refreshWikiSuggest(); });
+      cell.addEventListener('keyup', e => {
+        if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key) && wikiSuggest().open) refreshWikiSuggest();
+      });
+      cell.addEventListener('blur', () => { const p = wikiSuggest(); if (p.cell === cell) p.close(); });
+      cell.addEventListener('keydown', e => {
+        const p = wikiSuggest();
+        if (!p.open || p.cell !== cell || e.ctrlKey || e.metaKey) return;
+        let handled = false;
+        if (e.key === 'ArrowDown') { p.moveSelection(1); handled = true; }
+        else if (e.key === 'ArrowUp') { p.moveSelection(-1); handled = true; }
+        else if (e.key === 'Enter') { if (!p.loading) p.accept(); handled = true; }
+        else if (e.key === 'Escape') { p.dismiss(); handled = true; }
+        if (handled) { e.preventDefault(); e.stopImmediatePropagation(); }
+      });
+
       cell.addEventListener('keydown', e => {
         // CM6 already ignores every keydown originating inside this table
         // (see TableWidget.ignoreEvent above) — its own keymap
@@ -5973,11 +5994,13 @@ function renderMarkdownBlock(text) {
       const table = renderMarkdownTable(lines, i);
       if (table) { frag.appendChild(table.el); i = table.next; continue; }
     }
-    if (/^\s*```/.test(line)) {
+    const fenceOpen = /^\s*(```|~~~)/.exec(line);
+    if (fenceOpen) {
       flushPara();
       const codeLines = [];
+      const fenceMark = fenceOpen[1];
       i++;
-      while (i < lines.length && !/^\s*```/.test(lines[i])) { codeLines.push(lines[i]); i++; }
+      while (i < lines.length && !lines[i].trimStart().startsWith(fenceMark)) { codeLines.push(lines[i]); i++; }
       i++; // skip closing fence (if any)
       const pre = document.createElement('pre');
       pre.style.cssText = 'background:rgba(128,128,128,0.15);padding:8px 10px;border-radius:4px;overflow-x:auto;margin:0.4em 0;';
@@ -7522,17 +7545,19 @@ class WikiSuggestView {
     return true;
   }
 
-  accept(index) {
+  buildInsertText(index) {
     const idx = Number.isInteger(index) ? index : this.selected;
-    let insertText;
     if (this.items.length === 0) {
       // No matches — Enter creates the wikilink using the typed text as-is.
       const raw = this.mode === 'headings' ? `${this.notePart}#${this.query}` : this.query;
-      insertText = `[[${raw}]]`;
-    } else {
-      const it = this.items[idx];
-      insertText = it.type === 'heading' ? `[[${this.notePart}#${it.text}]]` : `[[${it.name}]]`;
+      return `[[${raw}]]`;
     }
+    const it = this.items[idx];
+    return it.type === 'heading' ? `[[${this.notePart}#${it.text}]]` : `[[${it.name}]]`;
+  }
+
+  accept(index) {
+    const insertText = this.buildInsertText(index);
     const from = this.openBracketFrom;
     const view = this.view;
     let to = this.pos;
@@ -7660,6 +7685,66 @@ class WikiSuggestView {
       dom.style.top = (coords.bottom - editorRect.top + GAP) + 'px';
     }
   }
+}
+
+// Same popup, but driven by a table cell's contentEditable text instead of the
+// CM6 document (a cell's text isn't part of the CM6 state while being edited,
+// so WikiSuggestView's own doc-based trigger detection never sees it). Reuses
+// all of the base class's item computation / painting / navigation; only the
+// trigger detection, positioning and text replacement are cell-specific.
+// Not a ViewPlugin: instantiated lazily per view by cellWikiSuggestFor().
+class CellWikiSuggest extends WikiSuggestView {
+  currentContext() {
+    const cell = this.cell;
+    if (!cell) return null;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
+    const node = sel.anchorNode;
+    if (!node || node.nodeType !== 3 || !cell.contains(node)) return null;
+    const off = sel.anchorOffset;
+    const m = WIKI_TRIGGER_RE.exec(node.data.slice(0, off));
+    if (!m) return null;
+    this.node = node;
+    return { pos: off, openBracketFrom: m.index, raw: m[1] };
+  }
+
+  render() {
+    if (!this.open || !this.node || !this.node.isConnected) { this.hide(); return; }
+    const r = document.createRange();
+    r.setStart(this.node, Math.min(this.pos, this.node.length));
+    r.collapse(true);
+    let rect = r.getBoundingClientRect();
+    if (!rect.top && !rect.bottom) rect = this.cell.getBoundingClientRect();
+    this.paint({
+      coords: { left: rect.left, top: rect.top, bottom: rect.bottom },
+      editorRect: this.view.dom.getBoundingClientRect(),
+    });
+  }
+
+  accept(index) {
+    const insertText = this.buildInsertText(index);
+    const node = this.node;
+    const from = this.openBracketFrom;
+    let to = this.pos;
+    this.close();
+    if (!node || !node.isConnected) return;
+    const text = node.data;
+    if (text.slice(to, to + 2) === ']]') to += 2;
+    node.data = text.slice(0, from) + insertText + text.slice(to);
+    const r = document.createRange();
+    r.setStart(node, from + insertText.length);
+    r.collapse(true);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+}
+
+const cellWikiSuggestByView = new WeakMap();
+function cellWikiSuggestFor(view) {
+  let p = cellWikiSuggestByView.get(view);
+  if (!p) { p = new CellWikiSuggest(view); cellWikiSuggestByView.set(view, p); }
+  return p;
 }
 
 const wikiSuggestPlugin = ViewPlugin.fromClass(WikiSuggestView);
