@@ -5962,6 +5962,8 @@ function renderEmbedBlock(raw) {
   return null;
 }
 
+// Bullet or ordered list item: [indent, marker, content]
+const LIST_ITEM_RE = /^([ 	]*)([-*+]|\d+[.)])[ 	]+(.*)$/;
 function renderMarkdownBlock(text) {
   const frag = document.createDocumentFragment();
   const lines = (text || '').split(/\r\n|\n/);
@@ -6041,22 +6043,35 @@ function renderMarkdownBlock(text) {
       const node = renderEmbedBlock(embedM[1]);
       if (node) { flushPara(); frag.appendChild(node); i++; continue; }
     }
-    if (/^\s*[-*+]\s+/.test(line)) {
+    if (LIST_ITEM_RE.test(line)) {
       flushPara();
-      const ul = document.createElement('ul');
-      ul.style.cssText = 'margin:0.3em 0;padding-left:1.4em;';
+      // Nested lists (bullet and ordered, mixed freely): a stack of open
+      // lists keyed by indent width. A deeper item opens a child list inside
+      // the previous <li>; a shallower one pops back out.
+      const stack = []; // { indent, ordered, el }
+      let lastLi = null;
       while (i < lines.length) {
-        const lm = /^\s*[-*+]\s+(.*)$/.exec(lines[i]);
+        const lm = LIST_ITEM_RE.exec(lines[i]);
         if (!lm) break;
+        const indent = lm[1].replace(/	/g, '    ').length;
+        const ordered = /^\d/.test(lm[2]);
+        const rest = lm[3];
+        while (stack.length > 1 && indent < stack[stack.length - 1].indent) stack.pop();
+        let top = stack[stack.length - 1];
+        if (top && indent === top.indent && top.ordered !== ordered) { stack.pop(); top = undefined; }
+        if (!top || indent > top.indent) {
+          const el = document.createElement(ordered ? 'ol' : 'ul');
+          el.style.cssText = top ? 'margin:0;padding-left:1.4em;' : 'margin:0.3em 0;padding-left:1.4em;';
+          if (ordered) { const n = parseInt(lm[2], 10); if (n !== 1) el.start = n; }
+          const parent = stack[stack.length - 1];
+          if (parent && lastLi) lastLi.appendChild(el); else frag.appendChild(el);
+          top = { indent, ordered, el };
+          stack.push(top);
+        }
         const li = document.createElement('li');
         // Task checkbox lines ("- [ ] .../- [x] ...") get the same
         // checkbox + done styling as the live editor's TaskCheckboxWidget
-        // (read-only here — reused via a plain disabled <input>/status-icon
-        // <span>, same convention already used for a dataview TASK block's
-        // rows, since editing a transcluded task in place doesn't make
-        // sense). Previously fell through to the plain-<li> branch below,
-        // which just ran the whole line (including its own "[ ] "/"[x] "
-        // literal text) through renderCell — no checkbox, no strikethrough.
+        // (read-only here: editing a transcluded task in place makes no sense).
         const taskM = TASK_LINE_RE.exec(lines[i]);
         if (taskM) {
           const statusChar = taskM[3];
@@ -6079,12 +6094,12 @@ function renderMarkdownBlock(text) {
           desc.innerHTML = renderCell(taskM[4]);
           li.appendChild(desc);
         } else {
-          li.innerHTML = renderCell(lm[1]);
+          li.innerHTML = renderCell(rest);
         }
-        ul.appendChild(li);
+        top.el.appendChild(li);
+        lastLi = li;
         i++;
       }
-      frag.appendChild(ul);
       continue;
     }
     if (!line.trim()) { flushPara(); i++; continue; }
