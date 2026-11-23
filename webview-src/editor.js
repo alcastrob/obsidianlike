@@ -6750,6 +6750,17 @@ function pasteAtCursor(view) {
 // Copilot answer, a web page...) and inserts it converted to markdown via
 // htmlToMarkdown. Plain Ctrl+V / "Pegar" stay plain-text only (CM6's default).
 // Falls back to the plain text when there's no convertible HTML.
+// Plain-text Word/Outlook lists ("•    item", "o    sub-item", "▪    sub-sub")
+// → markdown bullets nested by the marker Word uses at each level.
+const PLAIN_BULLET_LEVEL = { '•': 0, '·': 0, '●': 0, 'o': 1, '◦': 1, '○': 1, '▪': 2, '■': 2, '§': 2, '': 2 };
+function plainBulletsToMd(text) {
+  return text.replace(/\r\n?/g, '\n').split('\n').map(l => {
+    const m = /^[ \t]*([•·●o◦○▪■§])[ \t ]+(\S.*)$/.exec(l);
+    if (!m || (m[1] === 'o' && !/^[ \t]*o[ \t ]{2,}/.test(l))) return l;
+    return '  '.repeat(PLAIN_BULLET_LEVEL[m[1]]) + '- ' + m[2];
+  }).join('\n');
+}
+
 async function pasteWithFormat(view) {
   let md = null, plain = '';
   try {
@@ -6767,7 +6778,7 @@ async function pasteWithFormat(view) {
       plain = await navigator.clipboard.readText();
     }
   } catch (_) { /* clipboard read denied/unavailable */ }
-  const text = md != null ? md : plain;
+  const text = md != null ? md : plainBulletsToMd(plain);
   if (!text) {
     new DataviewNotice('El portapapeles está vacío o no se puede leer.');
     return;
@@ -8451,12 +8462,23 @@ function htmlListToMd(list) {
   let n = parseInt(list.getAttribute('start') || '1', 10);
   if (isNaN(n)) n = 1;
   const lines = [];
+  let prevPad = '  ';
   for (const li of Array.from(list.children)) {
-    if (li.tagName.toUpperCase() !== 'LI') continue;
+    const childTag = li.tagName.toUpperCase();
+    // Google Docs / Outlook / OneNote emit a sub-list as a direct child of the
+    // parent list (<ul><li>a</li><ul><li>b</li></ul></ul>) instead of inside
+    // the <li>: nest it under the previous item rather than dropping it.
+    if (childTag === 'UL' || childTag === 'OL') {
+      const sub = htmlListToMd(li);
+      if (sub) lines.push(...sub.split('\n').map(l => (l ? prevPad + l : '')));
+      continue;
+    }
+    if (childTag !== 'LI') continue;
     let marker = ordered ? `${n++}. ` : '- ';
     const cb = li.querySelector(':scope > input[type="checkbox"], :scope > p > input[type="checkbox"]');
     if (cb) { marker += cb.checked ? '[x] ' : '[ ] '; cb.remove(); }
     const pad = ' '.repeat(ordered ? marker.replace(/\[.\] $/, '').length : 2);
+    prevPad = pad;
     const inner = htmlBlocksToMd(li);
     // Sub-lists come back as their own block; everything else (a <p> per
     // paragraph, as ChatGPT emits) is continuation text of this item.
@@ -8519,6 +8541,59 @@ function htmlBlockToMd(el) {
   }
 }
 
+// Word / Outlook don't emit real lists: every item is a paragraph styled
+// `mso-list:l0 level2 lfo1` whose bullet/number is literal text inside a
+// `mso-list:Ignore` span. Rebuilds runs of such paragraphs into nested
+// <ul>/<ol><li> so htmlListToMd handles them like any other list.
+const MSO_ITEM_RE = /mso-list\s*:\s*l\d+\s+level(\d+)/i;
+const MSO_IGNORE_RE = /mso-list\s*:\s*ignore/i;
+function normalizeMsoLists(doc) {
+  const styleOf = el => (el.getAttribute && el.getAttribute('style')) || '';
+  const isItem = n => n && n.nodeType === 1 && MSO_ITEM_RE.test(styleOf(n));
+  const done = new Set();
+  for (const first of Array.from(doc.body.querySelectorAll('[style]'))) {
+    if (done.has(first) || !isItem(first)) continue;
+    // Collect the run of consecutive item siblings (whitespace/comments in between are fine).
+    const run = [];
+    for (let n = first; n; n = n.nextSibling) {
+      if (isItem(n)) { run.push(n); done.add(n); continue; }
+      if (n.nodeType === 8 || (n.nodeType === 3 && !n.nodeValue.trim())) continue;
+      break;
+    }
+    const stack = [];
+    let root = null;
+    for (const p of run) {
+      const level = Number(MSO_ITEM_RE.exec(styleOf(p))[1]);
+      let marker = '';
+      for (const sp of Array.from(p.querySelectorAll('[style]'))) {
+        if (MSO_IGNORE_RE.test(styleOf(sp))) { marker = marker || sp.textContent; sp.remove(); }
+      }
+      marker = marker.replace(/[\s ]+/g, '');
+      const ordered = /^(\d+|[a-zA-Z]|[ivxlcdmIVXLCDM]+)[.)]$/.test(marker) && marker !== 'o';
+      const li = doc.createElement('li');
+      while (p.firstChild) li.appendChild(p.firstChild);
+      while (stack.length && stack[stack.length - 1].level > level) stack.pop();
+      let top = stack[stack.length - 1];
+      if (!top || top.level < level) {
+        const list = doc.createElement(ordered ? 'ol' : 'ul');
+        const num = parseInt(marker, 10);
+        if (ordered && !isNaN(num) && num !== 1) list.setAttribute('start', String(num));
+        if (top) {
+          const parentLi = top.list.lastElementChild;
+          (parentLi || top.list).appendChild(list);
+        } else {
+          root = list;
+        }
+        top = { level, list };
+        stack.push(top);
+      }
+      top.list.appendChild(li);
+    }
+    if (root) run[0].parentNode.insertBefore(root, run[0]);
+    for (const p of run) p.remove();
+  }
+}
+
 // Returns markdown for a clipboard HTML payload, or null when it has no
 // formatting worth converting (let the default plain-text paste run).
 function htmlToMarkdown(html) {
@@ -8526,6 +8601,7 @@ function htmlToMarkdown(html) {
   let doc;
   try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch (_) { return null; }
   if (!doc || !doc.body) return null;
+  normalizeMsoLists(doc);
   const md = htmlBlocksToMd(doc.body).join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
   return md || null;
 }
