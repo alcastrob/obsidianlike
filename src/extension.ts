@@ -1408,10 +1408,14 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
       Math.max(0, vscode.workspace.getConfiguration('obsidianLike').get<number>('autoSaveDelay', 3000));
 
     let autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
+    // True while the note's title field has focus: idle autosave is suspended and
+    // re-armed when the title loses focus (see 'title-editing' message).
+    let titleEditing = false;
     const scheduleAutoSave = () => {
       clearTimeout(autoSaveTimer);
+      if (titleEditing) { return; }
       autoSaveTimer = setTimeout(() => {
-        if (!document.isDirty) { return; }
+        if (titleEditing || !document.isDirty) { return; }
         void (async () => {
           // Stat the real file before writing, not after — this is the
           // actual guard against the cross-window clobber described above.
@@ -1581,6 +1585,11 @@ class MarkdownDocumentProvider implements vscode.CustomTextEditorProvider {
 
         } else if (msg.type === 'sync') {
           applySync(msg.content as string);
+
+        } else if (msg.type === 'title-editing') {
+          titleEditing = !!msg.editing;
+          if (titleEditing) { clearTimeout(autoSaveTimer); }
+          else if (document.isDirty) { scheduleAutoSave(); }
 
         } else if (msg.type === 'rename') {
           const newName = (msg.newName as string || '').trim();

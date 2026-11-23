@@ -10000,18 +10000,24 @@ const titleEl = document.getElementById('doc-title');
 let currentTitle = init.title || '';
 titleEl.textContent = currentTitle;
 
-let renameTimer = null;
+// The rename is committed only when the title loses focus (Enter/Escape move focus to the
+// editor, which fires blur too). Renaming on a typing pause used to rename the file to a
+// half-typed name, steal focus, and launch overlapping wiki-link fix-ups. While the title
+// has focus the host also suspends its idle autosave (title-editing messages).
+titleEl.addEventListener('focus', () => {
+  vscode.postMessage({ type: 'title-editing', editing: true });
+});
 
-titleEl.addEventListener('input', () => {
-  clearTimeout(renameTimer);
-  renameTimer = setTimeout(() => {
-    const newName = titleEl.textContent.trim();
-    if (newName && newName !== currentTitle) {
-      currentTitle = newName;
-      vscode.postMessage({ type: 'sync', content: view.state.doc.toString() });
-      vscode.postMessage({ type: 'rename', newName });
-    }
-  }, 800);
+titleEl.addEventListener('blur', () => {
+  const newName = titleEl.textContent.trim();
+  if (newName && newName !== currentTitle) {
+    currentTitle = newName;
+    vscode.postMessage({ type: 'sync', content: view.state.doc.toString() });
+    vscode.postMessage({ type: 'rename', newName });
+  } else if (!newName) {
+    titleEl.textContent = currentTitle;
+  }
+  vscode.postMessage({ type: 'title-editing', editing: false });
 });
 
 titleEl.addEventListener('keydown', e => {
